@@ -3,12 +3,13 @@
 ERPNEXT_DIR := infra/erpnext
 ERPNEXT_COMPOSE := docker compose -p ai-retail-erpnext -f $(ERPNEXT_DIR)/docker-compose.yml
 
-.PHONY: help erpnext-up erpnext-down erpnext-bootstrap erpnext-logs erpnext-status erpnext-nuke
+.PHONY: help erpnext-up erpnext-down erpnext-bootstrap erpnext-seed erpnext-logs erpnext-status erpnext-nuke
 
 help:
 	@echo "Targets:"
 	@echo "  erpnext-up         start ERPNext stack (mariadb + redis + frappe + nginx on :8080)"
 	@echo "  erpnext-bootstrap  create the retail.localhost site, install ERPNext app, generate API keys"
+	@echo "  erpnext-seed       project the spine demo data into ERPNext (idempotent)"
 	@echo "  erpnext-status     show running containers"
 	@echo "  erpnext-logs       tail logs from the stack"
 	@echo "  erpnext-down       stop the stack (volumes preserved)"
@@ -31,3 +32,6 @@ erpnext-logs:
 
 erpnext-bootstrap:
 	bash $(ERPNEXT_DIR)/bootstrap.sh
+
+erpnext-seed:
+	python3 $(ERPNEXT_DIR)/seed.py
