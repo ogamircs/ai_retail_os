@@ -18,6 +18,7 @@ ADMIN_FIRST="${MAUTIC_ADMIN_FIRST:-Retail}"
 ADMIN_LAST="${MAUTIC_ADMIN_LAST:-Operator}"
 DB_USER="${MAUTIC_DB_USER:-mautic}"
 DB_PASSWORD="${MAUTIC_DB_PASSWORD:-retail-db}"
+DB_ROOT_PASSWORD="${MAUTIC_DB_ROOT_PASSWORD:-retail-db}"
 DB_NAME="${MAUTIC_DB_NAME:-mautic}"
 SITE_URL="${MAUTIC_SITE_URL:-http://localhost:8081}"
 
@@ -37,8 +38,12 @@ for _ in $(seq 1 90); do
 done
 
 echo ">> waiting for the database"
+# Pass the root password via env so we don't auth as the container's run-user
+# with the wrong creds. MAUTIC_DB_PASSWORD ≠ MAUTIC_DB_ROOT_PASSWORD when the
+# operator overrides one but not the other — that flake costs ~120s of timeout.
 for _ in $(seq 1 60); do
-  if $COMPOSE exec -T db mysqladmin ping -h localhost --password="${DB_PASSWORD}" >/dev/null 2>&1; then
+  if $COMPOSE exec -T -e MYSQL_PWD="${DB_ROOT_PASSWORD}" db \
+      mysqladmin ping -h localhost -u root >/dev/null 2>&1; then
     break
   fi
   sleep 2
@@ -49,25 +54,40 @@ if $COMPOSE exec -T mautic_web bash -c "test -s /var/www/html/config/local.php";
   echo ">> mautic already installed — skipping mautic:install"
 else
   echo ">> running mautic:install (first run takes 30-90s)"
-  $COMPOSE exec -T mautic_web bash -c "
-    php bin/console mautic:install \
-      --admin_email='${ADMIN_EMAIL}' \
-      --admin_username='${ADMIN_USER}' \
-      --admin_password='${ADMIN_PASSWORD}' \
-      --admin_firstname='${ADMIN_FIRST}' \
-      --admin_lastname='${ADMIN_LAST}' \
-      --db_driver=pdo_mysql \
-      --db_host=db \
-      --db_port=3306 \
-      --db_user='${DB_USER}' \
-      --db_password='${DB_PASSWORD}' \
-      --db_name='${DB_NAME}' \
-      --mailer_from_email='${ADMIN_EMAIL}' \
-      --mailer_from_name='AI Retail OS' \
-      --mailer_dsn='null://null' \
-      --no-interaction \
-      '${SITE_URL}'
-  "
+  # Pass every value via `compose exec -e` and reference inside the container as
+  # an env var. This keeps any shell-meta character (apostrophe, $, backtick)
+  # quarantined inside the env value — never expanded into the install command
+  # by either the host or container shell. Symfony console reads "$BS_X" as
+  # plain text, not as a shell expression.
+  $COMPOSE exec -T \
+    -e BS_ADMIN_EMAIL="$ADMIN_EMAIL" \
+    -e BS_ADMIN_USER="$ADMIN_USER" \
+    -e BS_ADMIN_PASSWORD="$ADMIN_PASSWORD" \
+    -e BS_ADMIN_FIRST="$ADMIN_FIRST" \
+    -e BS_ADMIN_LAST="$ADMIN_LAST" \
+    -e BS_DB_USER="$DB_USER" \
+    -e BS_DB_PASSWORD="$DB_PASSWORD" \
+    -e BS_DB_NAME="$DB_NAME" \
+    -e BS_SITE_URL="$SITE_URL" \
+    mautic_web bash -c '
+      php bin/console mautic:install \
+        --admin_email="$BS_ADMIN_EMAIL" \
+        --admin_username="$BS_ADMIN_USER" \
+        --admin_password="$BS_ADMIN_PASSWORD" \
+        --admin_firstname="$BS_ADMIN_FIRST" \
+        --admin_lastname="$BS_ADMIN_LAST" \
+        --db_driver=pdo_mysql \
+        --db_host=db \
+        --db_port=3306 \
+        --db_user="$BS_DB_USER" \
+        --db_password="$BS_DB_PASSWORD" \
+        --db_name="$BS_DB_NAME" \
+        --mailer_from_email="$BS_ADMIN_EMAIL" \
+        --mailer_from_name="AI Retail OS" \
+        --mailer_dsn="null://null" \
+        --no-interaction \
+        "$BS_SITE_URL"
+    '
 fi
 
 echo ">> enabling API + basic-auth (idempotent)"
