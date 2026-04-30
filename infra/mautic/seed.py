@@ -97,11 +97,27 @@ def _request(method: str, path: str, body: dict | None = None, retries: int = 2)
     raise last_err  # type: ignore[misc]
 
 
-def search_one(endpoint: str, search: str, key: str) -> dict | None:
-    """Mautic search syntax: `?search=email:foo` / `?search=alias:bar`.
-    Returns the first matching row from the keyed dict response, or None.
+def filter_one(
+    endpoint: str,
+    filters: list[tuple[str, str, str]],
+    key: str,
+) -> dict | None:
+    """Mautic API column filter via the `where[]` syntax.
+
+    `filters` is a list of `(column, expr, value)` tuples — e.g.
+    `[("alias", "eq", "seg_loyalists")]`. We deliberately avoid the free-text
+    `search=` and `searchFilter=` parameters because their behaviour differs
+    per endpoint (Segments doesn't honour `search=alias:foo`; Campaigns
+    treats `[retail-os:<id>]` as colon-delimited and matches inconsistently).
+    `where[]` is uniform across endpoints and matches the named column with
+    the named expression — what we actually want for idempotency.
     """
-    qs = urlencode({"search": search, "limit": 1})
+    params: list[tuple[str, str]] = [("limit", "1")]
+    for i, (col, expr, val) in enumerate(filters):
+        params.append((f"where[{i}][col]", col))
+        params.append((f"where[{i}][expr]", expr))
+        params.append((f"where[{i}][val]", val))
+    qs = urlencode(params)
     status, body = _request("GET", f"/api/{endpoint}?{qs}")
     if status != 200:
         return None
@@ -145,7 +161,7 @@ def ensure_segments(spine: sqlite3.Connection) -> dict[str, int]:
     out: dict[str, int] = {}
     for seg_id, name, tier, channel, notes in rows:
         alias = seg_id.replace("-", "_")  # Mautic alias must be alnum + underscore
-        existing = search_one("segments", f"alias:{alias}", "lists")
+        existing = filter_one("segments", [("alias", "eq", alias)], "lists")
         if existing:
             print(f"   Segment {alias} already present (id={existing['id']})")
             out[seg_id] = int(existing["id"])
@@ -180,7 +196,7 @@ def ensure_contacts(seg_map: dict[str, int], spine: sqlite3.Connection) -> None:
         meta = seg_meta[seg_id]
         for first, last in PERSONAS[:CONTACTS_PER_SEGMENT]:
             email = f"{first.lower()}.{last.lower()}.{seg_id}@retail.local"
-            existing = search_one("contacts", f"email:{email}", "contacts")
+            existing = filter_one("contacts", [("email", "eq", email)], "contacts")
             if existing:
                 continue
             post_new(
@@ -224,8 +240,15 @@ def ensure_campaigns(spine: sqlite3.Connection) -> None:
     ) in rows:
         # Mautic campaign names aren't unique in the DB; we use the spine
         # campaign_id as a tag in the description so re-runs find the existing.
+        # `like` with %marker% does substring match, scoped to the description
+        # column — avoids the free-text search ambiguity around the `:` in the
+        # marker.
         marker = f"[retail-os:{cmp_id}]"
-        existing = search_one("campaigns", marker, "campaigns")
+        existing = filter_one(
+            "campaigns",
+            [("description", "like", f"%{marker}%")],
+            "campaigns",
+        )
         if existing:
             print(f"   Campaign {cmp_id} already present (id={existing['id']})")
             continue
