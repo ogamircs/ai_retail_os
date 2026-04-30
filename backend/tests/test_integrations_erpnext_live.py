@@ -276,6 +276,32 @@ class ERPNextLiveApplyTest(unittest.TestCase):
         result = applied.get("result") or {}
         self.assertIn("error", result, msg=result)
 
+    def test_apply_route_returns_422_on_error_status(self) -> None:
+        """The HTTP apply route must surface adapter-level error as 422 so
+        the cockpit drawer renders the red chip. Before the fix the route
+        returned 200 with `status=error` and the drawer treated it as
+        success."""
+        from fastapi.testclient import TestClient
+
+        from app.integrations.systems import ADAPTERS
+        from app.main import app
+
+        adapter = next(a for a in ADAPTERS if a.definition.system_id == "erpnext")
+        outbox = adapter.propose_outbound(
+            action_queue_id=None,
+            agent="Replenishment",
+            action_type="po_held",
+            title="P4 422 route test — empty pos payload",
+            payload={"category": "summer_apparel", "pos": []},
+        )
+        with TestClient(app) as client:
+            response = client.post(f"/api/integrations/erpnext/actions/{outbox['id']}/apply")
+        self.assertEqual(response.status_code, 422, msg=response.text)
+        body = response.json()
+        # FastAPI HTTPException(detail=…) renders as {"detail": "..."}.
+        self.assertIn("detail", body, msg=body)
+        self.assertTrue(body["detail"], msg=body)
+
     def test_unsupported_action_type_falls_back_to_base(self) -> None:
         """Action types ERPNext doesn't know about (e.g. campaign_brief) must
         not break the apply flow — they fall back to the base adapter's

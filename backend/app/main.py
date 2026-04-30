@@ -143,8 +143,22 @@ def get_integration_records(
 @app.post("/api/integrations/{system}/actions/{action_id}/apply")
 def apply_integration_action(system: str, action_id: int):
     result = integration_registry.apply_outbound(system, action_id)
+    # Top-level "error" key = registry-level rejection (unknown system_id, etc.).
     if "error" in result:
         raise HTTPException(404, result["error"])
+    # `status == "error"` = adapter ran but the external write didn't land
+    # (no matching ERPNext row, empty payload, ERPNext rejected the doc).
+    # The outbox row is already updated to status=error in the DB; we surface
+    # it as 422 so the cockpit drawer's apply path catches and renders the
+    # red chip instead of the green "applied" chip on a no-op.
+    if result.get("status") == "error":
+        nested = result.get("result") or {}
+        message = (
+            nested.get("error")
+            or nested.get("message")
+            or "external apply failed; outbox left in error state"
+        )
+        raise HTTPException(422, message)
     return result
 
 
