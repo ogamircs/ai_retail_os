@@ -1,0 +1,75 @@
+.data-rail {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  outline: none;
+}
+.data-rail:focus-within { box-shadow: inset 0 0 0 1px var(--line-hot); }
+
+.data-rail .rail-header {
+  display: flex;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  flex-shrink: 0;
+}
+.data-rail .tab {
+  border: none;
+  border-right: 1px solid var(--line);
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-xs);
+  color: var(--ink-dim);
+  letter-spacing: 0.04em;
+  background: transparent;
+  font-weight: 600;
+}
+.data-rail .tab.active {
+  color: var(--amber);
+  background: var(--panel-2);
+}
+
+.data-rail .rail-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.data-rail .rail-empty {
+  padding: var(--sp-4);
+  color: var(--ink-mute);
+  text-align: center;
+}
+.data-rail .rail-empty.err { color: var(--bad); }
+
+.data-rail table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-sm);
+}
+.data-rail th,
+.data-rail td {
+  padding: var(--sp-1) var(--sp-2);
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+.data-rail th {
+  color: var(--ink-dim);
+  font-weight: 500;
+  font-size: var(--fs-xs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+  user-select: none;
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+  white-space: nowrap;
+}
+.data-rail th.active { color: var(--amber); }
+.data-rail tbody tr:hover { background: var(--panel-2); }
+
+.data-rail td.num,
+.data-rail th.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}

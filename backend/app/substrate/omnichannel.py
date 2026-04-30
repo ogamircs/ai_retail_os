@@ -15,6 +15,7 @@ from app.spine.db import conn
 from app.spine.events import append_event
 from app.spine.artifacts import write_artifact
 from app.spine.kg import upsert_edge, upsert_node
+from app.integrations import registry as integration_registry
 
 
 def _now() -> datetime:
@@ -66,6 +67,22 @@ def create_action(
     }
 
 
+def _propose_external_actions(action: dict, systems: list[str], payload: dict) -> list[dict]:
+    proposals = []
+    for system_id in systems:
+        proposal = integration_registry.propose_outbound(
+            system_id=system_id,
+            action_queue_id=action["id"],
+            agent=action["owner"],
+            action_type=action["action_type"],
+            title=action["title"],
+            payload=payload,
+        )
+        if "error" not in proposal:
+            proposals.append(proposal)
+    return proposals
+
+
 def list_action_queue(limit: int = 50) -> list[dict]:
     with conn() as c:
         rows = c.execute(
@@ -73,7 +90,7 @@ def list_action_queue(limit: int = 50) -> list[dict]:
             "FROM action_queue ORDER BY id DESC LIMIT ?",
             (limit,),
         ).fetchall()
-    return [
+    actions = [
         {
             "id": r["id"],
             "ts": r["ts"],
@@ -86,6 +103,14 @@ def list_action_queue(limit: int = 50) -> list[dict]:
         }
         for r in rows
     ]
+    outbox_by_action: dict[int, list[dict]] = {}
+    for item in integration_registry.outbox_actions(limit=300):
+        action_id = item.get("action_queue_id")
+        if action_id is not None:
+            outbox_by_action.setdefault(action_id, []).append(item)
+    for action in actions:
+        action["external_actions"] = outbox_by_action.get(action["id"], [])
+    return actions
 
 
 def list_campaigns(limit: int = 50) -> list[dict]:
@@ -302,7 +327,7 @@ def create_campaign_brief(category: str | None = None) -> dict:
         body_md=body,
         refs=[rec["category"], rec["segment_id"]],
     )
-    create_action(
+    action = create_action(
         owner="Marketing",
         action_type="campaign_brief",
         title=title,
@@ -310,13 +335,14 @@ def create_campaign_brief(category: str | None = None) -> dict:
         payload=rec,
         artifact_id=artifact_id,
     )
+    external_actions = _propose_external_actions(action, ["mautic"], rec)
     append_event(
         agent="Marketing",
         kind="proposal",
         payload={"action": "campaign_brief", "title": title, **rec},
         artifact_id=artifact_id,
     )
-    return {"title": title, "artifact_id": artifact_id, **rec}
+    return {"title": title, "artifact_id": artifact_id, "external_actions": external_actions, **rec}
 
 
 def request_approval(owner: str, title: str, reason: str, payload: dict | None = None) -> dict:
@@ -344,7 +370,8 @@ def create_promotion(category: str, offer: str, discount_percent: float, reason:
     }
     event_id = append_event(agent="Pricing & Promo", kind="action", payload=payload)
     action = create_action("Pricing & Promo", "promotion", f"{category.replace('_', ' ').title()} promotion", "proposed", payload)
-    return {"event_id": event_id, "action_id": action["id"], **payload}
+    external_actions = _propose_external_actions(action, ["erpnext"], payload)
+    return {"event_id": event_id, "action_id": action["id"], "external_actions": external_actions, **payload}
 
 
 def launch_mock_campaign(
@@ -415,10 +442,11 @@ def launch_mock_campaign(
     }
     event_id = append_event(agent="Marketing", kind="campaign_launch", payload=payload)
     action = create_action("Marketing", "campaign_launch", campaign_title, "launched", payload)
+    external_actions = _propose_external_actions(action, ["mautic"], payload)
     upsert_node(campaign_id, "campaign", payload)
     upsert_edge(category, "promoted_by", campaign_id)
     upsert_edge(campaign_id, "targets", segment_id)
-    return {"campaign_id": campaign_id, "event_id": event_id, "action_id": action["id"], **payload}
+    return {"campaign_id": campaign_id, "event_id": event_id, "action_id": action["id"], "external_actions": external_actions, **payload}
 
 
 def measure_campaign(campaign_id: str | None = None) -> dict:
@@ -526,7 +554,8 @@ def hold_or_expedite_po(category: str, mode: str = "hold", reason: str = "") -> 
     }
     event_id = append_event(agent="Replenishment", kind="action", payload=payload)
     action = create_action("Replenishment", f"po_{status}", f"{status.title()} inbound POs", status, payload)
-    return {"event_id": event_id, "action_id": action["id"], **payload}
+    external_actions = _propose_external_actions(action, ["erpnext", "openboxes"], payload)
+    return {"event_id": event_id, "action_id": action["id"], "external_actions": external_actions, **payload}
 
 
 def allocate_inventory(category: str) -> dict:
@@ -559,7 +588,8 @@ def allocate_inventory(category: str) -> dict:
     }
     event_id = append_event(agent="Merchandiser", kind="action", payload=payload)
     action = create_action("Merchandiser", "store_transfer", "Rebalance category inventory", "proposed", payload)
-    return {"event_id": event_id, "action_id": action["id"], **payload}
+    external_actions = _propose_external_actions(action, ["erpnext", "medusa", "openboxes"], payload)
+    return {"event_id": event_id, "action_id": action["id"], "external_actions": external_actions, **payload}
 
 
 def route_fulfillment(category: str) -> dict:
@@ -580,7 +610,8 @@ def route_fulfillment(category: str) -> dict:
     }
     event_id = append_event(agent="Fulfillment", kind="action", payload=payload)
     action = create_action("Fulfillment", "fulfillment_routing", "Route omnichannel demand", "proposed", payload)
-    return {"event_id": event_id, "action_id": action["id"], **payload}
+    external_actions = _propose_external_actions(action, ["medusa"], payload)
+    return {"event_id": event_id, "action_id": action["id"], "external_actions": external_actions, **payload}
 
 
 def create_store_task(store_id: str, title: str, priority: str = "normal", reason: str = "") -> dict:

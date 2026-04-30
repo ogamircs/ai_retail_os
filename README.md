@@ -90,6 +90,32 @@ Marketing and Analyst can read campaign records, orders, sales, and prior spine 
 - `GET /api/action-queue`
 - `GET /api/kg/neighborhood?id=summer_apparel`
 
+## Open-source integration layer
+
+The demo now has a connector layer under `backend/app/integrations/`. It keeps the current mock retail spine as the normalized read model, while adding external-system status, sync telemetry, external ID mapping, record cache, and approval-gated outbound actions.
+
+Default behavior is mock mode. If no external credentials are present, each adapter mirrors the seeded demo data into the integration cache and never mutates an outside system.
+
+Integration endpoints:
+
+- `GET /api/integrations/systems`
+- `POST /api/integrations/{system}/sync`
+- `GET /api/integrations/sync-runs`
+- `GET /api/integrations/records?system=erpnext&domain=Item&local_id=SUM-001`
+- `POST /api/integrations/{system}/actions/{action_id}/apply`
+- `POST /api/integrations/mautic/webhook`
+
+Supported adapter IDs:
+
+- `erpnext` — ERP, POS invoices, stock, suppliers, purchase orders, pricing/stock-entry drafts
+- `mautic` — marketing segments, campaign drafts, webhook telemetry
+- `medusa` — ecommerce orders, inventory levels, fulfillment/reservation proposals
+- `openboxes` — warehouse/DC inventory, inbound receiving and stock movement proposals
+- `akeneo` — product/category enrichment and PIM completeness signals
+- `superset` — BI dashboard references over the retail spine
+
+Optional env vars are listed in `backend/.env.example`. Leave them blank for mock mode.
+
 ## Provider swap
 
 In the header, change the provider dropdown (Anthropic / OpenAI / Google). Identical behavior, different model. Requires the corresponding API key in `.env`.
@@ -97,6 +123,7 @@ In the header, change the provider dropdown (Anthropic / OpenAI / Google). Ident
 ## What's stubbed (non-goals)
 
 - Real production integrations to POS, OMS, WMS/3PL, CRM/CDP, EDI, ad networks, payment networks, or finance systems
+- External-system write-back without explicit approval. Proposed writes go through `outbox_actions` first.
 - Loop Scheduler is mocked through measurement tools rather than cron
 - Policy & Spec Registry as a separate human-editable surface (currently embedded as system prompts)
 - Auth, multi-tenancy

@@ -59,5 +59,9 @@ class Settings:
             raise ValueError(f"unknown provider: {provider}")
         os.environ["LLM_PROVIDER"] = provider
 
+    def integration_value(self, key: str) -> str | None:
+        value = os.getenv(key)
+        return value.strip() if value and value.strip() else None
+
 
 settings = Settings()

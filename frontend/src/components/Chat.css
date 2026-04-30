@@ -1,0 +1,103 @@
+.chat {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.chat-header {
+  display: flex;
+  align-items: center;
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--line);
+  font-size: var(--fs-xs);
+  flex-shrink: 0;
+}
+.chat-header .spacer { flex: 1; }
+.chat-header .trace-toggle {
+  border: none;
+  color: var(--ink-dim);
+  background: transparent;
+}
+.chat-header .trace-toggle.on { color: var(--amber); }
+
+.chat-body {
+  flex: 1;
+  display: grid;
+  grid-template-rows: 1fr;
+  min-height: 0;
+}
+.chat-body.split { grid-template-rows: 1.2fr 1fr; }
+
+.chat-thread {
+  overflow: auto;
+  padding: var(--sp-3);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-loose);
+}
+.chat-empty .label { margin-bottom: var(--sp-2); }
+.chat-empty ul { list-style: none; padding: 0; margin: 0; }
+.chat-empty li {
+  padding: var(--sp-1) 0;
+  color: var(--ink-dim);
+  cursor: pointer;
+  border-bottom: 1px dashed var(--line);
+}
+.chat-empty li:hover { color: var(--amber); }
+
+.turn { margin-bottom: var(--sp-3); }
+.user-line {
+  color: var(--amber);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.cos-line {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+.cos-line .ts { color: var(--ink-mute); flex-shrink: 0; }
+.cos-line .who { font-weight: 600; flex-shrink: 0; }
+.cos-line .text {
+  color: var(--ink);
+  white-space: pre-wrap;
+  word-break: break-word;
+  flex: 1;
+  min-width: 0;
+}
+
+.chat-trace {
+  border-top: 1px solid var(--line);
+  overflow: auto;
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-xs);
+}
+.chat-trace .label { margin-bottom: var(--sp-2); }
+.chat-trace .empty { color: var(--ink-mute); }
+.chat-trace .trace-row {
+  display: flex;
+  gap: var(--sp-2);
+  padding: 1px 0;
+}
+.chat-trace .who { font-weight: 600; min-width: 7em; flex-shrink: 0; }
+.chat-trace .kind { color: var(--ink-dim); min-width: 8em; flex-shrink: 0; }
+.chat-trace .detail { color: var(--ink); }
+
+.chat-input {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-top: 1px solid var(--line);
+  flex-shrink: 0;
+}
+.chat-input .prompt { color: var(--amber); padding-top: 6px; }
+.chat-input textarea {
+  flex: 1;
+  border: none;
+  resize: none;
+  outline: none;
+  color: var(--ink);
+  background: transparent;
+  font: inherit;
+}
+.chat-input textarea::placeholder { color: var(--ink-mute); }
