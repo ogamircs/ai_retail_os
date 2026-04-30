@@ -114,17 +114,27 @@ def _tool_write_artifact(args: dict) -> dict:
     """Persist the critique. We force kind='critique' regardless of what the
     model passes so the artifact viewer can route critique vs report cleanly,
     and so A4's stage chip in the cockpit doesn't depend on prompt fidelity.
-    Refs are required — a critique without a backlink to the audited draft
-    breaks the contract and would orphan the critique in downstream review/
-    revision flows.
+    Refs are required AND each ref must resolve to a real artifact — a critique
+    without a real backlink (empty list, or a hallucinated/mistyped id) breaks
+    the contract and would orphan the critique in downstream review/revision
+    flows.
     """
     raw_refs = args.get("refs")
-    refs = [r for r in raw_refs if isinstance(r, str) and r.strip()] if isinstance(raw_refs, list) else []
+    refs = [r.strip() for r in raw_refs if isinstance(r, str) and r.strip()] if isinstance(raw_refs, list) else []
     if not refs:
         return {
             "error": (
                 "write_artifact requires refs to be a non-empty list of source "
                 "artifact ids — the critique must link back to the draft it audits."
+            )
+        }
+    unresolved = [rid for rid in refs if read_artifact(rid) is None]
+    if unresolved:
+        return {
+            "error": (
+                f"write_artifact refs do not resolve to existing artifacts: "
+                f"{unresolved}. Each ref must be an artifact id you fetched via "
+                f"read_artifact in this session."
             )
         }
     aid = write_artifact(

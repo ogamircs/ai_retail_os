@@ -54,6 +54,40 @@ class CriticGuardrailsTest(unittest.TestCase):
         )
         self.assertIn("error", out)
 
+    def test_write_artifact_rejects_unresolved_refs(self):
+        """A hallucinated / typo'd id passes the non-blank check but doesn't
+        resolve to an artifact — must be rejected so the critique isn't
+        orphaned with a dead backlink.
+        """
+        out = critic._tool_write_artifact(
+            {
+                "title": "Critique of X",
+                "body_md": "## Verified\nok",
+                "refs": ["nonexistent-artifact-id-12345"],
+            }
+        )
+        self.assertIn("error", out)
+        self.assertIn("nonexistent-artifact-id-12345", out["error"])
+
+    def test_write_artifact_rejects_when_any_ref_unresolved(self):
+        """Mixed list: one real + one bogus → reject the whole write."""
+        real_id = write_artifact(
+            agent="Pricing",
+            kind="proposal",
+            title="Real draft",
+            body_md="body",
+            refs=[],
+        )
+        out = critic._tool_write_artifact(
+            {
+                "title": "Critique",
+                "body_md": "## Verified\nok",
+                "refs": [real_id, "bogus-id"],
+            }
+        )
+        self.assertIn("error", out)
+        self.assertIn("bogus-id", out["error"])
+
     def test_write_artifact_persists_when_refs_present(self):
         draft_id = write_artifact(
             agent="Pricing",
