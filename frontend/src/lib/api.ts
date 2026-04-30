@@ -104,6 +104,51 @@ export type ActionItem = {
   status: string;
   payload: Record<string, any>;
   artifact_id: string | null;
+  external_actions?: ExternalAction[];
+};
+
+export type ExternalAction = {
+  id: number;
+  ts: string;
+  system_id: string;
+  action_queue_id: number | null;
+  agent: string;
+  action_type: string;
+  title: string;
+  status: string;
+  external_domain: string;
+  external_id: string | null;
+  payload: Record<string, any>;
+  result: Record<string, any>;
+  requires_approval: boolean;
+};
+
+export type IntegrationSystem = {
+  system_id: string;
+  display_name: string;
+  domain: string;
+  enabled: boolean;
+  configured: boolean;
+  mode: string;
+  last_status: string;
+  last_sync_ts: string | null;
+  last_error: string | null;
+  docs_url: string;
+  metadata: Record<string, any>;
+  pending_actions: number;
+  applied_actions: number;
+};
+
+export type SyncRun = {
+  id: number;
+  system_id: string;
+  started_at: string;
+  finished_at: string | null;
+  status: string;
+  records_read: number;
+  records_written: number;
+  error: string | null;
+  summary: Record<string, any>;
 };
 
 export type InventorySku = {
@@ -208,6 +253,44 @@ export async function listActionQueue(): Promise<ActionItem[]> {
   const r = await fetch("/api/action-queue");
   const j = await r.json();
   return j.actions;
+}
+
+export async function listIntegrationSystems(): Promise<IntegrationSystem[]> {
+  const r = await fetch("/api/integrations/systems");
+  const j = await r.json();
+  return j.systems;
+}
+
+export async function listSyncRuns(): Promise<SyncRun[]> {
+  const r = await fetch("/api/integrations/sync-runs?limit=12");
+  const j = await r.json();
+  return j.sync_runs;
+}
+
+export async function syncIntegration(systemId: string): Promise<{
+  sync_run: SyncRun;
+  result: Record<string, any>;
+}> {
+  const r = await fetch(`/api/integrations/${systemId}/sync`, {
+    method: "POST",
+  });
+  if (!r.ok) {
+    throw new Error(`Sync failed: HTTP ${r.status}`);
+  }
+  return r.json();
+}
+
+export async function applyIntegrationAction(
+  systemId: string,
+  actionId: number,
+): Promise<ExternalAction> {
+  const r = await fetch(`/api/integrations/${systemId}/actions/${actionId}/apply`, {
+    method: "POST",
+  });
+  if (!r.ok) {
+    throw new Error(`Apply failed: HTTP ${r.status}`);
+  }
+  return r.json();
 }
 
 /** Stream chat events via fetch + SSE parser (POST body required, EventSource is GET-only). */

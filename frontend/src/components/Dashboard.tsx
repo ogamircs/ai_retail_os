@@ -4,15 +4,20 @@ import {
   Campaign,
   CategoryOpportunity,
   InboundPo,
+  IntegrationSystem,
   InventorySku,
   KpiResponse,
   Store,
+  SyncRun,
   getInventoryHealth,
   getKpis,
   listActionQueue,
   listCampaigns,
   listCategories,
+  listIntegrationSystems,
+  listSyncRuns,
   listStores,
+  syncIntegration,
 } from "../lib/api";
 
 interface Props {
@@ -27,6 +32,8 @@ type DashboardState = {
   actions: ActionItem[];
   skus: InventorySku[];
   inbound: InboundPo[];
+  systems: IntegrationSystem[];
+  syncRuns: SyncRun[];
 };
 
 const money = new Intl.NumberFormat("en-US", {
@@ -64,14 +71,17 @@ export default function Dashboard({ refreshKey }: Props) {
     actions: [],
     skus: [],
     inbound: [],
+    systems: [],
+    syncRuns: [],
   });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [syncing, setSyncing] = useState("");
 
   const refresh = async () => {
     try {
       setError("");
-      const [kpis, categories, campaigns, stores, actions, inventory] =
+      const [kpis, categories, campaigns, stores, actions, inventory, systems, syncRuns] =
         await Promise.all([
           getKpis(),
           listCategories(),
@@ -79,6 +89,8 @@ export default function Dashboard({ refreshKey }: Props) {
           listStores(),
           listActionQueue(),
           getInventoryHealth(),
+          listIntegrationSystems(),
+          listSyncRuns(),
         ]);
       setState({
         kpis,
@@ -88,6 +100,8 @@ export default function Dashboard({ refreshKey }: Props) {
         actions,
         skus: inventory.skus,
         inbound: inventory.inbound_pos,
+        systems,
+        syncRuns,
       });
     } catch (e: any) {
       setError(e?.message || "Dashboard data unavailable");
@@ -130,6 +144,27 @@ export default function Dashboard({ refreshKey }: Props) {
   );
 
   const recommendation = state.kpis?.recommended_category;
+  const connectedCount = state.systems.filter((system) => system.configured).length;
+  const latestSyncBySystem = useMemo(() => {
+    const bySystem = new Map<string, SyncRun>();
+    for (const run of state.syncRuns) {
+      if (!bySystem.has(run.system_id)) bySystem.set(run.system_id, run);
+    }
+    return bySystem;
+  }, [state.syncRuns]);
+
+  const runSync = async (systemId: string) => {
+    try {
+      setSyncing(systemId);
+      setError("");
+      await syncIntegration(systemId);
+      await refresh();
+    } catch (e: any) {
+      setError(e?.message || "Integration sync failed");
+    } finally {
+      setSyncing("");
+    }
+  };
 
   return (
     <div className="dashboard">
@@ -145,6 +180,12 @@ export default function Dashboard({ refreshKey }: Props) {
             <em>{Math.round(recommendation.opportunity_score)} opportunity score</em>
           </div>
         )}
+      </section>
+
+      <section className="provenance-strip">
+        <span>Retail spine</span>
+        <strong>{connectedCount} connected</strong>
+        <em>{state.systems.length - connectedCount} mock-ready systems</em>
       </section>
 
       {error && <div className="inline-error">{error}</div>}
@@ -243,9 +284,61 @@ export default function Dashboard({ refreshKey }: Props) {
                   <em>
                     {action.owner} · {action.action_type.replace(/_/g, " ")}
                   </em>
+                  {!!action.external_actions?.length && (
+                    <span className="external-line">
+                      {action.external_actions
+                        .map(
+                          (external) =>
+                            `${external.system_id}: ${external.status.replace(/_/g, " ")}`,
+                        )
+                        .join(" · ")}
+                    </span>
+                  )}
                 </div>
               </div>
             ))}
+          </div>
+        </div>
+
+        <div className="ops-panel integration-panel">
+          <div className="section-header">
+            <h2>Open-Source Systems</h2>
+            <span>{connectedCount} connected</span>
+          </div>
+          <div className="integration-list">
+            {state.systems.map((system) => {
+              const latest = latestSyncBySystem.get(system.system_id);
+              const domains = latest?.summary?.domains
+                ? Object.keys(latest.summary.domains).slice(0, 2).join(", ")
+                : system.domain;
+              const syncDetail = latest
+                ? `${latest.records_written} synced · ${domains || latest.status}`
+                : system.domain;
+              return (
+                <div className="integration-row" key={system.system_id}>
+                  <div>
+                    <strong>{system.display_name}</strong>
+                    <span>{syncDetail}</span>
+                    <em>
+                      {latest?.error ||
+                        `${system.pending_actions} pending · ${system.applied_actions} applied`}
+                    </em>
+                  </div>
+                  <div className="integration-status">
+                    <span className={statusClass(system.configured ? system.last_status : "mock-only")}>
+                      {system.configured ? system.last_status : "mock-only"}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => runSync(system.system_id)}
+                      disabled={syncing === system.system_id}
+                    >
+                      {syncing === system.system_id ? "Syncing" : "Sync"}
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </div>
 

@@ -156,6 +156,75 @@ CREATE TABLE IF NOT EXISTS policy_rules (
     key TEXT PRIMARY KEY,
     value_json TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS integration_systems (
+    system_id TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    enabled INTEGER NOT NULL,
+    configured INTEGER NOT NULL,
+    mode TEXT NOT NULL,
+    last_status TEXT NOT NULL,
+    last_sync_ts TEXT,
+    last_error TEXT,
+    docs_url TEXT NOT NULL,
+    metadata_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sync_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    system_id TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    status TEXT NOT NULL,
+    records_read INTEGER NOT NULL DEFAULT 0,
+    records_written INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    summary_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sync_runs_system ON sync_runs(system_id, id);
+
+CREATE TABLE IF NOT EXISTS external_refs (
+    system_id TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    local_id TEXT NOT NULL,
+    external_id TEXT NOT NULL,
+    external_url TEXT,
+    synced_at TEXT NOT NULL,
+    props_json TEXT NOT NULL,
+    PRIMARY KEY (system_id, domain, local_id, external_id)
+);
+CREATE INDEX IF NOT EXISTS idx_external_refs_local ON external_refs(local_id);
+
+CREATE TABLE IF NOT EXISTS record_cache (
+    system_id TEXT NOT NULL,
+    domain TEXT NOT NULL,
+    external_id TEXT NOT NULL,
+    local_id TEXT,
+    payload_json TEXT NOT NULL,
+    synced_at TEXT NOT NULL,
+    record_hash TEXT NOT NULL,
+    PRIMARY KEY (system_id, domain, external_id)
+);
+CREATE INDEX IF NOT EXISTS idx_record_cache_local ON record_cache(system_id, domain, local_id);
+
+CREATE TABLE IF NOT EXISTS outbox_actions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    system_id TEXT NOT NULL,
+    action_queue_id INTEGER,
+    agent TEXT NOT NULL,
+    action_type TEXT NOT NULL,
+    title TEXT NOT NULL,
+    status TEXT NOT NULL,
+    external_domain TEXT NOT NULL,
+    external_id TEXT,
+    payload_json TEXT NOT NULL,
+    result_json TEXT NOT NULL,
+    requires_approval INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_outbox_actions_queue ON outbox_actions(action_queue_id);
+CREATE INDEX IF NOT EXISTS idx_outbox_actions_system ON outbox_actions(system_id, status);
 """
 
 

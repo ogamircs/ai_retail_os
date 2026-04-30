@@ -5,6 +5,23 @@ interface Props {
   refreshKey: number;
 }
 
+function payloadSummary(payload: Record<string, any>) {
+  const value =
+    payload.summary ??
+    payload.artifact_title ??
+    payload.reason ??
+    payload.title ??
+    "";
+  if (typeof value === "string" || typeof value === "number") {
+    return String(value);
+  }
+  if (value && typeof value === "object") {
+    if (value.domains) return `domains: ${Object.keys(value.domains).join(", ")}`;
+    return JSON.stringify(value);
+  }
+  return "";
+}
+
 export default function EventLog({ refreshKey }: Props) {
   const [events, setEvents] = useState<SpineEvent[]>([]);
 
@@ -47,7 +64,7 @@ export default function EventLog({ refreshKey }: Props) {
             </div>
             <div className="row-payload">
               {e.payload.action && <strong>{e.payload.action}</strong>}{" "}
-              {e.payload.summary || e.payload.artifact_title || e.payload.reason || ""}
+              {payloadSummary(e.payload)}
               {e.payload.percent != null && ` ${e.payload.percent}%`}
               {e.payload.qty_ordered != null && ` qty=${e.payload.qty_ordered}`}
             </div>

@@ -221,6 +221,27 @@ select {
   color: var(--muted);
 }
 
+.provenance-strip {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-height: 38px;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper);
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.provenance-strip strong {
+  color: var(--teal-dark);
+}
+
+.provenance-strip em {
+  font-style: normal;
+}
+
 .inline-error {
   color: var(--red);
   border-color: rgba(180, 35, 24, 0.35);
@@ -307,7 +328,8 @@ select {
 .action-list,
 .risk-list,
 .store-list,
-.po-list {
+.po-list,
+.integration-list {
   display: grid;
 }
 
@@ -466,12 +488,108 @@ select {
   color: var(--violet);
 }
 
+.status-success,
+.status-connected,
+.status-applied,
+.status-applied-mock,
+.status-draft-created {
+  background: #e2f3ec;
+  color: var(--green);
+}
+
+.status-mock,
+.status-mock-only {
+  background: #eef3ff;
+  color: var(--blue);
+}
+
+.status-error,
+.status-rollback {
+  background: #ffe5e0;
+  color: var(--red);
+}
+
 .action-row {
   display: grid;
   grid-template-columns: 112px minmax(0, 1fr);
   gap: 0.65rem;
   align-items: center;
   padding: 0.62rem 0.75rem;
+}
+
+.external-line {
+  display: block;
+  margin-top: 0.18rem;
+  overflow: hidden;
+  color: var(--blue);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.7rem;
+}
+
+.integration-panel {
+  grid-column: 2;
+}
+
+.integration-row {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) minmax(104px, 0.38fr);
+  gap: 0.7rem;
+  align-items: center;
+  min-width: 0;
+  padding: 0.72rem 0.75rem;
+  border-bottom: 1px solid #edf0ea;
+}
+
+.integration-row:last-child {
+  border-bottom: 0;
+}
+
+.integration-row > div:first-child {
+  min-width: 0;
+}
+
+.integration-row strong,
+.integration-row span,
+.integration-row em {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.integration-row strong {
+  font-size: 0.9rem;
+}
+
+.integration-row > div:first-child span,
+.integration-row em {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-style: normal;
+}
+
+.integration-status {
+  display: grid;
+  justify-items: end;
+  gap: 0.28rem;
+}
+
+.integration-status button {
+  min-width: 64px;
+  padding: 0.2rem 0.46rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--teal-dark);
+  background: white;
+  cursor: pointer;
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.integration-status button:disabled {
+  color: var(--muted);
+  cursor: wait;
 }
 
 .risk-row {
@@ -1021,6 +1139,10 @@ select {
   .category-panel {
     grid-row: auto;
   }
+
+  .integration-panel {
+    grid-column: auto;
+  }
 }
 
 @media (max-width: 720px) {
@@ -1041,6 +1163,7 @@ select {
   .control-band,
   .category-row,
   .campaign-row,
+  .integration-row,
   .store-row,
   .po-row {
     grid-template-columns: 1fr;

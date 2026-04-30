@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import json
 from app.spine.db import conn, init_db
 from app.spine.kg import upsert_node, upsert_edge
+from app.integrations import registry as integration_registry
 
 random.seed(42)
 
@@ -121,6 +122,11 @@ def seed() -> None:
         c.execute("DELETE FROM substrate_campaigns")
         c.execute("DELETE FROM action_queue")
         c.execute("DELETE FROM policy_rules")
+        c.execute("DELETE FROM integration_systems")
+        c.execute("DELETE FROM sync_runs")
+        c.execute("DELETE FROM external_refs")
+        c.execute("DELETE FROM record_cache")
+        c.execute("DELETE FROM outbox_actions")
         c.execute("DELETE FROM events")
         c.execute("DELETE FROM kg_nodes")
         c.execute("DELETE FROM kg_edges")
@@ -404,6 +410,21 @@ def seed() -> None:
     )
     upsert_edge("summer_apparel", "promoted_by", "cmp-weekend-heat")
     upsert_edge("cmp-weekend-heat", "targets", "seg-vacation")
+    integration_registry.refresh_systems()
+    with conn() as c:
+        row = c.execute(
+            "SELECT id, payload_json FROM action_queue WHERE title = ? ORDER BY id DESC LIMIT 1",
+            ("Weekend Heatwave Summer Push",),
+        ).fetchone()
+    if row:
+        integration_registry.propose_outbound(
+            system_id="mautic",
+            action_queue_id=row["id"],
+            agent="Marketing",
+            action_type="campaign_brief",
+            title="Weekend Heatwave Summer Push",
+            payload=json.loads(row["payload_json"]),
+        )
 
     print(f"seeded {len(all_skus)} SKUs, 90 days sales, omnichannel orders, campaigns, stores")
 

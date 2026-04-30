@@ -1,6 +1,6 @@
 import json
 import asyncio
-from fastapi import FastAPI, HTTPException
+from fastapi import Body, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
 from app.config import settings
@@ -9,6 +9,7 @@ from app.spine import events as ev_store
 from app.spine import artifacts as art_store
 from app.spine import kg as kg_store
 from app.substrate import omnichannel
+from app.integrations import registry as integration_registry
 from app.llm import get_provider
 from app.agents.chief_of_staff import run_chief
 from app.schemas import ChatRequest, ConfigOut, ConfigSet
@@ -26,6 +27,7 @@ app.add_middleware(
 @app.on_event("startup")
 def _startup():
     init_db()
+    integration_registry.refresh_systems()
 
 
 @app.get("/api/config", response_model=ConfigOut)
@@ -103,6 +105,52 @@ def get_action_queue():
 @app.get("/api/kg/neighborhood")
 def get_kg_neighborhood(id: str):
     return kg_store.neighborhood(id)
+
+
+@app.get("/api/integrations/systems")
+def get_integration_systems():
+    return {"systems": integration_registry.list_systems()}
+
+
+@app.post("/api/integrations/{system}/sync")
+def sync_integration(system: str):
+    result = integration_registry.sync_system(system)
+    if "error" in result:
+        raise HTTPException(404, result["error"])
+    return result
+
+
+@app.get("/api/integrations/sync-runs")
+def get_integration_sync_runs(limit: int = 30, system: str | None = None):
+    return {"sync_runs": integration_registry.list_sync_runs(limit=limit, system_id=system)}
+
+
+@app.get("/api/integrations/records")
+def get_integration_records(
+    system: str | None = None,
+    domain: str | None = None,
+    local_id: str | None = None,
+    limit: int = 50,
+):
+    return integration_registry.list_records(
+        system_id=system,
+        domain=domain,
+        local_id=local_id,
+        limit=limit,
+    )
+
+
+@app.post("/api/integrations/{system}/actions/{action_id}/apply")
+def apply_integration_action(system: str, action_id: int):
+    result = integration_registry.apply_outbound(system, action_id)
+    if "error" in result:
+        raise HTTPException(404, result["error"])
+    return result
+
+
+@app.post("/api/integrations/mautic/webhook")
+def mautic_webhook(payload: dict = Body(default_factory=dict)):
+    return integration_registry.handle_mautic_webhook(payload)
 
 
 @app.post("/api/chat")
