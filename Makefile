@@ -8,7 +8,7 @@ MAUTIC_COMPOSE := docker compose -p ai-retail-mautic -f $(MAUTIC_DIR)/docker-com
 
 .PHONY: help \
         erpnext-up erpnext-down erpnext-bootstrap erpnext-seed erpnext-logs erpnext-status erpnext-nuke \
-        mautic-up mautic-down mautic-bootstrap mautic-logs mautic-status mautic-nuke
+        mautic-up mautic-down mautic-bootstrap mautic-seed mautic-logs mautic-status mautic-nuke
 
 help:
 	@echo "ERPNext:"
@@ -23,6 +23,7 @@ help:
 	@echo "Mautic:"
 	@echo "  mautic-up          start Mautic stack (mariadb + apache + cron + worker on :8081)"
 	@echo "  mautic-bootstrap   run mautic:install, enable API basic-auth, print admin creds"
+	@echo "  mautic-seed        project the spine demo data into Mautic (idempotent)"
 	@echo "  mautic-status      show running containers"
 	@echo "  mautic-logs        tail logs from the stack"
 	@echo "  mautic-down        stop the stack (volumes preserved)"
@@ -66,3 +67,6 @@ mautic-logs:
 
 mautic-bootstrap:
 	bash $(MAUTIC_DIR)/bootstrap.sh
+
+mautic-seed:
+	python3 $(MAUTIC_DIR)/seed.py

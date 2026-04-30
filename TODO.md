@@ -80,12 +80,17 @@ For every system, the per-system phases are the same:
 
 ## Mautic
 
-- [x] **P1 · Local instance** _(branch: `feature/mautic-p1-instance` — open PR pending)_
+- [x] **P1 · Local instance** _(merged: `feature/mautic-p1-instance` → main)_
   - [x] `infra/mautic/docker-compose.yml` (mautic 5-apache multi-arch digest + mariadb 10.6 + dedicated cron + worker services)
   - [x] Root `Makefile` targets: `mautic-up`, `mautic-down`, `mautic-bootstrap`, `mautic-logs`, `mautic-status`, `mautic-nuke`
   - [x] `infra/mautic/bootstrap.sh` runs `bin/console mautic:install` once (idempotent — skips if `config/local.php` exists), enables `api_enabled` + `api_enable_basic_auth`, prints admin URL + creds + the `MAUTIC_BASE_URL` / `MAUTIC_USERNAME` / `MAUTIC_PASSWORD` env block to paste into `backend/.env`
   - [x] `infra/mautic/README.md` documents URL + admin creds + reset path + Apple Silicon digest pin rationale + the API endpoints the cockpit will hit in P3+
-- [ ] P2 · Demo seed
+
+- [x] **P2 · Demo seed** _(branch: `feature/mautic-p2-seed` — open PR pending)_
+  - [x] `infra/mautic/seed.py` — REST-based, idempotent. Reads `backend/data/spine.db` and projects: 4 Segments (one per `substrate_customer_segments`, with alias derived from segment id), 20 Contacts (5 stable personas × 4 segments, tagged with `seg-id` + `tier-<tier>` + `retail-os-seed`), N Campaigns (one *draft* per `substrate_campaigns` row — left unpublished because Mautic campaigns need actions before they can run; the campaign description embeds a `[retail-os:<id>]` marker so search-by-description matches the spine row on re-runs).
+  - [x] Idempotent across all entity types: alias-based lookup for segments, email-based for contacts, marker-based for campaigns. Re-runs print zero `++` lines.
+  - [x] Makefile target `make mautic-seed` (next to `mautic-bootstrap`).
+  - [x] No-deps: stdlib only (urllib + base64 + sqlite3) so the script runs against the system python without needing `pip install` in the project venv.
 - [ ] P3 · Inbound sync
 - [ ] P4 · Live outbound apply
 - [ ] P5 · Agent-loop UAT
