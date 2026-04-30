@@ -1,4 +1,13 @@
-# TODO — Real-system rollout
+# TODO
+
+Two parallel tracks. Pick whichever has the next freeing-up unit.
+
+1. **Track 1 — Real-system rollout**: replace mock-mode adapters with real instances (ERPNext first, then Mautic / Medusa / OpenBoxes / Akeneo / Superset). Each system has its own 6-phase rollout (P1–P6).
+2. **Track 2 — Agent mesh upgrade**: turn the single-shot delegate-and-write loop into a multi-agent dialogue with critique before the final report ships.
+
+---
+
+# Track 1 — Real-system rollout
 
 Goal: replace mock-mode adapters with real systems, one at a time, in a foundation-first order. Each system goes through its own 6-phase rollout (P1–P6). When all 6 are done for a system, we move on.
 
@@ -109,6 +118,64 @@ For every system, the per-system phases are the same:
 - [ ] P4 · Live outbound apply (mostly N/A — Superset is read-only)
 - [ ] P5 · Agent-loop UAT
 - [ ] P6 · Docs + tests
+
+---
+
+# Track 2 — Agent mesh upgrade
+
+Goal: instead of `Chief → one specialist → artifact`, run a multi-agent dialogue where specialists peer-review each other's drafts and the Chief only synthesizes after critique converges. Operator should see drafts → critique → revision → final, not just the final report.
+
+Today's loop (`backend/app/agents/chief_of_staff.py`):
+- Chief calls `delegate_to_<specialist>` once per turn.
+- Specialist tool-calls substrate, writes one artifact, returns final text.
+- Chief synthesizes a 5–10-line operator reply.
+- No second pass. No critique. Whatever the specialist wrote on first try ships.
+
+Failure modes this fails to catch: shallow analysis, missed evidence, wrong category, miscalibrated confidence, recommendations that violate the policy table the operator hasn't even surfaced yet.
+
+## Phases
+
+- [ ] **A1 · Critic agent (single-pass review)**
+  - [ ] New `backend/app/agents/critic.py` — `Critic` specialist with a system prompt that focuses on: (a) factual checks against spine data, (b) logical gaps, (c) policy violations (margin floor, budget caps), (d) missing alternatives, (e) overclaim detection.
+  - [ ] Tools: `read_artifact(id)`, `read_events(since_ts)`, plus the same read-only spine tools the Analyst has (`query_sales`, `aggregate_by_category`, `inventory_health`, etc.). Critic is **read-only** — it cannot write substrate.
+  - [ ] Output: a `critique` artifact (kind=`critique`) with sections "Verified", "Gaps", "Risks", "Counter-recommendation". Linked to the original via `refs: [original_artifact_id]`.
+  - **Done when:** an explicit `delegate_to_critic` tool exists on the Chief and produces a critique artifact when called.
+
+- [ ] **A2 · Drafter / critic round-trip**
+  - [ ] Each specialist (Analyst, Pricing, Marketing, Merchandiser, Fulfillment, Replenishment, Store Manager) gains an optional `revise_artifact(original_id, critique_id)` tool that reads its prior draft + the critique and produces a revised artifact (kind suffix `_revised`).
+  - [ ] Chief's run-loop is updated: after a specialist returns a draft, Chief invokes Critic, then asks the original specialist to `revise_artifact` if the critique flagged Gaps or Risks.
+  - [ ] Convergence rule: max **2 revision rounds**, or stop earlier when the latest critique returns "no material gaps".
+  - **Done when:** a single chat turn produces draft → critique → revision artifacts in the spine, all linked, and the operator-facing reply references the *final* revision.
+
+- [ ] **A3 · Multi-specialist debate (where it helps)**
+  - [ ] For decisions where specialists naturally disagree (Pricing vs Replenishment on markdowns; Merchandiser vs Marketing on push priority), the Chief can invoke `delegate_to_<peer>` with the first specialist's draft as input and ask for a peer review (`peer_review` tool) — distinct from generic Critic, scoped to that peer's domain expertise.
+  - [ ] Peer reviews are written as `peer_review` artifacts and feed into the same revision loop.
+  - **Done when:** a markdown plan triggers Pricing draft → Replenishment peer review → Pricing revision → Critic critique → Pricing final, all visible in the trace pane.
+
+- [ ] **A4 · UI surfacing**
+  - [ ] Chat turn renders a stacked thread: each artifact tagged by stage (`draft`, `critique`, `peer review`, `revision`, `final`) with an inline "diff" affordance.
+  - [ ] Reports tab gets a `stage` column and a filter for `final` only (default), with a toggle to show all stages.
+  - [ ] Approval drawer's `apply` button refuses to fire on a non-`final` artifact.
+  - **Done when:** operator can scrub through the dialogue and apply only on the converged final.
+
+- [ ] **A5 · Eval harness**
+  - [ ] `backend/tests/agents/eval/` — a small suite of seeded scenarios (overstock summer, weekend heatwave, supplier risk, single-store stockout) with a golden answer per scenario.
+  - [ ] Each scenario runs the chat turn end-to-end and scores (LLM-as-judge): factual correctness, evidence cited, policy adherence, recommendation quality.
+  - [ ] Compare single-pass (mesh disabled) vs multi-pass (mesh enabled). The multi-pass run must score strictly higher on at least 3 of 4 dimensions on at least 3 of the 4 scenarios.
+  - **Done when:** numbers exist and are reproducible; mesh stays on by default.
+
+- [ ] **A6 · Cost & latency guardrails**
+  - [ ] Per-turn token budget; if mesh would exceed it, automatically downgrade to single-pass and log a `mesh_downgrade` event.
+  - [ ] Backoff: max 3 rounds of revision globally, max 2 critic invocations per draft, hard wall-clock cap (e.g. 60s per operator turn).
+  - **Done when:** budget config is in `backend/app/config.py`, surfaced in the cockpit's status strip as a small chip when active.
+
+## Open design questions (decide during A1 brainstorming)
+
+- Critic as one universal agent vs N domain critics (pricing-critic, marketing-critic, …)?
+- Revision authored by original specialist vs by the Critic itself acting as writer?
+- Should the Chief be allowed to ignore the Critic ("override flag") or always defer?
+- Streaming UX: render drafts immediately or wait until convergence? (Lean: stream, mark stage; A4 surfaces this.)
+- LLM-as-judge for A5: same provider as production? Different provider for less correlation? Quorum?
 
 ---
 
