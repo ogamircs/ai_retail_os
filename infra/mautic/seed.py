@@ -120,7 +120,16 @@ def filter_one(
     qs = urlencode(params)
     status, body = _request("GET", f"/api/{endpoint}?{qs}")
     if status != 200:
-        return None
+        # Hard-fail on any non-200 (auth, bad request, 5xx). Returning None
+        # here would let the caller misinterpret a transient lookup failure
+        # as "not found" and POST /new — re-running the seed against a
+        # flaky Mautic would silently produce duplicate
+        # segments / contacts / campaigns, breaking idempotency.
+        # `_request` already retries URLErrors; reaching here means the
+        # server actively returned an error code.
+        raise RuntimeError(
+            f"lookup GET /api/{endpoint}?{qs} failed [{status}]: {body}"
+        )
     rows = body.get(key) or {}
     if isinstance(rows, dict) and rows:
         # Mautic returns rows keyed by id: {"42": {...}}
