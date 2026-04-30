@@ -310,6 +310,348 @@ class ERPNextAdapter(IntegrationAdapter):
             "fulfillment_routing": "Sales Order",
         }.get(action_type, super().outbound_domain(action_type))
 
+    # ----- Live outbound apply (P4) -----
+    #
+    # Map approved cockpit actions onto real ERPNext docs. Every doc lands as
+    # a draft; nothing is auto-submitted. The operator is the one who pressed
+    # "apply → external" in the cockpit drawer; we just record the intent in
+    # ERPNext where it lives next to the existing chart of accounts and Bins
+    # rather than only in our own outbox table.
+    LIVE_ACTION_TYPES = {
+        "promotion",
+        "po_held",
+        "po_expedited",
+        "store_transfer",
+        "fulfillment_routing",
+    }
+
+    def apply_outbound(self, action_id: int) -> dict[str, Any]:
+        from app.integrations import store
+
+        action = store.get_outbox_action(action_id, system_id=self.definition.system_id)
+        if not action:
+            return {"error": f"unknown outbox action: {action_id}"}
+        if action["status"] in {"applied", "applied_mock", "draft_created"}:
+            return action
+
+        # Mock-mode and unsupported action types fall back to the base flow,
+        # which records `applied_mock` / `draft_created` without external I/O.
+        if not self.configured() or action["action_type"] not in self.LIVE_ACTION_TYPES:
+            return super().apply_outbound(action_id)
+
+        try:
+            outcome = self._dispatch_outbound(action)
+        except Exception as exc:  # pragma: no cover - exercised only with live ERPNext
+            return store.update_outbox_action(
+                action_id,
+                status="error",
+                result={
+                    "error": str(exc),
+                    "system_id": self.definition.system_id,
+                    "external_domain": action["external_domain"],
+                    "message": (
+                        "ERPNext rejected the apply. The outbox action is left in "
+                        "error state — fix the upstream payload and retry."
+                    ),
+                },
+            )
+
+        # `external_id is None` means the helper ran cleanly but couldn't
+        # actually create / annotate anything in ERPNext — e.g. po_held with
+        # an empty payload, or no Purchase Order matched (supplier, schedule_date).
+        # Marking that as `draft_created` would lie about the outcome and
+        # pre-empt a retry. Land the row in `error` instead so the operator
+        # sees a red chip and the queue keeps the action open.
+        if not outcome.get("external_id"):
+            return store.update_outbox_action(
+                action_id,
+                status="error",
+                result={
+                    "error": outcome.get("message", "ERPNext apply produced no external_id"),
+                    "system_id": self.definition.system_id,
+                    "external_domain": action["external_domain"],
+                    "message": outcome.get(
+                        "message",
+                        "ERPNext returned no external_id — nothing was written. Check the outbox payload and retry.",
+                    ),
+                    "details": outcome.get("details", {}),
+                },
+            )
+
+        return store.update_outbox_action(
+            action_id,
+            status="draft_created",
+            external_id=outcome["external_id"],
+            result={
+                "message": outcome.get("message", "Draft created in ERPNext."),
+                "system_id": self.definition.system_id,
+                "external_domain": action["external_domain"],
+                "external_id": outcome["external_id"],
+                "details": outcome.get("details", {}),
+            },
+        )
+
+    def _dispatch_outbound(self, action: dict[str, Any]) -> dict[str, Any]:
+        action_type = action["action_type"]
+        payload = action.get("payload") or {}
+        title = action.get("title") or "AI Retail OS action"
+        if action_type == "promotion":
+            return self._erp_create_pricing_rule(title, payload)
+        if action_type in ("po_held", "po_expedited"):
+            return self._erp_update_purchase_orders(title, payload, action_type)
+        if action_type == "store_transfer":
+            return self._erp_create_stock_entry(title, payload)
+        if action_type == "fulfillment_routing":
+            return self._erp_create_sales_order(title, payload)
+        raise RuntimeError(f"unsupported action_type {action_type!r} for live ERPNext apply")
+
+    def _company(self) -> str:
+        return os.environ.get("ERPNEXT_COMPANY", "AI Retail OS")
+
+    def _company_abbr(self) -> str:
+        return os.environ.get("ERPNEXT_COMPANY_ABBR", "ARO")
+
+    def _erp_create_pricing_rule(self, title: str, payload: dict[str, Any]) -> dict[str, Any]:
+        category = payload.get("category", "")
+        discount = float(payload.get("discount_percent") or 0)
+        item_group = _display(category) if category else None
+        from datetime import date, timedelta
+
+        today = date.today()
+        upto = today + timedelta(days=30)
+        doc: dict[str, Any] = {
+            "doctype": "Pricing Rule",
+            "title": title,
+            "apply_on": "Item Group",
+            "selling": 1,
+            "buying": 0,
+            "company": self._company(),
+            "currency": "USD",
+            "rate_or_discount": "Discount Percentage",
+            "discount_percentage": discount,
+            "price_or_product_discount": "Price",
+            "valid_from": today.isoformat(),
+            "valid_upto": upto.isoformat(),
+        }
+        if item_group:
+            doc["item_groups"] = [{"item_group": item_group}]
+        body = self._client().request(
+            f"/api/resource/{quote('Pricing Rule')}", method="POST", payload=doc
+        )
+        name = (body.get("data") or {}).get("name") or body.get("name")
+        return {
+            "external_id": name,
+            "message": (
+                f"Pricing Rule {name} draft created — {discount:.0f}% off "
+                f"{item_group or 'unspecified group'}."
+            ),
+            "details": {
+                "name": name,
+                "item_group": item_group,
+                "discount_percentage": discount,
+                "valid_from": today.isoformat(),
+                "valid_upto": upto.isoformat(),
+            },
+        }
+
+    def _erp_update_purchase_orders(
+        self,
+        title: str,
+        payload: dict[str, Any],
+        action_type: str,
+    ) -> dict[str, Any]:
+        pos = payload.get("pos") or []
+        if not pos:
+            return {
+                "external_id": None,
+                "message": f"No purchase-order rows in payload for {action_type}.",
+                "details": {"payload_keys": list(payload.keys())},
+            }
+        from datetime import date, datetime as _dt, timedelta
+
+        annotated: list[str] = []
+        bumped: list[dict[str, str]] = []
+        unmatched: list[dict[str, str]] = []
+        reason = payload.get("reason") or ""
+        for po in pos:
+            vendor = po.get("vendor")
+            eta = (po.get("eta") or "").split("T")[0]
+            if not vendor or not eta:
+                unmatched.append({"po_id": po.get("po_id"), "reason": "missing vendor or eta"})
+                continue
+            filters = json.dumps([["supplier", "=", vendor], ["schedule_date", "=", eta]])
+            body = self._client().request(
+                f"/api/resource/{quote('Purchase Order')}?filters={quote(filters)}&limit_page_length=1"
+            )
+            rows = body.get("data") or []
+            if not rows:
+                unmatched.append({"po_id": po.get("po_id"), "vendor": vendor, "eta": eta})
+                continue
+            po_name = rows[0]["name"]
+            content = f"AI Retail OS · {action_type.replace('_', ' ')}"
+            if reason:
+                content += f" — {reason}"
+            self._client().request(
+                f"/api/resource/{quote('Comment')}",
+                method="POST",
+                payload={
+                    "doctype": "Comment",
+                    "comment_type": "Comment",
+                    "reference_doctype": "Purchase Order",
+                    "reference_name": po_name,
+                    "content": content,
+                },
+            )
+            annotated.append(po_name)
+            if action_type == "po_expedited":
+                try:
+                    new_eta = (_dt.fromisoformat(eta) - timedelta(days=3)).date().isoformat()
+                    self._client().request(
+                        f"/api/resource/{quote('Purchase Order')}/{quote(po_name, safe='')}",
+                        method="PUT",
+                        payload={"schedule_date": new_eta},
+                    )
+                    bumped.append({"name": po_name, "from": eta, "to": new_eta})
+                except Exception:
+                    # Already-submitted POs need an Amend flow; the comment is
+                    # still the durable record. Don't fail the whole apply.
+                    pass
+        if not annotated:
+            return {
+                "external_id": None,
+                "message": (
+                    f"No matching Purchase Orders found in ERPNext for {action_type} "
+                    f"(checked {len(pos)} payload rows by supplier+schedule_date)."
+                ),
+                "details": {"unmatched": unmatched},
+            }
+        return {
+            "external_id": annotated[0],
+            "message": (
+                f"Annotated {len(annotated)} Purchase Order(s) with {action_type}"
+                + (f"; bumped {len(bumped)} schedule_date(s)" if bumped else "")
+                + "."
+            ),
+            "details": {"annotated": annotated, "bumped": bumped, "unmatched": unmatched},
+        }
+
+    def _erp_create_stock_entry(self, title: str, payload: dict[str, Any]) -> dict[str, Any]:
+        from_store = payload.get("from_store_name") or payload.get("from_store")
+        to_store = payload.get("to_store_name") or payload.get("to_store")
+        qty = int(payload.get("qty") or 1)
+        category = payload.get("category", "")
+        sku = self._first_sku_for_category(category)
+        if not sku:
+            return {
+                "external_id": None,
+                "message": f"No representative SKU available for store_transfer on {category}.",
+                "details": {"payload": payload},
+            }
+        if not from_store or not to_store:
+            return {
+                "external_id": None,
+                "message": "store_transfer payload missing from_store / to_store.",
+                "details": {"payload_keys": list(payload.keys())},
+            }
+        abbr = self._company_abbr()
+        from_wh = f"{from_store} - {abbr}"
+        to_wh = f"{to_store} - {abbr}"
+        doc = {
+            "doctype": "Stock Entry",
+            "stock_entry_type": "Material Transfer",
+            "company": self._company(),
+            "items": [
+                {
+                    "item_code": sku,
+                    "qty": qty,
+                    "s_warehouse": from_wh,
+                    "t_warehouse": to_wh,
+                }
+            ],
+            "remarks": (
+                f"AI Retail OS store_transfer — {payload.get('reason') or 'rebalance'}"
+            ),
+        }
+        body = self._client().request(
+            f"/api/resource/{quote('Stock Entry')}", method="POST", payload=doc
+        )
+        name = (body.get("data") or {}).get("name") or body.get("name")
+        return {
+            "external_id": name,
+            "message": (
+                f"Stock Entry {name} (Material Transfer, draft) created — "
+                f"{qty} × {sku}: {from_wh} → {to_wh}."
+            ),
+            "details": {
+                "name": name,
+                "from_warehouse": from_wh,
+                "to_warehouse": to_wh,
+                "sku": sku,
+                "qty": qty,
+            },
+        }
+
+    def _erp_create_sales_order(self, title: str, payload: dict[str, Any]) -> dict[str, Any]:
+        category = payload.get("category", "")
+        sku = self._first_sku_for_category(category)
+        if not sku:
+            return {
+                "external_id": None,
+                "message": f"No representative SKU available for sales_order on {category}.",
+                "details": {"payload": payload},
+            }
+        from datetime import date, timedelta
+
+        today = date.today()
+        delivery = (today + timedelta(days=7)).isoformat()
+        abbr = self._company_abbr()
+        doc = {
+            "doctype": "Sales Order",
+            "customer": "Walk-In",
+            "company": self._company(),
+            "currency": "USD",
+            "selling_price_list": "Standard Selling",
+            "delivery_date": delivery,
+            "transaction_date": today.isoformat(),
+            "items": [
+                {
+                    "item_code": sku,
+                    "qty": 1,
+                    "delivery_date": delivery,
+                    "warehouse": f"Stores - {abbr}",
+                }
+            ],
+        }
+        body = self._client().request(
+            f"/api/resource/{quote('Sales Order')}", method="POST", payload=doc
+        )
+        name = (body.get("data") or {}).get("name") or body.get("name")
+        return {
+            "external_id": name,
+            "message": (
+                f"Sales Order {name} draft created (fulfillment_routing exemplar, "
+                f"qty 1 × {sku})."
+            ),
+            "details": {
+                "name": name,
+                "category": category,
+                "sku": sku,
+                "delivery_date": delivery,
+                "strategy": payload.get("recommended_strategy"),
+            },
+        }
+
+    def _first_sku_for_category(self, category: str) -> str | None:
+        if not category:
+            return None
+        with conn() as c:
+            row = c.execute(
+                "SELECT s.sku FROM substrate_skus s "
+                "JOIN substrate_inventory i ON i.sku = s.sku "
+                "WHERE s.category = ? ORDER BY i.on_hand DESC LIMIT 1",
+                (category,),
+            ).fetchone()
+        return row["sku"] if row else None
 
 class MauticAdapter(IntegrationAdapter):
     definition = IntegrationDefinition(

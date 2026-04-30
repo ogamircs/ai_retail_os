@@ -57,15 +57,15 @@ For every system, the per-system phases are the same:
   - [x] **Bin aggregation fix** — adapter previously overwrote `substrate_inventory.on_hand` with whichever Bin came last; now sums across all warehouses per SKU. Pinned by a regression test.
   - [x] `backend/tests/test_integrations_erpnext_live.py` — env-gated, three tests covering live sync, external_refs round-trip, and the Bin-aggregation fix. Skipped automatically when credentials aren't present so CI stays mock-only.
 
-- [ ] **P4 · Live outbound apply**
-  - [ ] Override `ERPNextAdapter.apply_outbound` in `backend/app/integrations/systems.py`
-    - [ ] `promotion` → POST `/api/resource/Pricing Rule` (draft, not submitted)
-    - [ ] `po_held` → PATCH `/api/resource/Purchase Order/{name}` (status `On Hold` or add comment)
-    - [ ] `po_expedited` → comment + bumped schedule_date
-    - [ ] `store_transfer` → POST `/api/resource/Stock Entry` (Material Transfer, draft)
-    - [ ] `fulfillment_routing` → POST `/api/resource/Sales Order` (draft)
-  - [ ] Store returned `name` as `external_id` in `outbox_actions.external_id`
-  - **Done when:** cockpit drawer apply produces a draft visible in the ERPNext desk; round-trip `external_id` stored
+- [x] **P4 · Live outbound apply** _(merged: `feature/erpnext-p4-apply` → main)_
+  - [x] Override `ERPNextAdapter.apply_outbound` — full real-mode dispatcher with per-action helpers and a base-class fallback for unsupported types.
+    - [x] `promotion` → POST `/api/resource/Pricing Rule` with `apply_on=Item Group`, `Discount Percentage` rate, 30-day validity window.
+    - [x] `po_held` → matches Purchase Orders by `(supplier, schedule_date)` and posts a `Comment` referencing the PO with the operator's reason.
+    - [x] `po_expedited` → comment + best-effort `schedule_date` bumped 3 days earlier (silent fallback if PO is submitted and needs an Amend flow).
+    - [x] `store_transfer` → POST `/api/resource/Stock Entry` (Material Transfer, draft) with the top-on-hand SKU as the line item.
+    - [x] `fulfillment_routing` → POST `/api/resource/Sales Order` (draft, Walk-In customer, qty 1) with the recommended strategy in the result details.
+  - [x] Returned doc `name` is stored as `external_id` in `outbox_actions`; failures land the row in `error` state instead of crashing the apply call.
+  - [x] Three new env-gated tests in `tests/test_integrations_erpnext_live.py` covering Pricing Rule round-trip, PO annotation, and the unsupported-type fallback.
 
 - [ ] **P5 · Agent-loop UAT**
   - [ ] Run README markdown demo against real ERPNext

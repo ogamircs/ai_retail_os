@@ -165,5 +165,136 @@ class ERPNextLiveSyncTest(unittest.TestCase):
             )
 
 
+@unittest.skipIf(SKIP_REASON, SKIP_REASON)
+class ERPNextLiveApplyTest(unittest.TestCase):
+    """P4 — operator-approved actions land as real ERPNext docs.
+
+    Each test creates an outbox action via the omnichannel substrate, calls
+    `registry.apply_outbound`, then checks ERPNext for the draft doc.
+    """
+
+    def setUp(self) -> None:
+        from app.spine import db as spine_db
+        from app.spine.db import conn
+
+        spine_db.init_db()
+        self.base, self.key, self.secret = CREDS  # type: ignore[misc]
+        # hold_or_expedite_po flips PO rows to 'held' / 'expedited' permanently.
+        # Reset the seeded POs to 'open' so each test sees a fresh substrate.
+        with conn() as c:
+            c.execute(
+                "UPDATE substrate_inbound_pos SET status = 'open' "
+                "WHERE status IN ('held', 'expedited')"
+            )
+
+    def _frappe(self, method: str, path: str, body: dict | None = None):
+        import json as _json
+
+        data = _json.dumps(body).encode() if body is not None else None
+        headers = {
+            "Authorization": f"token {self.key}:{self.secret}",
+            "Accept": "application/json",
+        }
+        if body is not None:
+            headers["Content-Type"] = "application/json"
+        req = Request(self.base.rstrip("/") + path, data=data, headers=headers, method=method)
+        with urlopen(req, timeout=10) as r:
+            payload = r.read().decode()
+        return _json.loads(payload) if payload else {}
+
+    def test_promotion_creates_draft_pricing_rule(self) -> None:
+        from app.integrations import registry
+        from app.substrate import omnichannel
+
+        promotion = omnichannel.create_promotion(
+            category="summer_apparel",
+            offer="P4 live test promotion",
+            discount_percent=15,
+            reason="P4 live test",
+        )
+        outbox = next(
+            (e for e in promotion["external_actions"] if e["system_id"] == "erpnext"),
+            None,
+        )
+        self.assertIsNotNone(outbox, msg=promotion)
+
+        applied = registry.apply_outbound("erpnext", outbox["id"])
+        self.assertEqual(applied.get("status"), "draft_created", msg=applied)
+        result = applied.get("result") or {}
+        name = result.get("external_id")
+        self.assertTrue(name, msg=applied)
+
+        # Round-trip: the doc must exist in ERPNext with our discount.
+        doc = self._frappe("GET", f"/api/resource/Pricing%20Rule/{name}").get("data") or {}
+        self.assertEqual(doc.get("apply_on"), "Item Group")
+        self.assertEqual(doc.get("rate_or_discount"), "Discount Percentage")
+        self.assertAlmostEqual(float(doc.get("discount_percentage") or 0), 15.0, places=2)
+
+    def test_po_held_annotates_existing_purchase_order(self) -> None:
+        from app.integrations import registry
+        from app.substrate import omnichannel
+
+        hold = omnichannel.hold_or_expedite_po(
+            category="summer_apparel",
+            mode="hold",
+            reason="P4 live test",
+        )
+        outbox = next(
+            (e for e in hold["external_actions"] if e["system_id"] == "erpnext"),
+            None,
+        )
+        self.assertIsNotNone(outbox, msg=hold)
+
+        applied = registry.apply_outbound("erpnext", outbox["id"])
+        self.assertEqual(applied.get("status"), "draft_created", msg=applied)
+        details = (applied.get("result") or {}).get("details") or {}
+        annotated = details.get("annotated") or []
+        # The seed produced 12 POs across our 4 vendors; we should land at
+        # least one annotation for the hold action.
+        self.assertGreater(len(annotated), 0, msg=details)
+
+    def test_po_action_with_no_pos_payload_lands_in_error(self) -> None:
+        """An ERPNext po_held / po_expedited apply that matches no Purchase
+        Orders (empty `pos` payload, or no row matched on supplier+schedule_date)
+        must land in `status=error`, not `draft_created`. Otherwise the
+        operator gets a green chip claiming success even though nothing was
+        written to ERPNext.
+        """
+        from app.integrations import registry
+        from app.integrations.systems import ADAPTERS
+
+        adapter = next(a for a in ADAPTERS if a.definition.system_id == "erpnext")
+        outbox = adapter.propose_outbound(
+            action_queue_id=None,
+            agent="Replenishment",
+            action_type="po_held",
+            title="P4 noop test — empty pos payload",
+            payload={"category": "summer_apparel", "pos": []},
+        )
+        applied = registry.apply_outbound("erpnext", outbox["id"])
+        self.assertEqual(applied.get("status"), "error", msg=applied)
+        result = applied.get("result") or {}
+        self.assertIn("error", result, msg=result)
+
+    def test_unsupported_action_type_falls_back_to_base(self) -> None:
+        """Action types ERPNext doesn't know about (e.g. campaign_brief) must
+        not break the apply flow — they fall back to the base adapter's
+        `draft_created` path."""
+        from app.integrations import registry, store
+        from app.integrations.systems import ADAPTERS
+
+        adapter = next(a for a in ADAPTERS if a.definition.system_id == "erpnext")
+        outbox = adapter.propose_outbound(
+            action_queue_id=None,
+            agent="Marketing",
+            action_type="campaign_brief",
+            title="P4 fallback test",
+            payload={"category": "summer_apparel", "offer": "fallback"},
+        )
+        applied = registry.apply_outbound("erpnext", outbox["id"])
+        self.assertIn(applied.get("status"), {"draft_created", "applied_mock"}, msg=applied)
+        # Cleanup — the fallback doesn't write to ERPNext, so just leave it.
+
+
 if __name__ == "__main__":
     unittest.main()
