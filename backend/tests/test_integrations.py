@@ -97,6 +97,21 @@ class IntegrationLayerTest(unittest.TestCase):
         self.assertEqual(applied["status"], "applied_mock")
         self.assertIn("no external system was mutated", applied["result"]["message"])
 
+    def test_coerce_id_rejects_missing_and_blank(self):
+        """Pin the malformed-id guard: a missing/blank Mautic id must NOT
+        cache rows under str(None) == "None" — otherwise multiple bad rows
+        collide on a fake external_id and corrupt the cache.
+        """
+        from app.integrations.systems import _coerce_id
+
+        self.assertIsNone(_coerce_id(None))
+        self.assertIsNone(_coerce_id(""))
+        self.assertIsNone(_coerce_id("   "))
+        self.assertIsNone(_coerce_id(True))   # booleans are not valid ids
+        self.assertEqual(_coerce_id(42), "42")
+        self.assertEqual(_coerce_id("42"), "42")
+        self.assertEqual(_coerce_id("  abc  "), "abc")
+
     def test_mautic_webhook_is_recorded_as_measurement(self):
         payload = {"campaign_id": "cmp-weekend-heat", "event": "email.open", "count": 12}
         with TestClient(app) as client:

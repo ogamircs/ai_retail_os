@@ -656,6 +656,26 @@ class ERPNextAdapter(IntegrationAdapter):
 _MAUTIC_MARKER_RE = re.compile(r"\[retail-os:([a-zA-Z0-9_\-]+)\]")
 
 
+def _coerce_id(raw: Any) -> str | None:
+    """Validate and stringify a Mautic row id.
+
+    `str(None)` is the truthy string "None" — a missing id would otherwise
+    cache rows under a fake external_id, and multiple malformed rows would
+    collide on it. Validate the raw value first, *then* cast.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        # JSON bools shouldn't appear in id positions; treat as malformed.
+        return None
+    if isinstance(raw, (int, float)):
+        return str(raw)
+    if isinstance(raw, str):
+        s = raw.strip()
+        return s or None
+    return None
+
+
 class MauticAdapter(IntegrationAdapter):
     definition = IntegrationDefinition(
         system_id="mautic",
@@ -732,8 +752,8 @@ class MauticAdapter(IntegrationAdapter):
         # Recover the substrate segment_id by reversing that mapping so the
         # external_refs row links the Mautic list back to the spine segment.
         for seg in self._mautic_list("segments", "lists"):
-            external_id = str(seg.get("id"))
-            if not external_id:
+            external_id = _coerce_id(seg.get("id"))
+            if external_id is None:
                 continue
             alias = (seg.get("alias") or "").strip()
             local_id = alias.replace("_", "-") if alias else None
@@ -746,8 +766,8 @@ class MauticAdapter(IntegrationAdapter):
         # seeded personas. If a contact has no email we still cache the row
         # but skip the external_ref (no clean local key to anchor it).
         for contact in self._mautic_list("contacts", "contacts", limit=500):
-            external_id = str(contact.get("id"))
-            if not external_id:
+            external_id = _coerce_id(contact.get("id"))
+            if external_id is None:
                 continue
             fields = (contact.get("fields") or {}).get("core") or {}
             email = (fields.get("email") or {}).get("value") or contact.get("email")
@@ -761,8 +781,8 @@ class MauticAdapter(IntegrationAdapter):
         # If the marker isn't present (operator-authored campaign) we still
         # cache the row but with no local_id.
         for cmp in self._mautic_list("campaigns", "campaigns"):
-            external_id = str(cmp.get("id"))
-            if not external_id:
+            external_id = _coerce_id(cmp.get("id"))
+            if external_id is None:
                 continue
             description = cmp.get("description") or ""
             match = _MAUTIC_MARKER_RE.search(description)
