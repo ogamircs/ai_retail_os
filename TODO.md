@@ -41,12 +41,12 @@ For every system, the per-system phases are the same:
   - [x] Makefile target `make erpnext-seed`.
   - **Verified:** ERPNext desk populated; second run is a no-op.
 
-- [ ] **P3 · Inbound sync**
-  - [ ] Set `ERPNEXT_BASE_URL`, `ERPNEXT_API_KEY`, `ERPNEXT_API_SECRET`, `ERPNEXT_COMPANY` in `backend/.env`
-  - [ ] Hit `POST /api/integrations/erpnext/sync` from the cockpit Integrations tab
-  - [ ] `record_cache` + `external_refs` populate; `substrate_inventory.on_hand` reflects real Bins
-  - [ ] `backend/tests/test_integrations_erpnext_live.py` (env-gated; skipped without creds)
-  - **Done when:** cockpit Integrations row shows `mode=connected · last_status=success · records_written>0`
+- [x] **P3 · Inbound sync** _(merged: `feature/erpnext-p3-sync` → main)_
+  - [x] `backend/.env` wired with ERPNext API credentials
+  - [x] `POST /api/integrations/erpnext/sync` succeeds against real ERPNext: 272 records across Item Group / Item / Warehouse / Bin / Customer / Supplier / Purchase Order
+  - [x] `record_cache` + `external_refs` populate end-to-end; cockpit Integrations row shows `mode=connected` · last sync timestamp updated
+  - [x] **Bin aggregation fix** — adapter previously overwrote `substrate_inventory.on_hand` with whichever Bin came last; now sums across all warehouses per SKU. Pinned by a regression test.
+  - [x] `backend/tests/test_integrations_erpnext_live.py` — env-gated, three tests covering live sync, external_refs round-trip, and the Bin-aggregation fix. Skipped automatically when credentials aren't present so CI stays mock-only.
 
 - [ ] **P4 · Live outbound apply**
   - [ ] Override `ERPNextAdapter.apply_outbound` in `backend/app/integrations/systems.py`
