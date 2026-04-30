@@ -72,10 +72,9 @@ For every system, the per-system phases are the same:
   - [x] UAT log + 5 screenshots in `docs/uat/2026-04-30-erpnext-p5-markdown-demo.md`.
   - [x] Frontend rail-filter bug surfaced + fixed: promotions with configured adapters now show up in the Pending rail (and the status-strip `APPROVE n!` chip) by sharing a `PENDING_EXTERNAL_STATUSES` set across `ApprovalRail.tsx` and `StatusStrip.tsx`.
 
-- [ ] **P6 · Docs + tests**
-  - [ ] README section "Running with real ERPNext" (compose, seed, env, sanity curl)
-  - [ ] Troubleshooting (auth, schedule_date format, doctype permissions, port conflicts)
-  - [ ] Live-path test cases env-gated; CI stays mock-only
+- [x] **P6 · Docs + tests** _(merged: `feature/erpnext-p6-docs-on-p5` → main)_
+  - [x] README "Running with real ERPNext" section: full quick-start (compose / bootstrap / env / seed / sanity curl), per-action-type mapping table, troubleshooting cheat sheet, live-test instructions, and reset path.
+  - [x] Live-path tests already env-gated and skipped without creds (covered in P3 + P4); README now points at them so CI stays mock-only by design.
 
 ---
 
