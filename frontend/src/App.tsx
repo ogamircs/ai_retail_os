@@ -1,34 +1,35 @@
-import { useState } from "react";
+import StatusStrip from "./components/StatusStrip";
+import DataRail from "./components/DataRail";
 import Chat from "./components/Chat";
-import EventLog from "./components/EventLog";
-import Artifacts from "./components/Artifacts";
-import AgentBadge from "./components/AgentBadge";
-import Dashboard from "./components/Dashboard";
+import ApprovalRail from "./components/ApprovalRail";
+import EventTape from "./components/EventTape";
+import ApprovalDrawer from "./components/ApprovalDrawer";
+import { DashboardProvider, useDashboardData } from "./lib/data";
+import { DrawerProvider } from "./lib/drawerContext";
+import "./App.css";
 
-export default function App() {
-  const [refreshKey, setRefreshKey] = useState(0);
+function Shell() {
+  const { bump } = useDashboardData();
   return (
     <div className="app">
-      <header className="app-header">
-        <div className="brand">
-          <span className="logo">⬢</span>
-          <span className="title">AI Retail OS</span>
-          <span className="subtitle">HQ Console</span>
-        </div>
-        <AgentBadge />
-      </header>
-      <main className="app-main">
-        <section className="cockpit">
-          <Dashboard refreshKey={refreshKey} />
-        </section>
-        <section className="command-rail">
-          <Chat onEvent={() => setRefreshKey((k) => k + 1)} />
-        </section>
-        <aside className="audit-rail">
-          <EventLog refreshKey={refreshKey} />
-          <Artifacts refreshKey={refreshKey} />
-        </aside>
-      </main>
+      <StatusStrip />
+      <div className="app-middle">
+        <DataRail />
+        <Chat onEvent={bump} />
+        <ApprovalRail />
+      </div>
+      <EventTape />
+      <ApprovalDrawer />
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <DashboardProvider>
+      <DrawerProvider>
+        <Shell />
+      </DrawerProvider>
+    </DashboardProvider>
   );
 }

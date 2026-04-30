@@ -1,0 +1,31 @@
+.event-tape {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 0 var(--sp-3);
+  background: #000;
+  border-top: 1px solid var(--line);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  cursor: pointer;
+  height: 24px;
+}
+.event-tape:hover { background: var(--panel); }
+.event-tape .empty { color: var(--ink-mute); }
+.event-tape .lag {
+  color: var(--warn);
+  background: var(--warn-bg);
+  padding: 0 4px;
+}
+.event-tape .evt {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.event-tape .sep { color: var(--ink-mute); margin: 0 4px; }
+.event-tape .ts { color: var(--ink-mute); }
+.event-tape .who { font-weight: 600; }
+.event-tape .kind { color: var(--ink-dim); }
+.event-tape .payload { color: var(--ink); }
