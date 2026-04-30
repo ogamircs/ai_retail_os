@@ -134,11 +134,10 @@ Failure modes this fails to catch: shallow analysis, missed evidence, wrong cate
 
 ## Phases
 
-- [ ] **A1 · Critic agent (single-pass review)**
-  - [ ] New `backend/app/agents/critic.py` — `Critic` specialist with a system prompt that focuses on: (a) factual checks against spine data, (b) logical gaps, (c) policy violations (margin floor, budget caps), (d) missing alternatives, (e) overclaim detection.
-  - [ ] Tools: `read_artifact(id)`, `read_events(since_ts)`, plus the same read-only spine tools the Analyst has (`query_sales`, `aggregate_by_category`, `inventory_health`, etc.). Critic is **read-only** — it cannot write substrate.
-  - [ ] Output: a `critique` artifact (kind=`critique`) with sections "Verified", "Gaps", "Risks", "Counter-recommendation". Linked to the original via `refs: [original_artifact_id]`.
-  - **Done when:** an explicit `delegate_to_critic` tool exists on the Chief and produces a critique artifact when called.
+- [x] **A1 · Critic agent (single-pass review)** _(merged: `feature/agent-mesh-a1-critic` → main)_
+  - [x] `backend/app/agents/critic.py` — read-only Critic specialist with the spec'd system prompt (facts / gaps / risks / counter-rec / overclaim) and a forced `kind="critique"` write_artifact.
+  - [x] 11 tools: `read_artifact`, `read_events`, plus the Analyst's read-only spine kit (`query_sales`, `aggregate_by_category`, `daily_sales`, `get_kpis`, `list_categories`, `list_campaigns`, `inventory_health`, `list_orders`) and `write_artifact`.
+  - [x] `chief_of_staff.delegate_to_critic` takes `{artifact_id, task?}` and stitches the id into the task so the Critic's first call is always `read_artifact(artifact_id=…)`.
 
 - [ ] **A2 · Drafter / critic round-trip**
   - [ ] Each specialist (Analyst, Pricing, Marketing, Merchandiser, Fulfillment, Replenishment, Store Manager) gains an optional `revise_artifact(original_id, critique_id)` tool that reads its prior draft + the critique and produces a revised artifact (kind suffix `_revised`).
