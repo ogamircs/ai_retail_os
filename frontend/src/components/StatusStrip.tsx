@@ -35,6 +35,10 @@ function deltaClass(delta: string): string {
   return "delta-flat";
 }
 
+// Mirror of ApprovalRail.PENDING_EXTERNAL_STATUSES — must stay in lockstep so
+// the strip's "APPROVE n!" chip and the rail's row count never disagree.
+const PENDING_EXTERNAL_STATUSES = new Set(["approval_required", "mock_only", "proposed"]);
+
 export function approvalCount(actions: { status: string; external_actions?: { status: string }[] }[]): number {
   let n = 0;
   for (const a of actions) {
@@ -44,7 +48,7 @@ export function approvalCount(actions: { status: string; external_actions?: { st
       added++;
     }
     for (const ex of a.external_actions ?? []) {
-      if ((ex.status === "mock_only" || ex.status === "proposed") && added === 0) {
+      if (PENDING_EXTERNAL_STATUSES.has(ex.status) && added === 0) {
         n++;
         added++;
       }
