@@ -253,6 +253,29 @@ class ERPNextLiveApplyTest(unittest.TestCase):
         # least one annotation for the hold action.
         self.assertGreater(len(annotated), 0, msg=details)
 
+    def test_po_action_with_no_pos_payload_lands_in_error(self) -> None:
+        """An ERPNext po_held / po_expedited apply that matches no Purchase
+        Orders (empty `pos` payload, or no row matched on supplier+schedule_date)
+        must land in `status=error`, not `draft_created`. Otherwise the
+        operator gets a green chip claiming success even though nothing was
+        written to ERPNext.
+        """
+        from app.integrations import registry
+        from app.integrations.systems import ADAPTERS
+
+        adapter = next(a for a in ADAPTERS if a.definition.system_id == "erpnext")
+        outbox = adapter.propose_outbound(
+            action_queue_id=None,
+            agent="Replenishment",
+            action_type="po_held",
+            title="P4 noop test — empty pos payload",
+            payload={"category": "summer_apparel", "pos": []},
+        )
+        applied = registry.apply_outbound("erpnext", outbox["id"])
+        self.assertEqual(applied.get("status"), "error", msg=applied)
+        result = applied.get("result") or {}
+        self.assertIn("error", result, msg=result)
+
     def test_unsupported_action_type_falls_back_to_base(self) -> None:
         """Action types ERPNext doesn't know about (e.g. campaign_brief) must
         not break the apply flow — they fall back to the base adapter's

@@ -356,15 +356,37 @@ class ERPNextAdapter(IntegrationAdapter):
                 },
             )
 
+        # `external_id is None` means the helper ran cleanly but couldn't
+        # actually create / annotate anything in ERPNext — e.g. po_held with
+        # an empty payload, or no Purchase Order matched (supplier, schedule_date).
+        # Marking that as `draft_created` would lie about the outcome and
+        # pre-empt a retry. Land the row in `error` instead so the operator
+        # sees a red chip and the queue keeps the action open.
+        if not outcome.get("external_id"):
+            return store.update_outbox_action(
+                action_id,
+                status="error",
+                result={
+                    "error": outcome.get("message", "ERPNext apply produced no external_id"),
+                    "system_id": self.definition.system_id,
+                    "external_domain": action["external_domain"],
+                    "message": outcome.get(
+                        "message",
+                        "ERPNext returned no external_id — nothing was written. Check the outbox payload and retry.",
+                    ),
+                    "details": outcome.get("details", {}),
+                },
+            )
+
         return store.update_outbox_action(
             action_id,
             status="draft_created",
-            external_id=outcome.get("external_id"),
+            external_id=outcome["external_id"],
             result={
                 "message": outcome.get("message", "Draft created in ERPNext."),
                 "system_id": self.definition.system_id,
                 "external_domain": action["external_domain"],
-                "external_id": outcome.get("external_id"),
+                "external_id": outcome["external_id"],
                 "details": outcome.get("details", {}),
             },
         )
