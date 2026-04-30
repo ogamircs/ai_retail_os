@@ -150,17 +150,25 @@ class ERPNextAdapter(IntegrationAdapter):
 
         bins = self._frappe_list("Bin", ["name", "item_code", "warehouse", "actual_qty", "reserved_qty"], limit=800)
         records_read += len(bins)
+        # Aggregate per-warehouse Bin rows back to a single on_hand per SKU.
+        # ERPNext stores stock per (item, warehouse); our spine substrate stores
+        # one on_hand per SKU. Without summing here, each Bin update overwrites
+        # the prior one and the final value is whichever warehouse came last.
+        on_hand_by_sku: dict[str, int] = {}
         for bin_row in bins:
             sku = bin_row.get("item_code")
             if sku:
-                with conn() as c:
-                    c.execute(
-                        "UPDATE substrate_inventory SET on_hand = ? WHERE sku = ?",
-                        (_safe_int(bin_row.get("actual_qty")), sku),
-                    )
+                on_hand_by_sku[sku] = on_hand_by_sku.get(sku, 0) + _safe_int(bin_row.get("actual_qty"))
             self._cache("Bin", bin_row.get("name") or f"{sku}:{bin_row.get('warehouse')}", bin_row, sku)
             domains["Bin"] = domains.get("Bin", 0) + 1
             records_written += 1
+        if on_hand_by_sku:
+            with conn() as c:
+                for sku, total in on_hand_by_sku.items():
+                    c.execute(
+                        "UPDATE substrate_inventory SET on_hand = ? WHERE sku = ?",
+                        (total, sku),
+                    )
 
         for doctype, fields in {
             "Customer": ["name", "customer_name", "customer_group", "territory"],
