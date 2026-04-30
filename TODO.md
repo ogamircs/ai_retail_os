@@ -34,9 +34,12 @@ For every system, the per-system phases are the same:
   - [x] `infra/erpnext/README.md` documents URL + creds + reset path + Apple Silicon digest pin rationale
   - **Verified:** `curl /api/method/frappe.auth.get_logged_user` → `{"message":"Administrator"}`
 
-- [ ] **P2 · Demo seed**
-  - [ ] `infra/erpnext/seed.py` — REST-based, idempotent, creates Company, Item Groups (matching our 3 categories), Items mirroring our SKUs, Warehouses (= stores), Suppliers, Customers, opening stock entries, sample POS Sales Invoices, Purchase Orders
-  - **Done when:** Items/Warehouses/POs visible in ERPNext desk match the cockpit's categories + stores after a fresh `erpnext-bootstrap && python infra/erpnext/seed.py`
+- [x] **P2 · Demo seed** _(merged: `feature/erpnext-p2-seed` → main)_
+  - [x] `infra/erpnext/seed.py` — REST-based, idempotent. Creates Company `AI Retail OS` (abbr `ARO`), 3 Item Groups, 30 Items, 5 Warehouses (one per store), Suppliers, Brands, Customers, 5 opening Stock Entries (Material Receipt, submitted), 12 Purchase Orders, 10 Sales Invoices (drafts).
+  - [x] Reads from `backend/data/spine.db` directly so the seed stays in sync with the canonical retail demo data.
+  - [x] Idempotent across all entity types: re-runs print zero `++` lines.
+  - [x] Makefile target `make erpnext-seed`.
+  - **Verified:** ERPNext desk populated; second run is a no-op.
 
 - [ ] **P3 · Inbound sync**
   - [ ] Set `ERPNEXT_BASE_URL`, `ERPNEXT_API_KEY`, `ERPNEXT_API_SECRET`, `ERPNEXT_COMPANY` in `backend/.env`
