@@ -116,6 +116,88 @@ Supported adapter IDs:
 
 Optional env vars are listed in `backend/.env.example`. Leave them blank for mock mode.
 
+## Running with real ERPNext
+
+The `erpnext` adapter has a full local-stack rollout — the cockpit can drive a real ERPNext v15 instance instead of mocked data. See `infra/erpnext/README.md` for the full setup; quick path:
+
+```bash
+# 1. Stack: mariadb + redis + frappe + nginx on :8080
+make erpnext-up
+
+# 2. Create the retail.localhost site, install ERPNext,
+#    mint Administrator API key + secret (idempotent)
+make erpnext-bootstrap
+# → prints {"api_key": "...", "api_secret": "..."}
+
+# 3. Wire backend/.env with the printed creds:
+#    ERPNEXT_BASE_URL=http://localhost:8080
+#    ERPNEXT_API_KEY=...
+#    ERPNEXT_API_SECRET=...
+#    ERPNEXT_COMPANY=AI Retail OS
+
+# 4. Project the spine demo data into ERPNext (idempotent):
+#    1 Company, 3 Item Groups, 30 Items, 5 Warehouses, Suppliers, Brands,
+#    Customers, opening Stock Entries, sample POs, draft Sales Invoices.
+make erpnext-seed
+
+# 5. (Re)start the backend so it picks up the new env:
+cd backend && uvicorn app.main:app --reload
+```
+
+Sanity-check auth:
+
+```bash
+curl -s http://localhost:8080/api/method/frappe.auth.get_logged_user \
+  -H "Authorization: token <ERPNEXT_API_KEY>:<ERPNEXT_API_SECRET>"
+# → {"message":"Administrator"}
+```
+
+In the cockpit's Integrations tab the `erpnext` row will now show a green `connected` chip. Click `sync` to pull real records into `record_cache` + `external_refs`. Approve a `Pricing & Promo` markdown via the drawer's `apply → external` button — the adapter creates a real draft `Pricing Rule` in ERPNext, visible at `http://localhost:8080/app/pricing-rule`.
+
+A walkthrough with screenshots lives in [`docs/uat/2026-04-30-erpnext-p5-markdown-demo.md`](docs/uat/2026-04-30-erpnext-p5-markdown-demo.md).
+
+### What lands in ERPNext per action type
+
+| `action_type` | ERPNext doctype | Notes |
+|---|---|---|
+| `promotion` | `Pricing Rule` | Item-Group-scoped, `Discount Percentage`, 30d validity. Draft. |
+| `po_held` | `Comment` on each matching `Purchase Order` | Matches by `(supplier, schedule_date)`. |
+| `po_expedited` | Comment + best-effort `schedule_date` bumped 3d earlier | Falls back to comment-only on submitted POs. |
+| `store_transfer` | `Stock Entry` (Material Transfer) | Picks the top-on-hand SKU as the line item. Draft. |
+| `fulfillment_routing` | `Sales Order` | Walk-In customer, qty 1, strategy text in result details. Draft. |
+
+Nothing is auto-submitted — every doc lands as `docstatus=0` so the operator can review in ERPNext before pushing it through accounting / stock.
+
+### Troubleshooting
+
+| Symptom | What to check |
+|---|---|
+| Cockpit Integrations row stays `mock` | `backend/.env` not picked up by the running uvicorn. Restart the backend. |
+| `apply → external` returns `error` chip | Check the row's `result.error` in `outbox_actions`; common: missing Customer (re-run `make erpnext-seed`), missing Brand (likewise), or ERPNext default account currency mismatch (`Debtors - ARO` must be USD). |
+| `Could not find Brand: …` on apply | Run `make erpnext-seed` — it creates Brand records for every vendor before items. |
+| `Cannot select a Group type Customer Group` | The seed uses `Individual` (a leaf group). Custom edits to the Customer Group tree can re-introduce this — re-run `make erpnext-seed`. |
+| `mariadb` container fails to start on Apple Silicon | The compose pins `mariadb:10.6`. If you swap images, keep `--character-set-server=utf8mb4`. |
+| ERPNext image tag fails to pull on Apple Silicon | `frappe/erpnext:v15.x.y` patch tags ship amd64-only. The compose pins the multi-arch index digest of the floating `v15` tag for that reason. Bump deliberately. |
+
+### Live-path tests
+
+`backend/tests/test_integrations_erpnext_live.py` exercises sync + apply against a real ERPNext. The tests skip automatically when `ERPNEXT_BASE_URL`/`ERPNEXT_API_KEY`/`ERPNEXT_API_SECRET` aren't set or the endpoint isn't reachable, so CI stays mock-only:
+
+```bash
+cd backend
+python -m unittest discover -s tests          # 9 mock pass, 6 live skipped
+python -m unittest discover -s tests          # 15 pass with .env wired
+```
+
+To reset everything from scratch:
+
+```bash
+make erpnext-nuke   # stop the stack and wipe volumes
+make erpnext-up
+make erpnext-bootstrap
+make erpnext-seed
+```
+
 ## Provider swap
 
 In the header, change the provider dropdown (Anthropic / OpenAI / Google). Identical behavior, different model. Requires the corresponding API key in `.env`.
