@@ -42,7 +42,10 @@ export default function ReportsTab({ artifacts }: Props) {
           const full = await getArtifact(a.id);
           BODY_CACHE.set(a.id, full.body || "");
         } catch {
-          BODY_CACHE.set(a.id, "");
+          // Don't poison the cache with an empty body on failure — that
+          // makes BODY_CACHE.has() return true forever and the next deep
+          // search silently treats this artifact as already fetched. Leave
+          // the slot empty so the next attempt retries.
         }
         if (cancelled) return;
       }
@@ -52,7 +55,11 @@ export default function ReportsTab({ artifacts }: Props) {
       }
     })();
     return () => {
+      // Clear the loading flag even when the effect is canceled mid-flight
+      // (deep toggled off, component unmounted, artifacts list churned).
+      // Otherwise the "loading bodies…" hint sticks forever.
       cancelled = true;
+      setLoading(false);
     };
   }, [deep, artifacts]);
 
