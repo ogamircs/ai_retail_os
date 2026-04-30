@@ -112,6 +112,29 @@ For every system, the per-system phases are the same:
 
 ---
 
+# Track 3 — Native app
+
+Goal: ship a native client (mobile + desktop) that wraps the HQ Console — push notifications for approvals, biometric unlock, offline tape replay. Ride on top of all backend work; should not require backend changes.
+
+Decide between two paths during scoping:
+
+- **Tauri + the existing Vite/React frontend** — desktop-first (macOS/Windows/Linux), thin Rust shell, smallest delta from the web build. Mobile via Tauri 2.0 (iOS/Android) once it stabilizes for our stack.
+- **React Native (Expo) re-skin** — mobile-first, native push and biometrics out of the box, but doubles the UI codebase since the Bloomberg-terminal density doesn't translate cleanly to phones. Likely needs a new "operator at the store" layout, not the cockpit.
+
+## Phases (start after at least 2 systems have completed P1–P6)
+
+- [ ] **B1 · Scoping spike** — pick path (Tauri vs RN), validate SSE chat works, write a one-pager.
+- [ ] **B2 · Desktop shell (Tauri)** — wraps the Vite build, bundles for mac/win/linux, wires deep-link to a hosted backend or `localhost`.
+- [ ] **B3 · Push for approvals** — when an action enters the queue with `approval_required`, fire an OS notification (`tauri-plugin-notification` / APNs / FCM). Tap → opens drawer.
+- [ ] **B4 · Biometric unlock** — Touch ID / Face ID gate before drawer apply. Falls back to password.
+- [ ] **B5 · Offline tape replay** — last 200 events cached locally; tape reads cache when network is down; sync on reconnect.
+- [ ] **B6 · Mobile companion** — phone-shaped layout (no 3-rail cockpit). Approvals + chat + tape only. Either Tauri 2.0 if it's ready or a thin RN shell sharing api.ts.
+- [ ] **B7 · Distribution** — signed binaries + an auto-updater (`tauri-plugin-updater`), TestFlight track for iOS if RN.
+
+Out of scope for this track: real-time multi-user collab, video, voice chat with the agent (separate initiative if it ever happens).
+
+---
+
 # Track 4 — MLflow + MLOps
 
 Goal: every operator turn (and every offline eval run) is logged as a tracked experiment with prompts, traces, scored outputs, and the exact provider/model/version. Without this we can't tell whether changes to the agent mesh, the spec, or the model actually made things better.
