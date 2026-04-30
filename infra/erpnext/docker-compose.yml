@@ -1,0 +1,152 @@
+# Minimal ERPNext v15 stack for the AI Retail OS demo.
+# Modeled after frappe_docker pwd.yml — single-site, single-host, dev/demo only.
+# Brought up via:
+#   make erpnext-up         # start the stack
+#   make erpnext-bootstrap  # one-shot: create site + install ERPNext + reset admin pw
+#   make erpnext-down       # stop, keep volumes
+#   make erpnext-nuke       # stop and wipe volumes (full reset)
+#
+# Site:        http://localhost:8080
+# Admin user:  Administrator
+# Admin pass:  retail-admin   (change in .env / make bootstrap if you care)
+
+x-customizable-image: &customizable_image
+  # Pinned by multi-arch index digest (linux/amd64 + linux/arm64).
+  # Frappe ships per-version tags (e.g. v15.45.0) as amd64-only — those break on Apple Silicon.
+  # The floating `v15` tag is multi-arch; we pin the digest so re-pulls are reproducible.
+  image: frappe/erpnext:v15@sha256:f835625e95d00e92a4a8e1a90b08da8567660980cd35ab54c66ec1789043392a
+  pull_policy: always
+
+x-depends-on-configurator: &depends_on_configurator
+  depends_on:
+    configurator:
+      condition: service_completed_successfully
+
+x-backend-defaults: &backend_defaults
+  <<: [*customizable_image, *depends_on_configurator]
+  volumes:
+    - sites:/home/frappe/frappe-bench/sites
+    - logs:/home/frappe/frappe-bench/logs
+
+services:
+  db:
+    image: mariadb:10.6
+    healthcheck:
+      test: mysqladmin ping -h localhost --password=${DB_PASSWORD:-retail-db}
+      interval: 1s
+      retries: 20
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --skip-character-set-client-handshake
+      - --skip-innodb-read-only-compressed
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-retail-db}
+    volumes:
+      - db-data:/var/lib/mysql
+
+  redis-cache:
+    image: redis:6.2-alpine
+    restart: unless-stopped
+    volumes:
+      - redis-cache-data:/data
+
+  redis-queue:
+    image: redis:6.2-alpine
+    restart: unless-stopped
+    volumes:
+      - redis-queue-data:/data
+
+  configurator:
+    <<: *customizable_image
+    restart: "no"
+    entrypoint:
+      - bash
+      - -c
+    command:
+      - >
+        ls -1 apps > sites/apps.txt;
+        bench set-config -g db_host db;
+        bench set-config -gp db_port 3306;
+        bench set-config -g redis_cache "redis://redis-cache:6379";
+        bench set-config -g redis_queue "redis://redis-queue:6379";
+        bench set-config -g redis_socketio "redis://redis-queue:6379";
+        bench set-config -gp socketio_port 9000;
+    environment:
+      DB_HOST: db
+      DB_PORT: "3306"
+      REDIS_CACHE: redis-cache:6379
+      REDIS_QUEUE: redis-queue:6379
+      SOCKETIO_PORT: "9000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis-cache:
+        condition: service_started
+      redis-queue:
+        condition: service_started
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+
+  backend:
+    <<: *backend_defaults
+    restart: unless-stopped
+
+  frontend:
+    <<: [*customizable_image, *depends_on_configurator]
+    restart: unless-stopped
+    command:
+      - nginx-entrypoint.sh
+    environment:
+      BACKEND: backend:8000
+      FRAPPE_SITE_NAME_HEADER: retail.localhost
+      SOCKETIO: websocket:9000
+      UPSTREAM_REAL_IP_ADDRESS: 127.0.0.1
+      UPSTREAM_REAL_IP_HEADER: X-Forwarded-For
+      UPSTREAM_REAL_IP_RECURSIVE: "off"
+      PROXY_READ_TIMEOUT: "120"
+      CLIENT_MAX_BODY_SIZE: 50m
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+    depends_on:
+      backend:
+        condition: service_started
+      websocket:
+        condition: service_started
+    ports:
+      - "8080:8080"
+
+  websocket:
+    <<: [*customizable_image, *depends_on_configurator]
+    restart: unless-stopped
+    command:
+      - node
+      - /home/frappe/frappe-bench/apps/frappe/socketio.js
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+
+  queue-short:
+    <<: *backend_defaults
+    restart: unless-stopped
+    command: bench worker --queue short,default
+
+  queue-long:
+    <<: *backend_defaults
+    restart: unless-stopped
+    command: bench worker --queue long,default,short
+
+  scheduler:
+    <<: *backend_defaults
+    restart: unless-stopped
+    command: bench schedule
+
+volumes:
+  db-data:
+  redis-cache-data:
+  redis-queue-data:
+  sites:
+  logs:
