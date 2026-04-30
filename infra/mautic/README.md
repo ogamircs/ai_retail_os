@@ -29,6 +29,7 @@ The bootstrap script prints the admin URL, credentials, and the three env vars t
 |---|---|
 | `make mautic-up` | `docker compose up -d` (db + web + cron + worker) |
 | `make mautic-bootstrap` | runs `bin/console mautic:install` (idempotent), enables API basic auth, prints API creds |
+| `make mautic-seed` | projects demo data from `backend/data/spine.db` (4 segments + 20 contacts + N campaign drafts). Idempotent — re-runs print zero `++` lines |
 | `make mautic-status` | `docker compose ps` |
 | `make mautic-logs` | tails the four service logs |
 | `make mautic-down` | stops the stack, **keeps volumes** (db + uploaded media survives) |
@@ -68,5 +69,4 @@ That's the only reliable way to re-run install — Mautic's `mautic:install` ref
 ## Out of scope here
 
 - Outbound sync logic (Track 1 Mautic P3+)
-- Demo data seed (Track 1 Mautic P2 — separate `seed.py` like ERPNext)
 - TLS / multi-tenant / production hardening — never for this stack
