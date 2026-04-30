@@ -160,7 +160,20 @@ ASCII only: `▶` (action), `◆` (separator), `▲ ▼` (delta), `✓ ✗` (res
 
 ### `StatusStrip.tsx` (new) — 28px, full width
 
-Left to right: `RETAIL-OS` brand (amber) · provider chip clickable for switch · UTC clock (1s tick) · spacer · KPI chips (`REV.7D`, `MGN`, `QUEUE`, `RISK`, `CAMP`, `PO`) · spacer · `APPROVE n!` (pulses amber when `n > 0`, click opens drawer focused on first pending).
+Left to right: `RETAIL-OS` brand (amber) · provider chip clickable for switch · UTC clock (1s tick) · spacer · KPI chips · spacer · `APPROVE n!` (pulses amber when `n > 0`, click opens drawer focused on first pending).
+
+KPI chips render directly from `/api/kpis` → `KpiResponse.kpis[]` (each has `label`, `value`, `format`, `delta`). Source of truth is `executive_kpis()` in `backend/app/substrate/omnichannel.py`. The chip column maps as:
+
+| Chip label | Backend label (`Kpi.label`)   | `format`   |
+|------------|-------------------------------|------------|
+| `REV.30D`  | `30d omnichannel revenue`     | currency   |
+| `MGN`      | `Gross margin`                | percent    |
+| `RISK`     | `Inventory at risk`           | number     |
+| `CAMP`     | `Active campaigns`            | number     |
+| `SUPP`     | `Supplier risks`              | number     |
+| `STORE`    | `Store exceptions`            | number     |
+
+The chip short-label is derived in the frontend (lookup table on `Kpi.label`). The `APPROVE n!` chip is **not** part of `/api/kpis`; it counts items from `/api/action-queue` where `status === "approval_required"` plus outbox actions where `status` ∈ `{mock_only, proposed}` (see `ApprovalRail` source rules below).
 
 Polls `/api/kpis` every 5s. Provider chip writes via `POST /api/config`.
 
@@ -194,7 +207,16 @@ Per-tab columns:
 
 Two stacked sections.
 
-**`PENDING` (top)** — items where `status === "approval_required"` or outbox `status` ∈ `{mock_only, proposed}`. Row format:
+**`PENDING` (top)** — a unioned list from two sources, deduped where they reference the same logical action:
+
+| Source | Endpoint | Filter |
+|---|---|---|
+| Action queue | `GET /api/action-queue` → `ActionItem[]` | `status === "approval_required"` |
+| Integration outbox | nested `ActionItem.external_actions[]` (already returned in the same payload as `ExternalAction[]`) | `status ∈ {mock_only, proposed}` |
+
+When an `ActionItem` has both a top-level `approval_required` status and one or more `external_actions` matching the outbox filter, the row is shown once with a stacked indicator showing all systems (e.g. `erpnext + mautic`). The drawer surfaces each external action distinctly.
+
+Row format:
 ```
 ▶ <title>           <agent>
   <one-line context> · ←<hh:mm>
@@ -211,7 +233,9 @@ Right-anchored, `width: min(720px, 60vw)`, full middle-area height, slide 160ms.
 - Body: payload as a definition-list (label / value rows, monospace) + linked artifact rendered via existing `marked`.
 - Footer: `[ apply → external ]` (amber primary) and `[ reject ]` (dim).
 
-`apply` → `POST /api/integrations/{system}/actions/{id}/apply`. On success the drawer flips to a confirmation panel showing `applied_mock` or `draft_created` for 2s before auto-closing. `reject` is local-only — removes the row from the rail until the next refresh.
+`apply` → `POST /api/integrations/{system}/actions/{id}/apply`. On success the drawer flips to a confirmation panel showing `applied_mock` or `draft_created` for 2s before auto-closing.
+
+`reject` is **local-only by design for v1**: removes the row from the in-memory rail filter until the next 5s refresh, after which the underlying action returns. This is acceptable for the demo: the operator's intent is "skip for now," not "tell the backend to forget about this." A real `DELETE /api/action-queue/{id}` (or a `dismissed` status field) is deferred — see Out of Scope.
 
 ### `EventTape.tsx` (refactor of `EventLog.tsx`) — 24px, full width
 
@@ -261,7 +285,7 @@ Single line, discrete append. Latest 30 events concatenated with `◆` separator
 5. Tape appends new events live; drawer opens via click and `\``.
 6. Chat works end-to-end with the demo paths from `README.md` (markdown demo and omnichannel demo) and visibly streams specialist events.
 7. Provider switcher in status strip changes `LLM_PROVIDER` via `POST /api/config` and the next chat call uses the new provider.
-8. `tests/test_omnichannel.py` and `tests/test_integrations.py` continue to pass — no API surface change.
+8. `backend/tests/test_omnichannel.py` and `backend/tests/test_integrations.py` continue to pass — no API surface change.
 
 ## Risk / unknowns
 
