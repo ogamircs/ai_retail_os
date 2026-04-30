@@ -73,3 +73,41 @@
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
+
+.data-rail tbody tr.clickable { cursor: pointer; }
+.data-rail .id { color: var(--ink-mute); font-size: var(--fs-xs); }
+
+.reports-tab { display: block; }
+.reports-tab table { width: 100%; }
+
+.reports-search {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  font-size: var(--fs-xs);
+}
+.reports-search .prompt { color: var(--amber); font-weight: 600; }
+.reports-search input[type="text"] {
+  flex: 1;
+  border: none;
+  outline: none;
+  color: var(--ink);
+  background: transparent;
+  font: inherit;
+}
+.reports-search input[type="text"]::placeholder { color: var(--ink-mute); }
+.reports-search .deep {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  color: var(--ink-dim);
+}
+.reports-search .deep input { accent-color: var(--amber); }
+.reports-search .count { color: var(--ink-dim); font-variant-numeric: tabular-nums; }
+.reports-search .loading { color: var(--warn); }
