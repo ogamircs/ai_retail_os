@@ -114,8 +114,19 @@ def _tool_write_artifact(args: dict) -> dict:
     """Persist the critique. We force kind='critique' regardless of what the
     model passes so the artifact viewer can route critique vs report cleanly,
     and so A4's stage chip in the cockpit doesn't depend on prompt fidelity.
+    Refs are required — a critique without a backlink to the audited draft
+    breaks the contract and would orphan the critique in downstream review/
+    revision flows.
     """
-    refs = args.get("refs") or []
+    raw_refs = args.get("refs")
+    refs = [r for r in raw_refs if isinstance(r, str) and r.strip()] if isinstance(raw_refs, list) else []
+    if not refs:
+        return {
+            "error": (
+                "write_artifact requires refs to be a non-empty list of source "
+                "artifact ids — the critique must link back to the draft it audits."
+            )
+        }
     aid = write_artifact(
         agent=NAME,
         kind="critique",
@@ -223,7 +234,9 @@ TOOLS = [
         name="write_artifact",
         description=(
             "Persist the critique as a markdown artifact (kind is forced to "
-            "'critique' regardless of what you pass). Returns artifact_id."
+            "'critique' regardless of what you pass). `refs` MUST contain at "
+            "least the id of the audited draft — a critique without a "
+            "backlink is rejected. Returns artifact_id."
         ),
         input_schema={
             "type": "object",
@@ -233,10 +246,11 @@ TOOLS = [
                 "refs": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Source artifact ids being critiqued.",
+                    "minItems": 1,
+                    "description": "Source artifact ids being critiqued. Must include the audited draft.",
                 },
             },
-            "required": ["title", "body_md"],
+            "required": ["title", "body_md", "refs"],
         },
     ),
 ]

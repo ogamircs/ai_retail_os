@@ -129,10 +129,13 @@ def build_orchestrator(llm: LLMProvider, event_sink: _EventBuffer) -> Agent:
         return _run_delegate(store_agent, args["task"])
 
     def _delegate_critic(args: dict) -> dict:
-        # Stitch the artifact_id into the task so the Critic's first
-        # tool call is read_artifact(artifact_id=…). Cleaner than mutating
-        # the task description in the Chief's prompt.
-        artifact_id = args.get("artifact_id", "")
+        # Fail fast if artifact_id missing — runtime tool calls aren't schema-
+        # validated, so a malformed call would otherwise launch the Critic on
+        # an empty id and produce a low-value critique. Returning an explicit
+        # error lets the orchestrator see and recover from it.
+        artifact_id = (args.get("artifact_id") or "").strip()
+        if not artifact_id:
+            return {"error": "delegate_to_critic requires a non-empty artifact_id"}
         scope = args.get("task", "Audit the draft for facts, gaps, risks, and overclaim.")
         task = (
             f"Audit artifact_id={artifact_id}. {scope}\n\n"
