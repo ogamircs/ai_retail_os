@@ -12,11 +12,17 @@ type Pending = {
   systems: string[];
 };
 
+// An external action is considered "pending operator approval" while it sits
+// in any of these statuses. `approval_required` is what configured adapters
+// emit; `mock_only` is the equivalent for adapters running in mock mode;
+// `proposed` covers earlier seed states.
+const PENDING_EXTERNAL_STATUSES = new Set(["approval_required", "mock_only", "proposed"]);
+
 function buildPending(actions: ActionItem[]): Pending[] {
   const pending: Pending[] = [];
   for (const a of actions) {
-    const externals = (a.external_actions ?? []).filter(
-      (x) => x.status === "mock_only" || x.status === "proposed",
+    const externals = (a.external_actions ?? []).filter((x) =>
+      PENDING_EXTERNAL_STATUSES.has(x.status),
     );
     const top = a.status === "approval_required";
     if (top && externals.length === 0) {

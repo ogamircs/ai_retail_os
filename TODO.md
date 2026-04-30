@@ -67,10 +67,10 @@ For every system, the per-system phases are the same:
   - [x] Returned doc `name` is stored as `external_id` in `outbox_actions`; failures land the row in `error` state instead of crashing the apply call.
   - [x] Three new env-gated tests in `tests/test_integrations_erpnext_live.py` covering Pricing Rule round-trip, PO annotation, and the unsupported-type fallback.
 
-- [ ] **P5 · Agent-loop UAT**
-  - [ ] Run README markdown demo against real ERPNext
-  - [ ] Approve markdown → real Pricing Rule created
-  - [ ] Capture before/after screenshots in PR
+- [x] **P5 · Agent-loop UAT** _(merged: `feature/erpnext-p5-uat-on-p4` → main)_
+  - [x] README markdown demo runs end-to-end against real ERPNext: Pricing & Promo proposes → cockpit drawer apply → real Pricing Rule lands in ERPNext (`PRLE-0005`, 25% off Summer Apparel, 30-day validity).
+  - [x] UAT log + 5 screenshots in `docs/uat/2026-04-30-erpnext-p5-markdown-demo.md`.
+  - [x] Frontend rail-filter bug surfaced + fixed: promotions with configured adapters now show up in the Pending rail (and the status-strip `APPROVE n!` chip) by sharing a `PENDING_EXTERNAL_STATUSES` set across `ApprovalRail.tsx` and `StatusStrip.tsx`.
 
 - [ ] **P6 · Docs + tests**
   - [ ] README section "Running with real ERPNext" (compose, seed, env, sanity curl)
