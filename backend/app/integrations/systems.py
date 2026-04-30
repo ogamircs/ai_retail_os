@@ -653,6 +653,9 @@ class ERPNextAdapter(IntegrationAdapter):
             ).fetchone()
         return row["sku"] if row else None
 
+_MAUTIC_MARKER_RE = re.compile(r"\[retail-os:([a-zA-Z0-9_\-]+)\]")
+
+
 class MauticAdapter(IntegrationAdapter):
     definition = IntegrationDefinition(
         system_id="mautic",
@@ -663,23 +666,122 @@ class MauticAdapter(IntegrationAdapter):
         notes="Segments, email/campaign drafts, and webhook-based campaign telemetry.",
     )
 
+    def configured(self) -> bool:
+        # Beyond the base-class env-key check, require either the pre-baked
+        # MAUTIC_BASIC_TOKEN or the user/password pair the bootstrap script
+        # prints. Without auth there is nothing to talk to — so don't claim
+        # the adapter is configured.
+        if not super().configured():
+            return False
+        if os.getenv("MAUTIC_BASIC_TOKEN", "").strip():
+            return True
+        return bool(
+            os.getenv("MAUTIC_USERNAME", "").strip()
+            and os.getenv("MAUTIC_PASSWORD", "").strip()
+        )
+
+    def _client(self) -> JsonHttpClient:
+        headers: dict[str, str] = {}
+        token = os.getenv("MAUTIC_BASIC_TOKEN", "").strip()
+        if token:
+            headers["Authorization"] = f"Basic {token}"
+        else:
+            raw = f"{os.environ['MAUTIC_USERNAME']}:{os.environ['MAUTIC_PASSWORD']}"
+            headers["Authorization"] = f"Basic {b64encode(raw.encode()).decode()}"
+        return JsonHttpClient(os.environ["MAUTIC_BASE_URL"], headers=headers)
+
     def healthcheck(self) -> IntegrationResult:
         if not self.configured():
             return super().healthcheck()
         try:  # pragma: no cover - live-system path
-            headers = {}
-            token = os.getenv("MAUTIC_BASIC_TOKEN")
-            if token:
-                headers["Authorization"] = f"Basic {token}"
-            elif os.getenv("MAUTIC_USERNAME") and os.getenv("MAUTIC_PASSWORD"):
-                raw = f"{os.environ['MAUTIC_USERNAME']}:{os.environ['MAUTIC_PASSWORD']}"
-                headers["Authorization"] = f"Basic {b64encode(raw.encode()).decode()}"
-            data = JsonHttpClient(os.environ["MAUTIC_BASE_URL"], headers=headers).request("/api/contacts?limit=1")
+            data = self._client().request("/api/contacts?limit=1")
             return IntegrationResult(status="connected", summary={"contacts_seen": len(data.get("contacts", []))})
         except Exception as exc:
             return IntegrationResult(status="error", error=str(exc))
 
     def sync_inbound(self) -> IntegrationResult:
+        if not self.configured():
+            return self._mock_sync()
+        try:
+            return self._live_sync()
+        except Exception as exc:
+            return IntegrationResult(status="error", error=str(exc))
+
+    # ----- live ------------------------------------------------------------
+
+    def _mautic_list(self, endpoint: str, key: str, limit: int = 200) -> list[dict[str, Any]]:
+        """GET /api/<endpoint>?limit=N and normalise the row shape.
+
+        Mautic returns rows keyed by id (`{"42": {...}}`); we flatten to a
+        list so the rest of the sync looks like ERPNext's.
+        """
+        data = self._client().request(f"/api/{endpoint}?limit={limit}")
+        rows = data.get(key) or {}
+        if isinstance(rows, dict):
+            return list(rows.values())
+        if isinstance(rows, list):
+            return rows
+        return []
+
+    def _live_sync(self) -> IntegrationResult:
+        domains: dict[str, int] = {}
+        records_read = 0
+        records_written = 0
+
+        # Segments: alias == seg_id with - replaced by _ (see infra/mautic/seed.py).
+        # Recover the substrate segment_id by reversing that mapping so the
+        # external_refs row links the Mautic list back to the spine segment.
+        for seg in self._mautic_list("segments", "lists"):
+            external_id = str(seg.get("id"))
+            if not external_id:
+                continue
+            alias = (seg.get("alias") or "").strip()
+            local_id = alias.replace("_", "-") if alias else None
+            self._cache("Segment", external_id, seg, local_id)
+            domains["Segment"] = domains.get("Segment", 0) + 1
+            records_written += 1
+            records_read += 1
+
+        # Contacts: local_id is email since that's deterministic across our
+        # seeded personas. If a contact has no email we still cache the row
+        # but skip the external_ref (no clean local key to anchor it).
+        for contact in self._mautic_list("contacts", "contacts", limit=500):
+            external_id = str(contact.get("id"))
+            if not external_id:
+                continue
+            fields = (contact.get("fields") or {}).get("core") or {}
+            email = (fields.get("email") or {}).get("value") or contact.get("email")
+            self._cache("Contact", external_id, contact, email)
+            domains["Contact"] = domains.get("Contact", 0) + 1
+            records_written += 1
+            records_read += 1
+
+        # Campaigns: recover the substrate campaign_id from the
+        # `[retail-os:<id>]` marker our seeder embeds in description.
+        # If the marker isn't present (operator-authored campaign) we still
+        # cache the row but with no local_id.
+        for cmp in self._mautic_list("campaigns", "campaigns"):
+            external_id = str(cmp.get("id"))
+            if not external_id:
+                continue
+            description = cmp.get("description") or ""
+            match = _MAUTIC_MARKER_RE.search(description)
+            local_id = match.group(1) if match else None
+            self._cache("Campaign", external_id, cmp, local_id)
+            domains["Campaign"] = domains.get("Campaign", 0) + 1
+            records_written += 1
+            records_read += 1
+
+        return IntegrationResult(
+            status="success",
+            records_read=records_read,
+            records_written=records_written,
+            summary={"mode": "connected", "domains": domains},
+        )
+
+    # ----- mock ------------------------------------------------------------
+
+    def _mock_sync(self) -> IntegrationResult:
         domains: dict[str, int] = {}
         records_written = 0
         with conn() as c:
@@ -701,8 +803,33 @@ class MauticAdapter(IntegrationAdapter):
             status="success",
             records_read=records_written,
             records_written=records_written,
-            summary={"mode": "mock" if not self.configured() else "connected_stub", "domains": domains},
+            summary={"mode": "mock", "domains": domains},
         )
+
+    def _cache(self, domain: str, external_id: str, payload: dict[str, Any], local_id: str | None) -> None:
+        store.cache_record(self.definition.system_id, domain, str(external_id), payload, local_id=local_id)
+        if local_id:
+            store.record_external_ref(
+                self.definition.system_id,
+                domain,
+                str(local_id),
+                str(external_id),
+                external_url=self._external_url(domain, str(external_id)),
+                props={"source": "Mautic"},
+            )
+
+    def _external_url(self, domain: str, external_id: str) -> str | None:
+        base = os.getenv("MAUTIC_BASE_URL")
+        if not base:
+            return None
+        path = {
+            "Segment": "s/segments/view",
+            "Contact": "s/contacts/view",
+            "Campaign": "s/campaigns/view",
+        }.get(domain)
+        if not path:
+            return None
+        return f"{base.rstrip('/')}/{path}/{quote(external_id)}"
 
     def outbound_domain(self, action_type: str) -> str:
         return {
