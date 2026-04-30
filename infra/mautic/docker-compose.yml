@@ -1,0 +1,103 @@
+# Minimal Mautic 5 stack for the AI Retail OS demo.
+# Single-host, dev/demo only — same shape as infra/erpnext.
+#
+# Brought up via:
+#   make mautic-up         # start the stack
+#   make mautic-bootstrap  # one-shot: run mautic:install + enable basic-auth API + create admin
+#   make mautic-down       # stop, keep volumes
+#   make mautic-nuke       # stop and wipe volumes (full reset)
+#
+# Site:        http://localhost:8081
+# Admin user:  admin
+# Admin pass:  retail-mautic   (override via MAUTIC_ADMIN_PASSWORD)
+
+x-mautic-image: &mautic_image
+  # Pinned by multi-arch index digest (linux/amd64 + linux/arm64).
+  # `mautic/mautic:5-apache` is the floating tag for the latest 5.x release;
+  # we pin its digest so re-pulls are reproducible. Per-build daily tags
+  # (`5.2.10-YYYYMMDD-apache`) are also multi-arch but rotate fast.
+  image: mautic/mautic:5-apache@sha256:66974d1c641c246a3e61d2c00e29733ece62e549a35074514eff2eedfb1529da
+  pull_policy: always
+
+x-mautic-env: &mautic_env
+  MAUTIC_DB_HOST: db
+  MAUTIC_DB_PORT: "3306"
+  MAUTIC_DB_USER: ${MAUTIC_DB_USER:-mautic}
+  MAUTIC_DB_PASSWORD: ${MAUTIC_DB_PASSWORD:-retail-db}
+  MAUTIC_DB_NAME: ${MAUTIC_DB_NAME:-mautic}
+  MAUTIC_RUN_CRON_JOBS: "false" # cron handled by the dedicated `cron` service
+  MAUTIC_TRUSTED_PROXIES: '["0.0.0.0/0"]'
+  DOCKER_MAUTIC_ROLE: mautic_web
+
+services:
+  db:
+    image: mariadb:10.6
+    healthcheck:
+      test: mysqladmin ping -h localhost --password=${MAUTIC_DB_ROOT_PASSWORD:-retail-db}
+      interval: 1s
+      retries: 30
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --skip-character-set-client-handshake
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MAUTIC_DB_ROOT_PASSWORD:-retail-db}
+      MYSQL_DATABASE: ${MAUTIC_DB_NAME:-mautic}
+      MYSQL_USER: ${MAUTIC_DB_USER:-mautic}
+      MYSQL_PASSWORD: ${MAUTIC_DB_PASSWORD:-retail-db}
+    volumes:
+      - db-data:/var/lib/mysql
+
+  mautic_web:
+    <<: *mautic_image
+    restart: unless-stopped
+    environment:
+      <<: *mautic_env
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8081:80"
+    volumes:
+      - mautic-config:/var/www/html/config
+      - mautic-logs:/var/www/html/var/logs
+      - mautic-media:/var/www/html/docroot/media
+
+  mautic_cron:
+    <<: *mautic_image
+    restart: unless-stopped
+    environment:
+      <<: *mautic_env
+      DOCKER_MAUTIC_ROLE: mautic_cron
+    depends_on:
+      db:
+        condition: service_healthy
+      mautic_web:
+        condition: service_started
+    volumes:
+      - mautic-config:/var/www/html/config
+      - mautic-logs:/var/www/html/var/logs
+      - mautic-media:/var/www/html/docroot/media
+
+  mautic_worker:
+    <<: *mautic_image
+    restart: unless-stopped
+    environment:
+      <<: *mautic_env
+      DOCKER_MAUTIC_ROLE: mautic_worker
+    depends_on:
+      db:
+        condition: service_healthy
+      mautic_web:
+        condition: service_started
+    volumes:
+      - mautic-config:/var/www/html/config
+      - mautic-logs:/var/www/html/var/logs
+      - mautic-media:/var/www/html/docroot/media
+
+volumes:
+  db-data:
+  mautic-config:
+  mautic-logs:
+  mautic-media:

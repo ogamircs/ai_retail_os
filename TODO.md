@@ -79,7 +79,12 @@ For every system, the per-system phases are the same:
 ---
 
 ## Mautic
-- [ ] P1 · Local instance
+
+- [x] **P1 · Local instance** _(branch: `feature/mautic-p1-instance` — open PR pending)_
+  - [x] `infra/mautic/docker-compose.yml` (mautic 5-apache multi-arch digest + mariadb 10.6 + dedicated cron + worker services)
+  - [x] Root `Makefile` targets: `mautic-up`, `mautic-down`, `mautic-bootstrap`, `mautic-logs`, `mautic-status`, `mautic-nuke`
+  - [x] `infra/mautic/bootstrap.sh` runs `bin/console mautic:install` once (idempotent — skips if `config/local.php` exists), enables `api_enabled` + `api_enable_basic_auth`, prints admin URL + creds + the `MAUTIC_BASE_URL` / `MAUTIC_USERNAME` / `MAUTIC_PASSWORD` env block to paste into `backend/.env`
+  - [x] `infra/mautic/README.md` documents URL + admin creds + reset path + Apple Silicon digest pin rationale + the API endpoints the cockpit will hit in P3+
 - [ ] P2 · Demo seed
 - [ ] P3 · Inbound sync
 - [ ] P4 · Live outbound apply
