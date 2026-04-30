@@ -303,3 +303,66 @@ Pairs with Track 2 (mesh) and Track 4 (MLflow) — critique loops surface lesson
 - Auth model — should specialists be allowed to edit each other's pages, or only their own (with peer-review via Track 2 A3)?
 - Decay — pages need a "last verified" stamp + a way to flag stale entries; otherwise the wiki rots.
 - Embedding-based search vs sqlite FTS? Start with FTS; revisit if recall is poor.
+
+---
+
+# Track 6 — GBrain integration
+
+Goal: stand up [GBrain](https://github.com/garrytan/gbrain) as the operator's persistent memory layer over the cockpit. GBrain is a self-wiring knowledge graph + 29-skill kit + Postgres/PGLite-backed brain that exposes 30+ MCP tools (search, get, code-callers, query, ingest, …). Same problem space as Track 5 (Wiki), but a mature off-the-shelf product instead of a roll-our-own minimal version.
+
+Decide during G1 whether GBrain **replaces** Track 5 (the wiki section becomes a thin facade over GBrain pages) or **complements** it (cockpit wiki for agent-coined retail-domain pages, GBrain for the operator's broader persistent brain). Default lean: complement — keep Track 5's `category/<x>` pages spine-native, plug GBrain in via MCP for cross-cutting recall.
+
+## Concept
+
+- One GBrain instance per operator. Backed by PGLite locally; Postgres in any shared deployment.
+- Specialists get a small subset of GBrain MCP tools (`gbrain.query`, `gbrain.get`, `gbrain.search`, optionally `gbrain.ingest`). The Critic from Track 2 A1 gets read-only access too — citations from GBrain feed the "Verified" section.
+- After each cockpit chat turn, a signal-detector hook ingests the turn (Chief reply + linked artifacts) into GBrain, picking up entities (categories, vendors, stores, SKUs) automatically.
+- Reports rendered in the Reports tab can quote GBrain pages; the artifact viewer adds a `cited brain pages` block when present.
+
+## Phases
+
+- [ ] **G1 · Local GBrain stack**
+  - [ ] `infra/gbrain/` — install via `git clone + bun install && bun link` (per the repo's own warning against `bun install -g`); PGLite by default, optional Postgres via env.
+  - [ ] Makefile targets: `gbrain-up`, `gbrain-down`, `gbrain-doctor`.
+  - [ ] `infra/gbrain/README.md` covers install, the `gbrain init` step, the recurring jobs we keep on (ingest, maintain, smoke-test) and the ones we disable for the demo (anything that hits the public web by default).
+  - **Done when:** `gbrain query "hello"` runs locally; `gbrain serve` exposes the MCP endpoint over stdio.
+
+- [ ] **G2 · MCP wiring into the backend agents**
+  - [ ] `backend/app/llm/mcp.py` — small client that calls `gbrain serve --http --port 8787` (HTTP transport, not stdio, because we're a long-lived service).
+  - [ ] New tools on every read-only specialist (Analyst, Critic): `brain_search`, `brain_get`, `brain_query`. These wrap the GBrain MCP tools and return shapes the agents can quote in `write_artifact`.
+  - [ ] Auth: a single bearer token, written by `gbrain auth create`, kept in `backend/.env` as `GBRAIN_BEARER`. Adapter health-check pattern from the integrations layer (Track 1) applies.
+  - **Done when:** the Analyst can answer "what did we decide about summer apparel last quarter?" by quoting one or more brain pages with their slugs.
+
+- [ ] **G3 · Ingest hook on every chat turn**
+  - [ ] When `chief_of_staff.run_chief` finishes a turn, fire a background `signal-detector`-style ingest: pass the operator prompt, Chief reply, and any new artifact bodies into `gbrain ingest`.
+  - [ ] Rate-limited per turn (≤ 3 ingest calls) to keep the brain compact and avoid over-indexing.
+  - [ ] Spine event kind `brain_ingest` records the turn → brain page mapping for the audit log.
+  - **Done when:** a fresh cockpit turn shows up as one or more pages in the brain within ~10s of the assistant's final text.
+
+- [ ] **G4 · Code-graph for the repo**
+  - [ ] `gbrain sources add <this-repo> --strategy code` indexes our backend + frontend.
+  - [ ] Add to the Critic's tool kit: `code_callers`, `code_callees`, `code_def`, `code_refs`. The Critic can now point at the actual call site that contradicts a draft.
+  - **Done when:** asking the Critic "is this Pricing-rule discount within policy?" surfaces the policy-floor check function path + line, not just a vibes answer.
+
+- [ ] **G5 · Cockpit "[BRAIN]" tab**
+  - [ ] New tab in the data rail (sits beside `[REPORTS]`): live search box + recent pages, click → drawer renders the page with citations as inline links.
+  - [ ] Stage chip (`tier-1` / `tier-2` / `tier-3` per GBrain's enrichment tiers).
+  - [ ] Status strip gains a tiny `brain n pages` chip when GBrain is up, otherwise it's hidden (no `mock` chip — the brain is optional).
+  - **Done when:** operator can find any prior decision via the cockpit's Brain tab without leaving the cockpit.
+
+- [ ] **G6 · Track 5 / Track 6 reconciliation**
+  - [ ] Decision doc: one of (a) deprecate Track 5 Wiki entirely, (b) keep Track 5 for retail-domain `category/<x>` pages and route everything else to GBrain, or (c) implement a thin GBrain back-end for Track 5 (cockpit Wiki tab reads/writes GBrain pages directly).
+  - [ ] Kill or fold whichever Track 5 phases the decision retires.
+  - **Done when:** TODO has only one durable persistent-memory track.
+
+- [ ] **G7 · Docs + smoke tests**
+  - [ ] README "Running with GBrain" section (mirror of the ERPNext one): install, env wiring, sanity query.
+  - [ ] `backend/tests/test_gbrain_live.py` — env-gated smoke tests against `localhost:8787` for query / get / ingest.
+  - [ ] Note in the cockpit's status strip when `GBRAIN_BEARER` is missing or the endpoint is down — same chip pattern as the integrations row.
+
+## Open design questions (decide during G1)
+
+- PGLite (zero infra) vs Postgres (shareable across operators)? Lean PGLite for the demo, Postgres for any deployed environment.
+- Do we re-use the integrations adapter pattern for GBrain, or treat it as a first-class subsystem (its own folder, not an `IntegrationAdapter`)? Probably first-class — GBrain is durable agent memory, not a system of record.
+- Which GBrain skills do we pull into our cockpit's agent prompts directly (e.g. `quality.md`, `brain-first.md` cross-cutting rules) vs leave inside GBrain to fire on its own? Lean: import the cross-cutting `conventions/` rules into our system prompts so the cockpit's agents follow the same brain-first lookup discipline.
+- Network egress — GBrain has skills that hit the public web for enrichment. Disable in the demo unless the operator opts in. Surface as an explicit toggle in the cockpit.
