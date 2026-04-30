@@ -8,6 +8,7 @@ from app.spine.events import append_event
 from app.spine.artifacts import write_artifact
 from app.agents import (
     analyst,
+    critic,
     fulfillment,
     marketing,
     merchandiser,
@@ -29,6 +30,7 @@ Available specialists:
 - Merchandiser: assortment health, lifecycle, allocation, store transfer recommendations. Tool: delegate_to_merchandiser
 - Fulfillment: BOPIS, ship-from-store, DC routing, OMS-style choices. Tool: delegate_to_fulfillment
 - Store Manager: store execution, local tasking, labor/capacity exceptions. Tool: delegate_to_store_manager
+- Critic: read-only audit of another agent's draft artifact. Verifies facts against the spine, surfaces gaps / risks / overclaim, and proposes a counter-recommendation. Tool: delegate_to_critic — pass the artifact_id to review and a one-line scope description.
 
 Pattern for an operator request:
 1. Decide which specialist(s) to involve. For complex requests, sequence them: usually Analyst first to diagnose,
@@ -84,6 +86,7 @@ def build_orchestrator(llm: LLMProvider, event_sink: _EventBuffer) -> Agent:
     merch_agent = merchandiser.build_agent()
     fulfillment_agent = fulfillment.build_agent()
     store_agent = store_manager.build_agent()
+    critic_agent = critic.build_agent()
 
     def _run_delegate(specialist: Agent, task: str) -> dict:
         final_text = ""
@@ -125,6 +128,20 @@ def build_orchestrator(llm: LLMProvider, event_sink: _EventBuffer) -> Agent:
     def _delegate_store_manager(args: dict) -> dict:
         return _run_delegate(store_agent, args["task"])
 
+    def _delegate_critic(args: dict) -> dict:
+        # Stitch the artifact_id into the task so the Critic's first
+        # tool call is read_artifact(artifact_id=…). Cleaner than mutating
+        # the task description in the Chief's prompt.
+        artifact_id = args.get("artifact_id", "")
+        scope = args.get("task", "Audit the draft for facts, gaps, risks, and overclaim.")
+        task = (
+            f"Audit artifact_id={artifact_id}. {scope}\n\n"
+            "Start by calling read_artifact with that id. Then run any spine "
+            "queries you need to verify or contradict the draft. End with one "
+            "write_artifact call carrying the four required headings."
+        )
+        return _run_delegate(critic_agent, task)
+
     def _log_decision(args: dict) -> dict:
         eid = append_event(
             agent=NAME,
@@ -157,6 +174,30 @@ def build_orchestrator(llm: LLMProvider, event_sink: _EventBuffer) -> Agent:
         _build_delegate_tool("delegate_to_merchandiser", "Merchandiser"),
         _build_delegate_tool("delegate_to_fulfillment", "Fulfillment"),
         _build_delegate_tool("delegate_to_store_manager", "Store Manager"),
+        Tool(
+            name="delegate_to_critic",
+            description=(
+                "Hand a draft artifact to the Critic for read-only audit. "
+                "Pass the artifact_id you want reviewed and a one-line scope "
+                "for what to focus on (facts, policy, alternatives, …). "
+                "The Critic returns a `critique` artifact with the original "
+                "as a ref."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "artifact_id": {
+                        "type": "string",
+                        "description": "Id of the draft artifact to audit.",
+                    },
+                    "task": {
+                        "type": "string",
+                        "description": "Optional scope hint (e.g. 'check the discount against margin floor').",
+                    },
+                },
+                "required": ["artifact_id"],
+            },
+        ),
         Tool(
             name="log_decision",
             description="Log a top-level decision in the spine event log.",
@@ -191,6 +232,7 @@ def build_orchestrator(llm: LLMProvider, event_sink: _EventBuffer) -> Agent:
         "delegate_to_merchandiser": _delegate_merchandiser,
         "delegate_to_fulfillment": _delegate_fulfillment,
         "delegate_to_store_manager": _delegate_store_manager,
+        "delegate_to_critic": _delegate_critic,
         "log_decision": _log_decision,
         "write_summary_artifact": _write_artifact,
     }
