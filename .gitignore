@@ -1,0 +1,27 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+node_modules/
+backend/data/spine.db
+artifacts/*.md
+!artifacts/.gitkeep
+.DS_Store
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+
+# Local browser/test artifacts
+.playwright-cli/
+.playwright-mcp/
+output/
+tmp/
+
+# Generated screenshots from manual UI checks
+ai-retail-os-cockpit*.png
+artifact-modal.png
+closed-loop-measurement.png
+gemini-2-5-test.png
+google-test.png
+ui-after-chat.png

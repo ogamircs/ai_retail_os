@@ -1,0 +1,265 @@
+export type AgentEvent = {
+  kind: string;
+  agent: string;
+  data: Record<string, any>;
+};
+
+export type SpineEvent = {
+  id: number;
+  ts: string;
+  agent: string;
+  kind: string;
+  sku: string | null;
+  payload: Record<string, any>;
+  artifact_id: string | null;
+};
+
+export type ArtifactMeta = {
+  id: string;
+  agent: string;
+  ts: string;
+  kind: string;
+  title: string;
+  refs?: string[];
+};
+
+export type ConfigInfo = {
+  provider: string;
+  model: string;
+  has_key: boolean;
+};
+
+export type Kpi = {
+  label: string;
+  value: number;
+  format: "currency" | "percent" | "number";
+  delta: string;
+};
+
+export type CategoryOpportunity = {
+  category: string;
+  display_name: string;
+  lifecycle_stage: string;
+  margin_target: number;
+  marketing_priority: number;
+  weather_sensitivity: number;
+  notes: string;
+  sku_count: number;
+  on_hand: number;
+  inventory_value: number;
+  sales_units: number;
+  sales_revenue: number;
+  order_units: number;
+  order_revenue: number;
+  order_margin: number;
+  active_campaigns: number;
+  days_cover: number;
+  margin_rate: number;
+  inventory_pressure: number;
+  opportunity_score: number;
+  recommended_push: boolean;
+};
+
+export type Campaign = {
+  campaign_id: string;
+  title: string;
+  category: string;
+  segment_id: string;
+  segment_name?: string;
+  channel: string;
+  budget: number;
+  offer: string;
+  projected_lift: number;
+  actual_lift: number | null;
+  projected_roi: number;
+  actual_roi: number | null;
+  status: string;
+  starts_at: string;
+  ends_at: string;
+};
+
+export type Store = {
+  store_id: string;
+  name: string;
+  region: string;
+  capacity: number;
+  labor_pressure: number;
+  local_demand_signal: number;
+  weather_signal: string;
+  on_hand: number;
+  inventory_capacity: number;
+  order_units: number;
+  revenue: number;
+  margin: number;
+  capacity_used: number;
+  margin_rate: number;
+};
+
+export type ActionItem = {
+  id: number;
+  ts: string;
+  owner: string;
+  action_type: string;
+  title: string;
+  status: string;
+  payload: Record<string, any>;
+  artifact_id: string | null;
+};
+
+export type InventorySku = {
+  sku: string;
+  name: string;
+  category: string;
+  vendor: string;
+  on_hand: number;
+  reorder_point: number;
+  price: number;
+  base_price: number;
+  units_30d: number;
+  days_cover: number;
+  risk: "stockout" | "overstock" | "healthy";
+};
+
+export type InboundPo = {
+  po_id: string;
+  sku: string;
+  vendor: string;
+  eta: string;
+  qty: number;
+  status: string;
+  reliability: number;
+  category: string;
+  sku_name: string;
+};
+
+export type KpiResponse = {
+  kpis: Kpi[];
+  recommended_category: CategoryOpportunity | null;
+  last_campaign: Campaign | null;
+  generated_at: string;
+};
+
+export async function getConfig(): Promise<ConfigInfo> {
+  const r = await fetch("/api/config");
+  return r.json();
+}
+
+export async function setProvider(provider: string): Promise<ConfigInfo> {
+  const r = await fetch("/api/config", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider }),
+  });
+  return r.json();
+}
+
+export async function listEvents(since = 0): Promise<SpineEvent[]> {
+  const r = await fetch(`/api/events?since=${since}`);
+  const j = await r.json();
+  return j.events;
+}
+
+export async function listArtifacts(): Promise<ArtifactMeta[]> {
+  const r = await fetch("/api/artifacts");
+  const j = await r.json();
+  return j.artifacts;
+}
+
+export async function getArtifact(
+  id: string,
+): Promise<ArtifactMeta & { body: string }> {
+  const r = await fetch(`/api/artifacts/${id}`);
+  return r.json();
+}
+
+export async function getKpis(): Promise<KpiResponse> {
+  const r = await fetch("/api/kpis");
+  return r.json();
+}
+
+export async function listCategories(): Promise<CategoryOpportunity[]> {
+  const r = await fetch("/api/categories");
+  const j = await r.json();
+  return j.categories;
+}
+
+export async function listCampaigns(): Promise<Campaign[]> {
+  const r = await fetch("/api/marketing/campaigns");
+  const j = await r.json();
+  return j.campaigns;
+}
+
+export async function getInventoryHealth(): Promise<{
+  categories: CategoryOpportunity[];
+  skus: InventorySku[];
+  inbound_pos: InboundPo[];
+}> {
+  const r = await fetch("/api/inventory/health");
+  return r.json();
+}
+
+export async function listStores(): Promise<Store[]> {
+  const r = await fetch("/api/stores");
+  const j = await r.json();
+  return j.stores;
+}
+
+export async function listActionQueue(): Promise<ActionItem[]> {
+  const r = await fetch("/api/action-queue");
+  const j = await r.json();
+  return j.actions;
+}
+
+/** Stream chat events via fetch + SSE parser (POST body required, EventSource is GET-only). */
+export async function chatStream(
+  message: string,
+  onEvent: (ev: AgentEvent) => void,
+  onDone: () => void,
+  onError: (err: string) => void,
+) {
+  try {
+    const resp = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message }),
+    });
+    if (!resp.ok || !resp.body) {
+      onError(`HTTP ${resp.status}`);
+      return;
+    }
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    const findBoundary = (s: string): number => {
+      const a = s.indexOf("\n\n");
+      const b = s.indexOf("\r\n\r\n");
+      if (a === -1) return b;
+      if (b === -1) return a;
+      return Math.min(a, b);
+    };
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx: number;
+      while ((idx = findBoundary(buf)) !== -1) {
+        const sep = buf.slice(idx, idx + 4) === "\r\n\r\n" ? 4 : 2;
+        const chunk = buf.slice(0, idx);
+        buf = buf.slice(idx + sep);
+        for (const line of chunk.split(/\r?\n/)) {
+          if (line.startsWith("data: ")) {
+            try {
+              const payload: AgentEvent = JSON.parse(line.slice(6));
+              onEvent(payload);
+            } catch {
+              /* ignore malformed */
+            }
+          }
+        }
+      }
+    }
+    onDone();
+  } catch (e: any) {
+    onError(e?.message || String(e));
+  }
+}
