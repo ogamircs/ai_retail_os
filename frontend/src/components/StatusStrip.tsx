@@ -117,14 +117,17 @@ export default function StatusStrip() {
         className={`approve ${approveN > 0 ? "approve-on" : ""}`}
         data-testid="approve-button"
         onClick={() => {
+          // Selector must mirror PENDING_EXTERNAL_STATUSES — otherwise the
+          // chip can light up (counter sees `approval_required`) but the
+          // click finds no row and silently does nothing.
           const first = data.actions.find(
             (a) =>
               a.status === "approval_required" ||
-              (a.external_actions ?? []).some((x) => x.status === "mock_only" || x.status === "proposed"),
+              (a.external_actions ?? []).some((x) => PENDING_EXTERNAL_STATUSES.has(x.status)),
           );
           if (first) {
-            const ex = (first.external_actions ?? []).find(
-              (x) => x.status === "mock_only" || x.status === "proposed",
+            const ex = (first.external_actions ?? []).find((x) =>
+              PENDING_EXTERNAL_STATUSES.has(x.status),
             );
             open({ kind: "approval", action: first, external: ex });
           }
