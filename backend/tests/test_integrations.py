@@ -369,6 +369,86 @@ class IntegrationLayerTest(unittest.TestCase):
         self.assertEqual(len(out), 5)
         self.assertTrue(truncated)
 
+    def test_medusa_admin_request_relogins_on_401(self):
+        """A stale JWT (expired or revoked admin-side) would otherwise
+        get the adapter stuck returning 401s until restart. _admin_request
+        drops the cached token on 401, re-logins, retries once.
+        """
+        from urllib.error import HTTPError
+        from app.integrations.systems import MedusaAdapter
+
+        os.environ["MEDUSA_BASE_URL"] = "http://stub"
+        os.environ["MEDUSA_ADMIN_EMAIL"] = "admin@retail.local"
+        os.environ["MEDUSA_ADMIN_PASSWORD"] = "pw"
+
+        adapter = MedusaAdapter()
+        adapter._admin_token = "stale-token"
+
+        login_calls: list[int] = []
+        request_calls: list[str] = []
+
+        def _fake_login() -> str:
+            login_calls.append(1)
+            adapter._admin_token = f"fresh-{len(login_calls)}"
+            return adapter._admin_token
+
+        adapter._login = _fake_login  # type: ignore[method-assign]
+
+        class _FlakyClient:
+            def __init__(self, token: str):
+                self.token = token
+
+            def request(self, path: str, method: str = "GET", payload: dict | None = None):
+                request_calls.append(self.token)
+                if self.token == "stale-token":
+                    raise HTTPError(
+                        url=path, code=401, msg="Unauthorized", hdrs=None, fp=None
+                    )
+                return {"products": [{"id": "prd_1"}], "count": 1}
+
+        # Mirror the real _client behaviour: re-login first, then build
+        # the http client with whatever token is current. Without this the
+        # second call after `_admin_token = None` wouldn't pick up the
+        # refreshed token.
+        def _stubbed_client():
+            if not adapter._admin_token:
+                adapter._login()
+            return _FlakyClient(adapter._admin_token)
+
+        adapter._client = _stubbed_client  # type: ignore[method-assign]
+
+        out = adapter._admin_request("/admin/products?limit=1")
+        self.assertEqual(out, {"products": [{"id": "prd_1"}], "count": 1})
+        # First call uses stale token (401), then re-login fires once,
+        # second call uses the fresh token and succeeds.
+        self.assertEqual(request_calls, ["stale-token", "fresh-1"])
+        self.assertEqual(len(login_calls), 1)
+
+    def test_medusa_admin_request_does_not_retry_on_non_401(self):
+        """A 500 (or any non-401) should propagate — re-login won't help
+        and would mask real upstream errors.
+        """
+        from urllib.error import HTTPError
+        from app.integrations.systems import MedusaAdapter
+
+        os.environ["MEDUSA_BASE_URL"] = "http://stub"
+        os.environ["MEDUSA_ADMIN_EMAIL"] = "admin@retail.local"
+        os.environ["MEDUSA_ADMIN_PASSWORD"] = "pw"
+
+        adapter = MedusaAdapter()
+        adapter._admin_token = "some-token"
+        login_calls: list[int] = []
+        adapter._login = lambda: (login_calls.append(1) or "tok")  # type: ignore[method-assign]
+
+        class _ServerErrClient:
+            def request(self, path: str, method: str = "GET", payload: dict | None = None):
+                raise HTTPError(url=path, code=500, msg="boom", hdrs=None, fp=None)
+
+        adapter._client = lambda: _ServerErrClient()  # type: ignore[method-assign]
+        with self.assertRaises(HTTPError):
+            adapter._admin_request("/admin/products?limit=1")
+        self.assertEqual(len(login_calls), 0)  # no retry, no relogin
+
     def test_medusa_configured_requires_admin_creds(self):
         """env_keys only checks MEDUSA_BASE_URL; the override must also
         require admin email + password — without them there's nothing to

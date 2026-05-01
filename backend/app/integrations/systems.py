@@ -6,6 +6,7 @@ import json
 import os
 import re
 from typing import Any
+from urllib.error import HTTPError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
@@ -1194,11 +1195,34 @@ class MedusaAdapter(IntegrationAdapter):
             headers={"Authorization": f"Bearer {token}"},
         )
 
+    def _admin_request(
+        self,
+        path: str,
+        method: str = "GET",
+        payload: dict[str, Any] | None = None,
+    ) -> Any:
+        """Wrap a /admin/* call with one re-login + retry on 401.
+
+        Medusa v2 admin tokens are JWTs with a finite lifetime (and can
+        be revoked admin-side). A long-running cockpit process would
+        otherwise keep using a stale token after expiry and `sync_inbound`
+        would stay stuck returning `error` until restart. On 401 we drop
+        the cached token, re-login, and retry once; any further 4xx/5xx
+        raises so the live-sync wrapper can land it as `error`.
+        """
+        try:
+            return self._client().request(path, method=method, payload=payload)
+        except HTTPError as e:
+            if e.code != 401:
+                raise
+            self._admin_token = None
+            return self._client().request(path, method=method, payload=payload)
+
     def healthcheck(self) -> IntegrationResult:
         if not self.configured():
             return super().healthcheck()
         try:  # pragma: no cover - live-system path
-            data = self._client().request("/admin/products?limit=1")
+            data = self._admin_request("/admin/products?limit=1")
             return IntegrationResult(
                 status="connected",
                 summary={"products_seen": len(data.get("products", []))},
@@ -1238,7 +1262,7 @@ class MedusaAdapter(IntegrationAdapter):
                 limit if max_rows is None else min(limit, max(1, max_rows - len(out)))
             )
             qs = urlencode({"limit": page_limit, "offset": offset})
-            data = self._client().request(f"/admin/{endpoint}?{qs}")
+            data = self._admin_request(f"/admin/{endpoint}?{qs}")
             rows = data.get(key) or []
             if not isinstance(rows, list) or not rows:
                 break
