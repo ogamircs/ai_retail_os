@@ -9,10 +9,14 @@ MAUTIC_COMPOSE := docker compose -p ai-retail-mautic -f $(MAUTIC_DIR)/docker-com
 MEDUSA_DIR := infra/medusa
 MEDUSA_COMPOSE := docker compose -p ai-retail-medusa -f $(MEDUSA_DIR)/docker-compose.yml
 
+OPENBOXES_DIR := infra/openboxes
+OPENBOXES_COMPOSE := docker compose -p ai-retail-openboxes -f $(OPENBOXES_DIR)/docker-compose.yml
+
 .PHONY: help \
         erpnext-up erpnext-down erpnext-bootstrap erpnext-seed erpnext-logs erpnext-status erpnext-nuke \
         mautic-up mautic-down mautic-bootstrap mautic-seed mautic-logs mautic-status mautic-nuke \
-        medusa-up medusa-down medusa-bootstrap medusa-seed medusa-logs medusa-status medusa-nuke
+        medusa-up medusa-down medusa-bootstrap medusa-seed medusa-logs medusa-status medusa-nuke \
+        openboxes-up openboxes-down openboxes-bootstrap openboxes-seed openboxes-logs openboxes-status openboxes-nuke
 
 help:
 	@echo "ERPNext:"
@@ -41,6 +45,15 @@ help:
 	@echo "  medusa-logs        tail logs from the stack"
 	@echo "  medusa-down        stop the stack (volumes preserved)"
 	@echo "  medusa-nuke        stop and wipe volumes (full reset)"
+	@echo ""
+	@echo "OpenBoxes:"
+	@echo "  openboxes-up          build + start OpenBoxes stack (mysql + tomcat on :8082)"
+	@echo "  openboxes-bootstrap   wait for Liquibase migrations + print admin creds"
+	@echo "  openboxes-seed        project the spine demo data into OpenBoxes (idempotent)"
+	@echo "  openboxes-status      show running containers"
+	@echo "  openboxes-logs        tail logs from the stack"
+	@echo "  openboxes-down        stop the stack (volumes preserved)"
+	@echo "  openboxes-nuke        stop and wipe volumes (full reset)"
 
 erpnext-up:
 	$(ERPNEXT_COMPOSE) up -d
@@ -104,3 +117,24 @@ medusa-bootstrap:
 
 medusa-seed:
 	python3 $(MEDUSA_DIR)/seed.py
+
+openboxes-up:
+	$(OPENBOXES_COMPOSE) up -d --build
+
+openboxes-down:
+	$(OPENBOXES_COMPOSE) down
+
+openboxes-nuke:
+	$(OPENBOXES_COMPOSE) down -v
+
+openboxes-status:
+	$(OPENBOXES_COMPOSE) ps
+
+openboxes-logs:
+	$(OPENBOXES_COMPOSE) logs -f --tail=50
+
+openboxes-bootstrap:
+	bash $(OPENBOXES_DIR)/bootstrap.sh
+
+openboxes-seed:
+	python3 $(OPENBOXES_DIR)/seed.py

@@ -467,6 +467,185 @@ class IntegrationLayerTest(unittest.TestCase):
         os.environ["MEDUSA_ADMIN_PASSWORD"] = "pw"
         self.assertTrue(MedusaAdapter().configured())
 
+    def test_openboxes_configured_requires_auth(self):
+        """env_keys only checks OPENBOXES_BASE_URL; the override must
+        also require a token OR user/password.
+        """
+        from app.integrations.systems import OpenBoxesAdapter
+
+        os.environ["OPENBOXES_BASE_URL"] = "http://stub"
+        os.environ.pop("OPENBOXES_USERNAME", None)
+        os.environ.pop("OPENBOXES_PASSWORD", None)
+        os.environ.pop("OPENBOXES_API_TOKEN", None)
+        self.assertFalse(OpenBoxesAdapter().configured())
+
+        os.environ["OPENBOXES_API_TOKEN"] = "tok"
+        self.assertTrue(OpenBoxesAdapter().configured())
+        os.environ.pop("OPENBOXES_API_TOKEN")
+
+        os.environ["OPENBOXES_USERNAME"] = "openboxes"
+        self.assertFalse(OpenBoxesAdapter().configured())  # still missing pw
+        os.environ["OPENBOXES_PASSWORD"] = "pw"
+        self.assertTrue(OpenBoxesAdapter().configured())
+
+    def test_openboxes_admin_request_relogins_on_401(self):
+        """Mirror of MedusaAdapter.test_admin_request_relogins_on_401:
+        stale token → drop, re-login, retry once.
+        """
+        from urllib.error import HTTPError
+        from app.integrations.systems import OpenBoxesAdapter
+
+        os.environ["OPENBOXES_BASE_URL"] = "http://stub"
+        os.environ["OPENBOXES_USERNAME"] = "openboxes"
+        os.environ["OPENBOXES_PASSWORD"] = "pw"
+        os.environ.pop("OPENBOXES_API_TOKEN", None)
+
+        adapter = OpenBoxesAdapter()
+        adapter._auth_token = "stale"
+
+        login_calls: list[int] = []
+
+        def _fake_login() -> str:
+            login_calls.append(1)
+            adapter._auth_token = f"fresh-{len(login_calls)}"
+            return adapter._auth_token
+
+        adapter._login = _fake_login  # type: ignore[method-assign]
+
+        request_calls: list[str] = []
+
+        class _Flaky:
+            def __init__(self, token: str):
+                self.token = token
+
+            def request(self, path: str, method: str = "GET", payload: dict | None = None):
+                request_calls.append(self.token)
+                if self.token == "stale":
+                    raise HTTPError(url=path, code=401, msg="Unauthorized", hdrs=None, fp=None)
+                return {"data": [{"id": "loc_1"}]}
+
+        def _stubbed_client():
+            if not adapter._auth_token:
+                adapter._login()
+            return _Flaky(adapter._auth_token)
+
+        adapter._client = _stubbed_client  # type: ignore[method-assign]
+
+        out = adapter._admin_request("/api/locations?max=1")
+        self.assertEqual(out, {"data": [{"id": "loc_1"}]})
+        self.assertEqual(request_calls, ["stale", "fresh-1"])
+        self.assertEqual(len(login_calls), 1)
+
+    def test_openboxes_apply_po_held_annotates_matching_shipment(self):
+        """`po_held` apply: payload.pos[*].po_id matches shipments by
+        name; helper POSTs a comment per match and returns the first
+        shipment id.
+        """
+        from app.integrations.systems import OpenBoxesAdapter
+        from app.integrations import store
+
+        os.environ["OPENBOXES_BASE_URL"] = "http://stub"
+        os.environ["OPENBOXES_API_TOKEN"] = "tok"
+
+        adapter = OpenBoxesAdapter()
+        adapter._auth_token = "tok"
+        adapter._login = lambda: "tok"  # type: ignore[method-assign]
+
+        row = store.create_outbox_action(
+            system_id="openboxes",
+            action_queue_id=None,
+            agent="Replenishment",
+            action_type="po_held",
+            title="Hold inbound POs",
+            external_domain="Purchase Order",
+            payload={
+                "pos": [{"po_id": "PO-101"}, {"po_id": "PO-999"}],
+                "reason": "weather risk",
+            },
+            configured=True,
+        )
+
+        posts: list[dict] = []
+
+        class _Stub:
+            def request(self, path: str, method: str = "GET", payload: dict | None = None):
+                if path.startswith("/api/shipments?direction=INBOUND") and method == "GET":
+                    return {"data": [{"id": "ship_1", "name": "PO-101"}]}
+                if path.startswith("/api/shipments/ship_1/comments") and method == "POST":
+                    posts.append({"path": path, "payload": payload})
+                    return {"data": {"id": "cmt_1"}}
+                if path.startswith("/api/shipments") and method == "GET":
+                    return {"data": [{"id": "ship_1", "name": "PO-101"}]}
+                return {}
+
+        adapter._client = lambda: _Stub()  # type: ignore[method-assign]
+
+        result = adapter.apply_outbound(row["id"])
+        self.assertEqual(result["status"], "draft_created", msg=result)
+        self.assertEqual(result["external_id"], "ship_1")
+        self.assertEqual(len(posts), 1)
+        self.assertIn("po_held", posts[0]["payload"]["comment"])
+
+    def test_openboxes_apply_no_matching_shipment_lands_in_error(self):
+        """payload.pos[*].po_id with no matching shipment → no external_id
+        → row lands in `error` (not `draft_created`).
+        """
+        from app.integrations.systems import OpenBoxesAdapter
+        from app.integrations import store
+
+        os.environ["OPENBOXES_BASE_URL"] = "http://stub"
+        os.environ["OPENBOXES_API_TOKEN"] = "tok"
+
+        adapter = OpenBoxesAdapter()
+        adapter._auth_token = "tok"
+        adapter._login = lambda: "tok"  # type: ignore[method-assign]
+
+        row = store.create_outbox_action(
+            system_id="openboxes",
+            action_queue_id=None,
+            agent="Replenishment",
+            action_type="po_held",
+            title="Hold inbound POs",
+            external_domain="Purchase Order",
+            payload={"pos": [{"po_id": "PO-DOES-NOT-EXIST"}], "reason": "x"},
+            configured=True,
+        )
+
+        class _Empty:
+            def request(self, path: str, method: str = "GET", payload: dict | None = None):
+                if path.startswith("/api/shipments"):
+                    return {"data": []}
+                return {}
+
+        adapter._client = lambda: _Empty()  # type: ignore[method-assign]
+        result = adapter.apply_outbound(row["id"])
+        self.assertEqual(result["status"], "error")
+        self.assertIn("no matching inbound shipments", result["result"]["error"].lower() if result["result"]["error"] else "")
+
+    def test_openboxes_apply_unsupported_falls_back(self):
+        """`store_transfer` (declared in outbound_domain but NOT in
+        LIVE_ACTION_TYPES for OpenBoxes) falls back to base mock-apply.
+        """
+        from app.integrations.systems import OpenBoxesAdapter
+        from app.integrations import store
+
+        os.environ["OPENBOXES_BASE_URL"] = "http://stub"
+        os.environ["OPENBOXES_API_TOKEN"] = "tok"
+
+        adapter = OpenBoxesAdapter()
+        row = store.create_outbox_action(
+            system_id="openboxes",
+            action_queue_id=None,
+            agent="Merchandiser",
+            action_type="store_transfer",
+            title="Skip me",
+            external_domain="Stock Movement",
+            payload={"category": "x"},
+            configured=True,
+        )
+        result = adapter.apply_outbound(row["id"])
+        self.assertEqual(result["status"], "draft_created")  # base mock-apply
+
     def test_mautic_list_flags_truncation_when_max_rows_hit(self):
         """If a caller does pass an explicit max_rows and the API has more
         rows than that, the helper must return truncated=True. The default

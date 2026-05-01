@@ -1,0 +1,72 @@
+# Minimal OpenBoxes stack for the AI Retail OS demo.
+# Single-host, dev/demo only — same shape as infra/erpnext + infra/mautic + infra/medusa.
+#
+# Brought up via:
+#   make openboxes-up         # build + start the stack
+#   make openboxes-bootstrap  # waits for Tomcat to come up; OpenBoxes
+#                               runs Liquibase migrations on first boot
+#                               so there's nothing to run by hand
+#   make openboxes-down       # stop, keep volumes
+#   make openboxes-nuke       # stop and wipe volumes (full reset)
+#
+# Server:      http://localhost:8082
+# Admin user:  openboxes (default seeded by Liquibase)
+# Admin pass:  password   (you'll be prompted to change on first login)
+
+x-openboxes-env: &openboxes_env
+  CATALINA_OPTS: "-Xmx2048m -XX:MaxMetaspaceSize=512m -Duser.timezone=UTC"
+  GRAILS_OPTS: ""
+  # Forwarded to the WAR. Hand-tuned to point at the compose `db` service.
+  DB_HOST: db
+  DB_PORT: "3306"
+  DB_NAME: openboxes
+  DB_USER: openboxes
+  DB_PASSWORD: ${OPENBOXES_DB_PASSWORD:-openboxes}
+
+services:
+  db:
+    image: mysql:5.7
+    platform: linux/amd64
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u root --password=${OPENBOXES_DB_ROOT_PASSWORD:-root}"]
+      interval: 2s
+      retries: 30
+    environment:
+      MYSQL_ROOT_PASSWORD: ${OPENBOXES_DB_ROOT_PASSWORD:-root}
+      MYSQL_DATABASE: openboxes
+      MYSQL_USER: openboxes
+      MYSQL_PASSWORD: ${OPENBOXES_DB_PASSWORD:-openboxes}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=mysql_native_password
+    volumes:
+      - db-data:/var/lib/mysql
+
+  openboxes:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ai-retail-os/openboxes:local
+    # OpenBoxes 0.9.x WAR is amd64-only — explicit platform pin so it
+    # runs (under emulation) on Apple Silicon. Slow but functional.
+    platform: linux/amd64
+    restart: unless-stopped
+    environment:
+      <<: *openboxes_env
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8082:8080"
+    volumes:
+      # Mount the demo config in at runtime so the WAR can find it under
+      # ~/.grails/openboxes-config.properties — which is where Grails
+      # reads dataSource.url etc.
+      - ./openboxes-config.properties:/root/.grails/openboxes-config.properties:ro
+      - openboxes-uploads:/usr/local/tomcat/uploads
+
+volumes:
+  db-data:
+  openboxes-uploads:

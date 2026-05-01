@@ -361,6 +361,89 @@ make medusa-bootstrap
 make medusa-seed
 ```
 
+## Running with real OpenBoxes
+
+The `openboxes` adapter has its own local-stack rollout. See `infra/openboxes/README.md` for the full setup; quick path:
+
+```bash
+# 1. Stack: mysql + custom tomcat-based openboxes image (first run
+#    pulls the ~190MB WAR; Liquibase migrations on first boot take 3-5 min)
+make openboxes-up
+
+# 2. Wait for Tomcat + Liquibase, then print admin URL + creds
+make openboxes-bootstrap
+# → prints OPENBOXES_BASE_URL / OPENBOXES_USERNAME / OPENBOXES_PASSWORD
+
+# 3. Sign in once at http://localhost:8082 with openboxes / password,
+#    change the password, optionally mint an API token from user-settings.
+#
+# 4. Wire backend/.env with the printed creds:
+#    OPENBOXES_BASE_URL=http://localhost:8082
+#    OPENBOXES_USERNAME=openboxes
+#    OPENBOXES_PASSWORD=<your-new-password>
+#    # OPTIONAL: bypass the login flow once you've minted a token
+#    # OPENBOXES_API_TOKEN=...
+#
+# 5. Project the spine demo data (5 Locations + 30 Products):
+make openboxes-seed
+
+# 6. (Re)start the backend so it picks up the new env:
+cd backend && uvicorn app.main:app --reload
+```
+
+Sanity-check auth (token round-trip):
+
+```bash
+curl -s -X POST -H 'Content-Type: application/json' \
+  -d "{\"username\":\"$OPENBOXES_USERNAME\",\"password\":\"$OPENBOXES_PASSWORD\"}" \
+  "$OPENBOXES_BASE_URL/api/login" | head -c 200; echo
+# → {"token":"..."}  (or {"data":{"token":"..."}}, depending on minor)
+```
+
+In the cockpit's Integrations tab the `openboxes` row will show a green `connected` chip. Click `sync` to pull live Locations / Products / Inbound Shipments into `record_cache` + `external_refs`. Approve a `Replenishment → po_held` (or `po_expedited`) via the drawer's `apply → external` button — the adapter posts a `Comment` on each matching inbound Shipment in OpenBoxes, visible at `/shipment/show/<id>`.
+
+A walkthrough with CLI-equivalent verification steps lives in [`docs/uat/2026-04-30-openboxes-p5-po-hold-demo.md`](docs/uat/2026-04-30-openboxes-p5-po-hold-demo.md).
+
+### What lands in OpenBoxes per action type
+
+| `action_type` | OpenBoxes target | What gets written |
+|---|---|---|
+| `po_held` | inbound `Shipment` | `Comment` per matching shipment, prefixed `[AI Retail OS · po_held]`, carrying the operator's reason. Match key: `payload.pos[*].po_id` ↔ shipment `name` / `shipmentNumber`. |
+| `po_expedited` | inbound `Shipment` | same shape as `po_held` but with the `po_expedited` prefix. |
+| `store_transfer` | falls back to base mock-apply | OpenBoxes' Stock Movement domain has stricter validation than substrate exposes; deferred to a future phase. |
+| anything else | base mock-apply | configured → `draft_created`, unconfigured → `applied_mock`. No external write. |
+
+> **Apple Silicon note:** OpenBoxes 0.9.x WAR is amd64-only. The compose pins `platform: linux/amd64` so it runs under emulation — slow but functional. Expect 2-3× slower than ERPNext / Mautic / Medusa.
+
+### Troubleshooting
+
+| Symptom | What to check |
+|---|---|
+| First `make openboxes-up` takes a long time | Image build pulls the ~190 MB WAR + Liquibase applies 200+ changesets on first boot. `make openboxes-logs` to watch progress. |
+| `make openboxes-bootstrap` times out | First-boot Liquibase isn't done yet. Re-running the bootstrap is safe. |
+| Cockpit Integrations row stays `mock` | `backend/.env` not picked up by the running uvicorn — restart. The override needs `OPENBOXES_BASE_URL` *plus* either `OPENBOXES_API_TOKEN` or `OPENBOXES_USERNAME` + `OPENBOXES_PASSWORD`. |
+| `/api/login` returns 401 | OpenBoxes prompts for password change on first login. Sign in once via the UI, change the password, then update `OPENBOXES_PASSWORD` in `backend/.env`. |
+| `apply → external` returns `error` chip on `po_held` | Most often: `payload.pos[*].po_id` doesn't match any shipment name. Re-run `make openboxes-seed` (or import a CSV that names shipments after the substrate `po_id`s). |
+| `/api/*` calls 401 mid-session | The cockpit caches the X-Auth-Token. On 401 the adapter drops the cached token, re-logins, and retries once — verify creds if the second attempt also fails. |
+| Apple Silicon: container runs slowly | Expected — OpenBoxes 0.9.x is amd64-only and runs under qemu emulation. |
+| Want a clean slate | `make openboxes-nuke && make openboxes-up && make openboxes-bootstrap && make openboxes-seed` |
+
+### Live-path tests
+
+`backend/tests/test_integrations_openboxes_live.py` exercises sync + apply against a real OpenBoxes. Skipped automatically when `OPENBOXES_BASE_URL` isn't set or auth env (token OR user/password) is missing, so CI stays mock-only:
+
+```bash
+cd backend
+python -m unittest discover -s tests          # mock-only — live tests skipped
+python -m unittest discover -s tests          # all pass with backend/.env wired
+```
+
+To reset everything from scratch:
+
+```bash
+make openboxes-nuke && make openboxes-up && make openboxes-bootstrap && make openboxes-seed
+```
+
 ## Provider swap
 
 In the header, change the provider dropdown (Anthropic / OpenAI / Google). Identical behavior, different model. Requires the corresponding API key in `.env`.

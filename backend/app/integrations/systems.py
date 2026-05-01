@@ -1417,6 +1417,9 @@ class MedusaAdapter(IntegrationAdapter):
         )
 
 
+_OPENBOXES_MARKER_RE = re.compile(r"\[retail-os:([a-zA-Z0-9_\-]+)\]")
+
+
 class OpenBoxesAdapter(IntegrationAdapter):
     definition = IntegrationDefinition(
         system_id="openboxes",
@@ -1427,7 +1430,173 @@ class OpenBoxesAdapter(IntegrationAdapter):
         notes="Warehouse/DC inventory, receiving, stock movements, and inbound supplier realism.",
     )
 
+    _auth_token: str | None = None
+
+    def configured(self) -> bool:
+        # Beyond MEDUSA_BASE_URL / mirror, require either a pre-baked
+        # OPENBOXES_API_TOKEN or the user/password pair the bootstrap
+        # script prints.
+        if not super().configured():
+            return False
+        if os.getenv("OPENBOXES_API_TOKEN", "").strip():
+            return True
+        return bool(
+            os.getenv("OPENBOXES_USERNAME", "").strip()
+            and os.getenv("OPENBOXES_PASSWORD", "").strip()
+        )
+
+    def _login(self) -> str:
+        """`POST /api/login` → token. Cached on the instance.
+
+        Operator can supply OPENBOXES_API_TOKEN to bypass the login flow
+        (useful for CI / shared environments where the bootstrap admin
+        password is unknown).
+        """
+        if self._auth_token:
+            return self._auth_token
+        env_token = os.getenv("OPENBOXES_API_TOKEN", "").strip()
+        if env_token:
+            self._auth_token = env_token
+            return env_token
+        client = JsonHttpClient(os.environ["OPENBOXES_BASE_URL"])
+        data = client.request(
+            "/api/login",
+            method="POST",
+            payload={
+                "username": os.environ["OPENBOXES_USERNAME"],
+                "password": os.environ["OPENBOXES_PASSWORD"],
+            },
+        )
+        # OpenBoxes returns either {"token": "..."} or wraps in {"data": {...}}
+        # depending on the minor; handle both.
+        token = (
+            (data or {}).get("token")
+            or ((data or {}).get("data") or {}).get("token")
+        )
+        if not token:
+            raise RuntimeError(f"openboxes login returned no token: {data}")
+        self._auth_token = token
+        return token
+
+    def _client(self) -> JsonHttpClient:
+        token = self._login()
+        return JsonHttpClient(
+            os.environ["OPENBOXES_BASE_URL"],
+            headers={"X-Auth-Token": token},
+        )
+
+    def _admin_request(
+        self,
+        path: str,
+        method: str = "GET",
+        payload: dict[str, Any] | None = None,
+    ) -> Any:
+        """Wrap /api/* calls with one re-login + retry on 401 — same shape
+        as MedusaAdapter._admin_request.
+        """
+        try:
+            return self._client().request(path, method=method, payload=payload)
+        except HTTPError as e:
+            if e.code != 401:
+                raise
+            self._auth_token = None
+            return self._client().request(path, method=method, payload=payload)
+
+    def healthcheck(self) -> IntegrationResult:
+        if not self.configured():
+            return super().healthcheck()
+        try:  # pragma: no cover - live-system path
+            data = self._admin_request("/api/locations?max=1")
+            count = len(data.get("data") or data.get("locations") or [])
+            return IntegrationResult(status="connected", summary={"locations_seen": count})
+        except Exception as exc:
+            return IntegrationResult(status="error", error=str(exc))
+
     def sync_inbound(self) -> IntegrationResult:
+        if not self.configured():
+            return self._mock_sync()
+        try:
+            return self._live_sync()
+        except Exception as exc:
+            return IntegrationResult(status="error", error=str(exc))
+
+    # ----- live ------------------------------------------------------------
+
+    def _api_list(self, endpoint: str, *, key: str = "data", query: dict | None = None) -> list[dict[str, Any]]:
+        """GET /api/<endpoint>. OpenBoxes 0.9.x returns the list under
+        either `data` or the resource's own key — we accept both shapes.
+        Single-page only — the demo seed creates < 100 rows of each
+        domain and the cockpit doesn't currently paginate against
+        openboxes.
+        """
+        qs = urlencode(query or {})
+        path = f"/api/{endpoint}" + (f"?{qs}" if qs else "")
+        data = self._admin_request(path)
+        rows = data.get(key) or data.get(endpoint) or data.get("data") or []
+        if isinstance(rows, dict):
+            return list(rows.values())
+        return rows if isinstance(rows, list) else []
+
+    def _live_sync(self) -> IntegrationResult:
+        domains: dict[str, int] = {}
+        records_read = 0
+        records_written = 0
+
+        # Locations: round-trip via the [retail-os:<store_id>] marker
+        # the seed embeds in description (mirror of Medusa's metadata
+        # stash, since OpenBoxes' Location domain doesn't have a
+        # general-purpose JSON metadata field).
+        locations = self._api_list("locations")
+        for loc in locations:
+            external_id = _coerce_id(loc.get("id"))
+            if external_id is None:
+                continue
+            description = loc.get("description") or ""
+            match = _OPENBOXES_MARKER_RE.search(description)
+            local_id = match.group(1) if match else None
+            self._cache("Location", external_id, loc, local_id)
+            domains["Location"] = domains.get("Location", 0) + 1
+            records_written += 1
+            records_read += 1
+
+        # Products: local_id is `productCode` (== substrate SKU when
+        # seeded; operator-created products fall through with no local_id).
+        products = self._api_list("products")
+        for prod in products:
+            external_id = _coerce_id(prod.get("id"))
+            if external_id is None:
+                continue
+            local_id = prod.get("productCode") or prod.get("product_code")
+            self._cache("Product", external_id, prod, local_id)
+            domains["Product"] = domains.get("Product", 0) + 1
+            records_written += 1
+            records_read += 1
+
+        # Inbound shipments: we GET-with-direction-INBOUND when the
+        # endpoint accepts it, fall back to the unfiltered list.
+        try:
+            shipments = self._api_list("shipments", query={"direction": "INBOUND"})
+        except Exception:
+            shipments = self._api_list("shipments")
+        for ship in shipments:
+            external_id = _coerce_id(ship.get("id"))
+            if external_id is None:
+                continue
+            self._cache("Inbound Shipment", external_id, ship, ship.get("name"))
+            domains["Inbound Shipment"] = domains.get("Inbound Shipment", 0) + 1
+            records_written += 1
+            records_read += 1
+
+        return IntegrationResult(
+            status="success",
+            records_read=records_read,
+            records_written=records_written,
+            summary={"mode": "connected", "domains": domains},
+        )
+
+    # ----- mock ------------------------------------------------------------
+
+    def _mock_sync(self) -> IntegrationResult:
         domains: dict[str, int] = {}
         records_written = 0
         with conn() as c:
@@ -1448,13 +1617,173 @@ class OpenBoxesAdapter(IntegrationAdapter):
             status="success",
             records_read=records_written,
             records_written=records_written,
-            summary={"mode": "mock" if not self.configured() else "connected_stub", "domains": domains},
+            summary={"mode": "mock", "domains": domains},
         )
+
+    def _cache(self, domain: str, external_id: str, payload: dict[str, Any], local_id: str | None) -> None:
+        store.cache_record(self.definition.system_id, domain, str(external_id), payload, local_id=local_id)
+        if local_id:
+            store.record_external_ref(
+                self.definition.system_id,
+                domain,
+                str(local_id),
+                str(external_id),
+                external_url=self._external_url(domain, str(external_id)),
+                props={"source": "OpenBoxes"},
+            )
+
+    def _external_url(self, domain: str, external_id: str) -> str | None:
+        base = os.getenv("OPENBOXES_BASE_URL")
+        if not base:
+            return None
+        path = {
+            "Location": "location/show",
+            "Product": "product/show",
+            "Inbound Shipment": "shipment/show",
+        }.get(domain)
+        if not path:
+            return None
+        return f"{base.rstrip('/')}/{path}/{quote(external_id)}"
 
     def outbound_domain(self, action_type: str) -> str:
         return {"po_held": "Purchase Order", "po_expedited": "Purchase Order", "store_transfer": "Stock Movement"}.get(
             action_type, super().outbound_domain(action_type)
         )
+
+    # ----- live outbound apply --------------------------------------------
+
+    LIVE_ACTION_TYPES = {"po_held", "po_expedited"}
+
+    def apply_outbound(self, action_id: int) -> dict[str, Any]:
+        from app.integrations import store as _store
+
+        action = _store.get_outbox_action(action_id, system_id=self.definition.system_id)
+        if not action:
+            return {"error": f"unknown outbox action: {action_id}"}
+        if action["status"] in {"applied", "applied_mock", "draft_created"}:
+            return action
+
+        if not self.configured() or action["action_type"] not in self.LIVE_ACTION_TYPES:
+            return super().apply_outbound(action_id)
+
+        try:
+            outcome = self._dispatch_outbound(action)
+        except Exception as exc:  # pragma: no cover - exercised only with live OB
+            return _store.update_outbox_action(
+                action_id,
+                status="error",
+                result={
+                    "error": str(exc),
+                    "system_id": self.definition.system_id,
+                    "external_domain": action["external_domain"],
+                    "message": (
+                        "OpenBoxes rejected the apply. The outbox action is "
+                        "left in error state — fix the upstream payload "
+                        "and retry."
+                    ),
+                },
+            )
+
+        if not outcome.get("external_id"):
+            return _store.update_outbox_action(
+                action_id,
+                status="error",
+                result={
+                    "error": outcome.get("message", "OpenBoxes apply produced no external_id"),
+                    "system_id": self.definition.system_id,
+                    "external_domain": action["external_domain"],
+                    "message": outcome.get("message", "OpenBoxes returned no external_id."),
+                    "details": outcome.get("details", {}),
+                },
+            )
+
+        return _store.update_outbox_action(
+            action_id,
+            status="draft_created",
+            external_id=outcome["external_id"],
+            result={
+                "message": outcome.get("message", "Comment recorded in OpenBoxes."),
+                "system_id": self.definition.system_id,
+                "external_domain": action["external_domain"],
+                "external_id": outcome["external_id"],
+                "details": outcome.get("details", {}),
+            },
+        )
+
+    def _dispatch_outbound(self, action: dict[str, Any]) -> dict[str, Any]:
+        action_type = action["action_type"]
+        payload = action.get("payload") or {}
+        title = action.get("title") or "AI Retail OS action"
+        if action_type in ("po_held", "po_expedited"):
+            return self._ob_annotate_shipment(title, payload, action_type)
+        raise RuntimeError(f"unsupported action_type {action_type!r} for live OpenBoxes apply")
+
+    def _ob_annotate_shipment(
+        self,
+        title: str,
+        payload: dict[str, Any],
+        action_type: str,
+    ) -> dict[str, Any]:
+        """`po_held` / `po_expedited` → POST a Comment on each matching
+        inbound shipment.
+
+        OpenBoxes models incoming POs as Shipments with `direction=INBOUND`.
+        Our outbox payload carries a list of `pos` rows with at least
+        `po_id`. We look those up against the shipments list, post a
+        `Comment` on each match, and return the first shipment id as
+        the canonical `external_id`.
+        """
+        po_rows = payload.get("pos") or payload.get("inbound_pos") or []
+        if not isinstance(po_rows, list) or not po_rows:
+            return {
+                "external_id": None,
+                "message": (
+                    f"{action_type} payload has no `pos` rows; nothing to annotate."
+                ),
+            }
+        shipments = self._api_list("shipments", query={"direction": "INBOUND"}) or self._api_list("shipments")
+        # Index shipments by name/po_id for fast lookup. OpenBoxes' Shipment
+        # domain doesn't enforce a uniqueness on `name`, so we accept any
+        # match.
+        by_name = {(s.get("name") or s.get("shipmentNumber")): s for s in shipments if s.get("name") or s.get("shipmentNumber")}
+        annotated: list[str] = []
+        for po in po_rows:
+            po_id = po.get("po_id") if isinstance(po, dict) else None
+            if not po_id:
+                continue
+            target = by_name.get(po_id) or by_name.get(po.get("po_number") if isinstance(po, dict) else None)
+            if target is None:
+                continue
+            ship_id = _coerce_id(target.get("id"))
+            if ship_id is None:
+                continue
+            self._admin_request(
+                f"/api/shipments/{quote(ship_id)}/comments",
+                method="POST",
+                payload={
+                    "comment": (
+                        f"[AI Retail OS · {action_type}] {title} — "
+                        f"reason: {payload.get('reason') or 'unspecified'}"
+                    ),
+                },
+            )
+            annotated.append(ship_id)
+        if not annotated:
+            return {
+                "external_id": None,
+                "message": (
+                    f"no matching inbound shipments found for {len(po_rows)} payload "
+                    f"po_id(s); run `make openboxes-seed` if the demo isn't loaded."
+                ),
+            }
+        return {
+            "external_id": annotated[0],
+            "message": (
+                f"Annotated {len(annotated)} OpenBoxes shipment(s) with the "
+                f"{action_type} comment."
+            ),
+            "details": {"shipment_ids": annotated, "count": len(annotated)},
+        }
 
 
 class AkeneoAdapter(IntegrationAdapter):

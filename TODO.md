@@ -157,13 +157,42 @@ For every system, the per-system phases are the same:
   - [x] README "Running with real Medusa" section: full quick-start (compose / bootstrap / env / seed / sanity curl), per-action-type mapping table (`store_transfer` → metadata stash on from-store stock location, `fulfillment_routing` → metadata stash on Retail Demo sales channel, anything else → base mock-apply), why metadata stashes vs orders/fulfillments/reservations, troubleshooting cheat sheet (slow first build, restart-loop on missing build output, 401 mid-session re-login, partial-sync truncation, Apple Silicon glibc fallback), live-test instructions, and reset path.
   - [x] Live-path tests already env-gated (covered in P3 + P4); README now points at them so CI stays mock-only by design.
 
-## OpenBoxes
-- [ ] P1 · Local instance
-- [ ] P2 · Demo seed
-- [ ] P3 · Inbound sync
-- [ ] P4 · Live outbound apply
-- [ ] P5 · Agent-loop UAT
-- [ ] P6 · Docs + tests
+## OpenBoxes _(branch: `feature/openboxes-p1-p6` — open PR pending; bundles all six phases per request)_
+
+- [x] **P1 · Local instance**
+  - [x] `infra/openboxes/Dockerfile` — `tomcat:9-jdk17` base, downloads the OpenBoxes WAR (~190 MB) at build time from the GitHub release (pinned to `v0.9.7-hotfix1`; `--build-arg OPENBOXES_VERSION=…` to track newer). Multi-arch in code, but the WAR itself is amd64-only — compose pins `platform: linux/amd64` so it runs under emulation on Apple Silicon (slow but functional).
+  - [x] `infra/openboxes/docker-compose.yml` — `mysql:5.7` (Liquibase changesets target this exact dialect) + the custom openboxes Tomcat container on `:8082`. Healthcheck on mysql; demo `openboxes-config.properties` mounted into `/root/.grails/`.
+  - [x] `infra/openboxes/bootstrap.sh` — waits for mysql + Tomcat, then waits for Liquibase migrations to finish (3-5 min on a fresh demo). No external migrate command — Grails handles it on first boot. Prints admin URL + creds + the `OPENBOXES_BASE_URL` / `OPENBOXES_USERNAME` / `OPENBOXES_PASSWORD` env block.
+  - [x] `infra/openboxes/README.md` — quick-start, why custom image (no official Hub image), Apple Silicon caveats, lifecycle table, `/api/*` surface the cockpit will hit, troubleshooting, reset path.
+  - [x] Root `Makefile` targets: `openboxes-up`, `openboxes-down`, `openboxes-bootstrap`, `openboxes-seed`, `openboxes-logs`, `openboxes-status`, `openboxes-nuke`. `openboxes-up` does `up -d --build` because the image is local.
+
+- [x] **P2 · Demo seed**
+  - [x] `infra/openboxes/seed.py` — REST-based, idempotent, stdlib-only. Creates 5 Locations (one per `substrate_stores`, embeds `[retail-os:<store_id>]` in the description for round-trip — OpenBoxes' Location domain has no JSON metadata field) + 30 Products (one per substrate SKU; idempotent by `productCode == sku`).
+  - [x] Auth: `POST /api/login` for the X-Auth-Token, then `X-Auth-Token: <token>` for `/api/*`. Operator can supply `OPENBOXES_API_TOKEN` to bypass the login flow.
+  - [x] Out of scope (deferred): inbound shipments seed (substrate models them but OpenBoxes' Shipment lifecycle has stricter validation than we want in a one-shot seed; operator imports bundled sample-data CSVs or seeds by hand for the P5 walkthrough); stock-on-hand levels.
+
+- [x] **P3 · Inbound sync**
+  - [x] `OpenBoxesAdapter.configured()` overridden to require `OPENBOXES_BASE_URL` *plus* either `OPENBOXES_API_TOKEN` or the user/password pair.
+  - [x] `OpenBoxesAdapter._login()` lazy-fetches a token via `POST /api/login` (handles both `{token}` and `{data:{token}}` response shapes — varies by 0.9.x minor). Caches on the instance. `_client()` builds a `JsonHttpClient` with the `X-Auth-Token` header.
+  - [x] `OpenBoxesAdapter._admin_request(path, method, payload)` — single chokepoint with one re-login + retry on 401 (mirror of MedusaAdapter pattern, shared 401-recovery semantics).
+  - [x] `OpenBoxesAdapter._live_sync()` pulls Locations, Products, Inbound Shipments. Locations round-trip via the `[retail-os:<store_id>]` description marker; Products via `productCode`; Shipments cached without a clean local_id (substrate doesn't model them in a round-trippable way).
+  - [x] `external_url` deep-links per domain: `location/show`, `product/show`, `shipment/show`.
+  - [x] `sync_inbound()` dispatches: configured → `_live_sync`, else → `_mock_sync` (the prior substrate-only path, unchanged).
+
+- [x] **P4 · Live outbound apply**
+  - [x] `OpenBoxesAdapter.LIVE_ACTION_TYPES = {"po_held", "po_expedited"}`. `store_transfer` falls back to base mock-apply because OpenBoxes' Stock Movement domain has stricter validation than substrate exposes — deferred.
+  - [x] `apply_outbound` mirrors the Mautic / Medusa shape: configured + supported → `_dispatch_outbound`; adapter rejection → `error`; outbox `external_id` mirrors the first matched shipment id.
+  - [x] `_ob_annotate_shipment` (po_held / po_expedited): list inbound shipments via `/api/shipments?direction=INBOUND`, index by `name` / `shipmentNumber`, post a `Comment` on each match prefixed `[AI Retail OS · <action_type>]` with the operator's reason. Returns the first shipment id + the full list in `details.shipment_ids`.
+  - [x] No matching shipment → row lands in `error` with a clear message ("no matching inbound shipments found for N payload po_id(s); run `make openboxes-seed` if the demo isn't loaded.").
+  - [x] Five new unit tests in `tests/test_integrations.py` (stubbed `_client`): `configured()` requires auth, `_admin_request` re-logins on 401, `po_held` annotates matching shipments, no-match lands in `error`, unsupported action falls back to base.
+
+- [x] **P5 · Agent-loop UAT**
+  - [x] `docs/uat/2026-04-30-openboxes-p5-po-hold-demo.md` — full walkthrough: setup verification, Replenishment proposal, drawer apply, verification in OpenBoxes UI, idempotency note (cockpit's `outbox_actions.status` short-circuits the drawer; manual re-runs WILL append to OpenBoxes Comments since the API has no native dedup), acceptance checklist.
+  - [x] Screenshot placeholders for operator follow-up.
+
+- [x] **P6 · Docs + tests**
+  - [x] README "Running with real OpenBoxes" section: full quick-start (compose / bootstrap / first-login password change / env wiring / seed / restart), per-action-type mapping table (`po_held` / `po_expedited` → Comment on matching Shipment, `store_transfer` → base mock-apply, anything else → base mock-apply), Apple Silicon emulation caveat, troubleshooting cheat sheet (slow first boot, Liquibase wait, mock-mode auth requirements, 401 mid-session re-login, no-match error, reset path).
+  - [x] `backend/tests/test_integrations_openboxes_live.py` — env-gated, three live tests (live sync round-trip, seeded `[retail-os:<store_id>]` external_ref round-trip, registry reports `mode=connected`). Skipped automatically when creds aren't set so CI stays mock-only.
 
 ## Akeneo
 - [ ] P1 · Local instance
