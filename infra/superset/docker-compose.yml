@@ -1,0 +1,90 @@
+# Minimal Apache Superset stack for the AI Retail OS demo.
+# Single-host, dev/demo only — same shape as the other infra/* stacks.
+#
+# Brought up via:
+#   make superset-up         # start stack
+#   make superset-bootstrap  # superset_init (db upgrade + admin user) + roles
+#   make superset-seed       # connect to spine.db + create datasets/charts/dashboard
+#   make superset-down       # stop, keep volumes
+#   make superset-nuke       # stop and wipe volumes (full reset)
+#
+# Server:      http://localhost:8088
+# Admin user:  admin
+# Admin pass:  retail-superset (override via SUPERSET_ADMIN_PASSWORD)
+#
+# Architecture: postgres (metadata) + redis (cache + celery broker) +
+# superset (web). The spine.db SQLite file is mounted read-only into the
+# container at /spine/spine.db so Superset can register it as a dataset
+# source — no extra DB needed for the demo.
+
+x-superset-env: &superset_env
+  SUPERSET_ENV: production
+  SUPERSET_LOAD_EXAMPLES: "no"
+  CYPRESS_CONFIG: "false"
+  SUPERSET_PORT: "8088"
+  DATABASE_DB: superset
+  DATABASE_HOST: db
+  DATABASE_PORT: "5432"
+  DATABASE_USER: superset
+  DATABASE_PASSWORD: ${SUPERSET_DB_PASSWORD:-superset}
+  DATABASE_DIALECT: postgresql
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY:-retail-os-superset-secret-change-me}
+  ADMIN_USERNAME: ${SUPERSET_ADMIN_USERNAME:-admin}
+  ADMIN_FIRST_NAME: Retail
+  ADMIN_LAST_NAME: Operator
+  ADMIN_EMAIL: ${SUPERSET_ADMIN_EMAIL:-admin@retail.local}
+  ADMIN_PASSWORD: ${SUPERSET_ADMIN_PASSWORD:-retail-superset}
+
+services:
+  db:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: superset
+      POSTGRES_USER: superset
+      POSTGRES_PASSWORD: ${SUPERSET_DB_PASSWORD:-superset}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U superset -d superset"]
+      interval: 2s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 2s
+      retries: 30
+
+  superset:
+    image: apache/superset:3.1.1
+    restart: unless-stopped
+    environment:
+      <<: *superset_env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8088:8088"
+    volumes:
+      # Mount the cockpit's spine.db read-only so Superset can register
+      # it as a dataset source. Bind path is relative to this compose
+      # file: ../../backend/data/spine.db on the host.
+      - ../../backend/data:/spine:ro
+      - superset-home:/app/superset_home
+    command: >
+      /bin/sh -c "pip install --no-cache-dir psycopg2-binary &&
+                  /usr/bin/run-server.sh"
+
+volumes:
+  db-data:
+  redis-data:
+  superset-home:
