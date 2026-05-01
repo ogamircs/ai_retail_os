@@ -12,7 +12,7 @@ MEDUSA_COMPOSE := docker compose -p ai-retail-medusa -f $(MEDUSA_DIR)/docker-com
 .PHONY: help \
         erpnext-up erpnext-down erpnext-bootstrap erpnext-seed erpnext-logs erpnext-status erpnext-nuke \
         mautic-up mautic-down mautic-bootstrap mautic-seed mautic-logs mautic-status mautic-nuke \
-        medusa-up medusa-down medusa-bootstrap medusa-logs medusa-status medusa-nuke
+        medusa-up medusa-down medusa-bootstrap medusa-seed medusa-logs medusa-status medusa-nuke
 
 help:
 	@echo "ERPNext:"
@@ -36,6 +36,7 @@ help:
 	@echo "Medusa:"
 	@echo "  medusa-up          build + start Medusa stack (postgres + redis + medusa on :9000)"
 	@echo "  medusa-bootstrap   db:migrate + create admin user (idempotent)"
+	@echo "  medusa-seed        project the spine demo data into Medusa (idempotent)"
 	@echo "  medusa-status      show running containers"
 	@echo "  medusa-logs        tail logs from the stack"
 	@echo "  medusa-down        stop the stack (volumes preserved)"
@@ -100,3 +101,6 @@ medusa-logs:
 
 medusa-bootstrap:
 	bash $(MEDUSA_DIR)/bootstrap.sh
+
+medusa-seed:
+	python3 $(MEDUSA_DIR)/seed.py
