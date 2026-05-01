@@ -1,0 +1,93 @@
+# Minimal MLflow stack for the AI Retail OS demo.
+# Single-host, dev/demo only — same shape as the other infra/* stacks.
+#
+# Brought up via:
+#   make mlflow-up         # start stack
+#   make mlflow-status     # show running containers
+#   make mlflow-down       # stop, keep volumes
+#   make mlflow-nuke       # stop and wipe volumes (full reset)
+#
+# Tracking UI:    http://localhost:5500
+# MinIO console:  http://localhost:9001 (admin / retail-mlflow)
+#
+# Architecture: postgres (backend store for runs/metrics) + minio (S3-
+# compatible artifact store for traces, transcripts, generated reports)
+# + the official `ghcr.io/mlflow/mlflow` image. Both stores are local
+# volumes; tearing down the stack with `mlflow-nuke` wipes both.
+#
+# Tracking server lands on :5500 (not the upstream-default :5000) to
+# avoid clashing with macOS AirPlay Receiver. Override via
+# `MLFLOW_HOST_PORT=5000 docker compose up`.
+
+services:
+  db:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: mlflow
+      POSTGRES_USER: mlflow
+      POSTGRES_PASSWORD: ${MLFLOW_DB_PASSWORD:-mlflow}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mlflow -d mlflow"]
+      interval: 2s
+      retries: 30
+
+  minio:
+    image: minio/minio:RELEASE.2024-08-17T01-24-54Z
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MLFLOW_S3_ACCESS_KEY:-admin}
+      MINIO_ROOT_PASSWORD: ${MLFLOW_S3_SECRET_KEY:-retail-mlflow}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/minio/health/live || exit 1"]
+      interval: 5s
+      retries: 30
+
+  bucket-init:
+    image: minio/mc:RELEASE.2024-08-17T11-33-50Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 ${MLFLOW_S3_ACCESS_KEY:-admin} ${MLFLOW_S3_SECRET_KEY:-retail-mlflow} &&
+      mc mb -p local/mlflow-artifacts || true &&
+      mc anonymous set download local/mlflow-artifacts || true
+      "
+    restart: "no"
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.16.2
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: ${MLFLOW_S3_ACCESS_KEY:-admin}
+      AWS_SECRET_ACCESS_KEY: ${MLFLOW_S3_SECRET_KEY:-retail-mlflow}
+      AWS_DEFAULT_REGION: us-east-1
+    ports:
+      - "${MLFLOW_HOST_PORT:-5500}:5000"
+    command: >
+      /bin/sh -c "pip install --no-cache-dir psycopg2-binary boto3 &&
+                  mlflow server
+                    --host 0.0.0.0
+                    --port 5000
+                    --backend-store-uri postgresql+psycopg2://mlflow:${MLFLOW_DB_PASSWORD:-mlflow}@db:5432/mlflow
+                    --default-artifact-root s3://mlflow-artifacts/
+                    --serve-artifacts"
+
+volumes:
+  db-data:
+  minio-data:

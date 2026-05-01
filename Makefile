@@ -18,13 +18,17 @@ AKENEO_COMPOSE := docker compose -p ai-retail-akeneo -f $(AKENEO_DIR)/docker-com
 SUPERSET_DIR := infra/superset
 SUPERSET_COMPOSE := docker compose -p ai-retail-superset -f $(SUPERSET_DIR)/docker-compose.yml
 
+MLFLOW_DIR := infra/mlflow
+MLFLOW_COMPOSE := docker compose -p ai-retail-mlflow -f $(MLFLOW_DIR)/docker-compose.yml
+
 .PHONY: help \
         erpnext-up erpnext-down erpnext-bootstrap erpnext-seed erpnext-logs erpnext-status erpnext-nuke \
         mautic-up mautic-down mautic-bootstrap mautic-seed mautic-logs mautic-status mautic-nuke \
         medusa-up medusa-down medusa-bootstrap medusa-seed medusa-logs medusa-status medusa-nuke \
         openboxes-up openboxes-down openboxes-bootstrap openboxes-seed openboxes-logs openboxes-status openboxes-nuke openboxes-config \
         akeneo-up akeneo-down akeneo-bootstrap akeneo-seed akeneo-logs akeneo-status akeneo-nuke \
-        superset-up superset-down superset-bootstrap superset-seed superset-logs superset-status superset-nuke
+        superset-up superset-down superset-bootstrap superset-seed superset-logs superset-status superset-nuke \
+        mlflow-up mlflow-down mlflow-logs mlflow-status mlflow-nuke
 
 help:
 	@echo "ERPNext:"
@@ -80,6 +84,13 @@ help:
 	@echo "  superset-logs         tail logs from the stack"
 	@echo "  superset-down         stop the stack (volumes preserved)"
 	@echo "  superset-nuke         stop and wipe volumes (full reset)"
+	@echo ""
+	@echo "MLflow:"
+	@echo "  mlflow-up             start MLflow stack (postgres + minio + mlflow on :5500)"
+	@echo "  mlflow-status         show running containers"
+	@echo "  mlflow-logs           tail logs from the stack"
+	@echo "  mlflow-down           stop the stack (volumes preserved)"
+	@echo "  mlflow-nuke           stop and wipe volumes (full reset)"
 
 erpnext-up:
 	$(ERPNEXT_COMPOSE) up -d
@@ -209,3 +220,18 @@ superset-bootstrap:
 
 superset-seed:
 	python3 $(SUPERSET_DIR)/seed.py
+
+mlflow-up:
+	$(MLFLOW_COMPOSE) up -d
+
+mlflow-down:
+	$(MLFLOW_COMPOSE) down
+
+mlflow-nuke:
+	$(MLFLOW_COMPOSE) down -v
+
+mlflow-status:
+	$(MLFLOW_COMPOSE) ps
+
+mlflow-logs:
+	$(MLFLOW_COMPOSE) logs -f --tail=50

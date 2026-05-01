@@ -17,6 +17,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 from app.agents.chief_of_staff import run_chief
 from app.llm import get_provider
@@ -28,6 +29,40 @@ from tests.agents.eval.scenarios import SCENARIOS, by_name
 
 HERE = Path(__file__).resolve().parent
 LAST_RUN_PATH = HERE / "last_run.json"
+
+
+def _git_sha() -> str:
+    """Best-effort current git sha for MLflow experiment naming."""
+    try:
+        import subprocess
+
+        out = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=HERE,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=2,
+        )
+        sha = out.stdout.strip()
+        return sha or "nogit"
+    except Exception:
+        return "nogit"
+
+
+def _try_mlflow():
+    """Lazy mlflow loader for the eval harness — same shape as
+    tracing.py's loader. Returns None if mlflow isn't installed or the
+    tracking server isn't configured."""
+    if not os.getenv("MLFLOW_TRACKING_URI"):
+        return None
+    try:
+        import mlflow  # type: ignore
+
+        mlflow.set_tracking_uri(os.environ["MLFLOW_TRACKING_URI"])
+        return mlflow
+    except Exception:
+        return None
 
 
 def _run_one(scenario_name: str, mode: str) -> tuple[str, str, list[dict]]:
@@ -70,8 +105,15 @@ def run(scenarios: list[str] | None = None, modes: list[str] | None = None) -> d
     scenarios = scenarios or [s.name for s in SCENARIOS]
     modes = modes or ["single_pass", "multi_pass"]
     runs: dict[str, dict[str, dict]] = {}
+    mlflow = _try_mlflow()
+    sha = _git_sha()
     for s in scenarios:
         runs[s] = {}
+        # Track 4 M3: each scenario maps to one MLflow experiment;
+        # single-pass + multi-pass land as nested runs underneath so
+        # the comparison view shows them side-by-side.
+        if mlflow is not None:
+            mlflow.set_experiment(f"eval/{s}/{sha}")
         for m in modes:
             t0 = time.monotonic()
             transcript, final, artifacts = _run_one(s, m)
@@ -83,6 +125,8 @@ def run(scenarios: list[str] | None = None, modes: list[str] | None = None) -> d
                 "artifact_count": len(artifacts),
                 "final_chars": len(final),
             }
+            if mlflow is not None:
+                _log_eval_run(mlflow, s, m, sha, score, dt, transcript, final, artifacts)
     # Aggregate (need raw JudgeScore objects)
     raw: dict[str, dict[str, JudgeScore]] = {}
     for s, modes_d in runs.items():
@@ -100,6 +144,50 @@ def run(scenarios: list[str] | None = None, modes: list[str] | None = None) -> d
     out = {"runs": runs, "summary": summary, "scenarios": scenarios, "modes": modes}
     LAST_RUN_PATH.write_text(json.dumps(out, indent=2))
     return out
+
+
+def _log_eval_run(
+    mlflow: Any,
+    scenario: str,
+    mode: str,
+    sha: str,
+    score: JudgeScore,
+    elapsed_s: float,
+    transcript: str,
+    final: str,
+    artifacts: list[dict],
+) -> None:
+    """Push one (scenario × mode) run into MLflow.
+
+    Each run carries:
+      * tags: scenario, mode, git_sha
+      * metrics: factual_correctness, evidence_cited, policy_adherence,
+        recommendation_quality, latency_s, total_score, artifact_count
+      * artifacts: full transcript, judge notes, final reply, generated
+        artifact bodies
+    """
+    try:
+        with mlflow.start_run(run_name=f"{mode}::{scenario}"):
+            mlflow.set_tags({"scenario": scenario, "mode": mode, "git_sha": sha})
+            mlflow.log_metric("factual_correctness", float(score.factual_correctness))
+            mlflow.log_metric("evidence_cited", float(score.evidence_cited))
+            mlflow.log_metric("policy_adherence", float(score.policy_adherence))
+            mlflow.log_metric("recommendation_quality", float(score.recommendation_quality))
+            mlflow.log_metric("total_score", float(score.total()))
+            mlflow.log_metric("latency_s", float(elapsed_s))
+            mlflow.log_metric("artifact_count", float(len(artifacts)))
+            mlflow.log_text(transcript, "transcript.txt")
+            mlflow.log_text(final, "final_reply.txt")
+            mlflow.log_dict(score.to_dict(), "judge_score.json")
+            for a in artifacts:
+                # Stable filename per artifact id so re-runs overwrite
+                # in place (cheaper than new artifact paths each time).
+                aid = (a or {}).get("id") or "anon"
+                mlflow.log_dict(a, f"artifacts/{aid}.json")
+    except Exception:
+        # MLflow logging must never abort the eval — score still lands
+        # in last_run.json.
+        pass
 
 
 def main() -> int:

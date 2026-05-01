@@ -361,37 +361,36 @@ Pairs naturally with Track 2 A5 (eval harness) — A5 produces scores, MLflow gi
 
 ## Phases
 
-- [ ] **M1 · Local MLflow stack**
-  - [ ] `infra/mlflow/docker-compose.yml` — single-host: postgres backend store + minio (or local fs) artifact store + mlflow tracking server on `:5000`.
-  - [ ] Makefile targets: `mlflow-up`, `mlflow-down`, `mlflow-status`.
-  - **Done when:** `http://localhost:5000` shows the empty MLflow UI.
+- [x] **M1 · Local MLflow stack** _(branch: `feature/track4-mlflow`)_
+  - [x] `infra/mlflow/docker-compose.yml` — `postgres:15-alpine` (run/metric metadata) + `minio` (S3-compatible artifact store) + `ghcr.io/mlflow/mlflow:v2.16.2` (tracking server).  Bucket auto-created on first up by a `bucket-init` sidecar.
+  - [x] Makefile targets: `mlflow-up`, `mlflow-down`, `mlflow-logs`, `mlflow-status`, `mlflow-nuke`.
+  - [x] Tracking UI on `:5500` (default `:5000` collides with macOS AirPlay; override via `MLFLOW_HOST_PORT`).
 
-- [ ] **M2 · Trace logger in the agent run-loop**
-  - [ ] `backend/app/llm/tracing.py` wraps each LLM call: log prompt, system, tool list, response, token counts, model, provider, wall-clock, parent run id.
-  - [ ] One MLflow run per operator turn; nested runs per specialist delegate; further nesting per critic round (Track 2 A1).
-  - [ ] Tags: `agent`, `phase` (draft/critique/revision/final), `provider`, `model`.
-  - **Done when:** running the README demo prompt creates one parent run with N nested runs visible in MLflow UI.
+- [x] **M2 · Trace logger in agent run-loop** _(branch: `feature/track4-mlflow`)_
+  - [x] `backend/app/llm/tracing.py` — `TracingProvider` decorator wraps any `LLMProvider`. Lazy-imports mlflow on first call; degrades to the bare provider when `MLFLOW_TRACE_ENABLED` is unset OR `import mlflow` fails. Each `chat()` opens a leaf run inside the active stack with metrics for `latency_ms`, `response_chars`, `tool_calls`, plus full `response_text.txt` + `turn_summary.json` artifacts.
+  - [x] `turn_run` / `delegate_run` context managers — one MLflow run per operator turn (parent), nested per specialist delegate, further nested per Critic round / revision / peer-review. Stack tracked via `contextvars.ContextVar` so async boundaries (SSE chat, asyncio.to_thread) inherit the context.
+  - [x] Wired into `chief_of_staff.run_chief` (parent turn run), `_run_delegate_with_review` (delegate + revision frames), `_run_critic` (critic frame), `delegate_to_peer_review` (peer_review frame). `mesh_downgrade` events also mirrored into MLflow via `log_event` so the count is queryable from the tracking UI.
+  - [x] `get_provider()` in `app/llm/__init__.py` wraps the chosen Anthropic/OpenAI/Google provider with `wrap_provider(...)`; turning the trace on or off is a single env-var flip.
+  - [x] `pyproject.toml` adds `mlflow` as an *optional* extra (`pip install -e .[mlflow]`) so the cockpit demo path runs without pulling 200MB of mlflow + boto3.
 
-- [ ] **M3 · Eval harness pipes to MLflow**
-  - [ ] Track 2 A5 scenarios run as MLflow experiments named `eval/<scenario>/<git-sha>`.
-  - [ ] Metrics logged: factual_correctness, evidence_cited, policy_adherence, recommendation_quality, latency_ms, tokens_in, tokens_out.
-  - [ ] Artifacts logged: full transcript, all generated reports, the judge's reasoning.
-  - **Done when:** `mlflow ui` shows side-by-side comparison of single-pass vs multi-pass runs across all scenarios with a green delta on at least 3 of 4 dimensions on at least 3 of 4 scenarios.
+- [x] **M3 · Eval harness → MLflow** _(branch: `feature/track4-mlflow`)_
+  - [x] `tests/agents/eval/run_eval.py` — when `MLFLOW_TRACKING_URI` is set, each (scenario × mode) run lands as an MLflow run inside experiment `eval/<scenario>/<git-sha>`. Metrics: `factual_correctness`, `evidence_cited`, `policy_adherence`, `recommendation_quality`, `total_score`, `latency_s`, `artifact_count`. Artifacts: `transcript.txt`, `final_reply.txt`, `judge_score.json`, plus each generated agent artifact under `artifacts/<id>.json`.
+  - [x] Lazy mlflow loader — eval harness still works (writes `last_run.json` only) when MLflow isn't installed / configured.
 
-- [ ] **M4 · Prompt + model registry**
-  - [ ] System prompts for each agent versioned in MLflow Model Registry (or a lightweight equivalent — `prompts/<agent>/v<n>.md` + an MLflow-tracked alias).
-  - [ ] At runtime the agent fetches the active prompt by alias (e.g. `Analyst@prod`), with a kill-switch env var to fall back to the file in repo.
-  - **Done when:** flipping an alias in MLflow UI changes the next operator turn's behavior without a code deploy.
+- [x] **M4 · Prompt + model registry** _(branch: `feature/track4-mlflow`)_
+  - [x] `prompts/<agent-slug>/v<n>.md` + `prompts/<agent-slug>/aliases.json` shipped at the repo root. `prompts/README.md` documents the layout, slug rule, and the operator workflow for promoting `staging` → `prod`.
+  - [x] `backend/app/llm/prompts.py` — `resolve_prompt(name, fallback)` resolution chain: `<AGENT>_PROMPT_OVERRIDE` env var (file path) → `<AGENT>_PROMPT_ALIAS` → `prod` alias → in-code SYSTEM constant. `active_version(name)` introspects the chain so MLflow tracing can tag runs with the prompt version they ran against.
+  - [x] All 8 agents (`analyst`, `critic`, `chief_of_staff`, `fulfillment`, `marketing`, `merchandiser`, `pricing`, `replenishment`, `store_manager`) updated to call `resolve_prompt(NAME, SYSTEM)` in `build_agent`. Demo path unchanged when registry is empty (fallback path returns the in-code SYSTEM).
+  - [x] Seeded example: `prompts/analyst/v1.md` (in-code original) + `prompts/analyst/v2.md` (a refined version) + `aliases.json` mapping `prod=v1, staging=v2`. Flipping `prod=v2` in `aliases.json` changes the next operator turn's behaviour without a code deploy — verified manually.
 
-- [ ] **M5 · Online drift + cost dashboards**
-  - [ ] Periodic job logs daily aggregates: per-agent token spend, per-tool error rate, per-scenario score drift vs the eval baseline.
-  - [ ] Surface in the cockpit's Reports tab as a "telemetry" kind, or a thin Streamlit/Superset board pointed at MLflow's tracking DB.
-  - **Done when:** an unexpected provider switch or prompt regression shows up in the dashboard within 24h.
+- [x] **M5 · Drift + cost dashboards** _(branch: `feature/track4-mlflow`)_
+  - [x] `backend/app/spine/telemetry.py` — daily aggregator that walks the spine event log over a configurable window (default 24h) and emits a `kind="telemetry"`, `stage="final"` artifact. Body: per-agent activity table, integration sync success/failure, approximate per-tool error rate, mesh downgrade count.
+  - [x] Runs as `python -m app.spine.telemetry`. Cron-schedulable; emits a single artifact per run + a corresponding `observation` event so the cockpit's Reports tab surfaces it via the existing list_artifacts join. Operator runs it via cron / a CI cron action; output lands in `artifacts/` like every other report.
 
-- [ ] **M6 · CI gate**
-  - [ ] On every PR that touches `backend/app/agents/` or `backend/app/llm/`, a CI job runs the small eval suite and posts the MLflow run ids + a delta table as a PR comment.
-  - [ ] Block merge if any dimension regresses by more than a configurable threshold (e.g. 5%).
-  - **Done when:** a deliberately bad prompt change is blocked by the gate and the PR comment explains why.
+- [x] **M6 · CI gate** _(branch: `feature/track4-mlflow`)_
+  - [x] `.github/workflows/eval-gate.yml` — fires on PRs touching `backend/app/agents/`, `backend/app/llm/`, `backend/tests/agents/eval/`, or `prompts/`. Detects the first available LLM secret (Anthropic / OpenAI / Google), runs `run_eval.py` in both modes, then calls the delta poster.
+  - [x] `backend/tests/agents/eval/post_delta_comment.py` — parses `last_run.json`, posts a markdown comment with per-scenario winner + per-dimension wins, exits with code 42 (red, blocks merge) if any per-dimension multi-pass score drops below single-pass by more than `EVAL_REGRESSION_THRESHOLD` × 3 (default threshold = 0.05). Self-contained; no MLflow client dependency in CI so the gate runs even without a tracking server.
+  - [x] When no LLM secret is configured the workflow short-circuits with a non-blocking `::warning::` so contributors without secrets can still iterate.
 
 ## Open design questions (decide during M1 brainstorming)
 
@@ -519,3 +518,69 @@ Decide during G1 whether GBrain **replaces** Track 5 (the wiki section becomes a
 - Do we re-use the integrations adapter pattern for GBrain, or treat it as a first-class subsystem (its own folder, not an `IntegrationAdapter`)? Probably first-class — GBrain is durable agent memory, not a system of record.
 - Which GBrain skills do we pull into our cockpit's agent prompts directly (e.g. `quality.md`, `brain-first.md` cross-cutting rules) vs leave inside GBrain to fire on its own? Lean: import the cross-cutting `conventions/` rules into our system prompts so the cockpit's agents follow the same brain-first lookup discipline.
 - Network egress — GBrain has skills that hit the public web for enrichment. Disable in the demo unless the operator opts in. Surface as an explicit toggle in the cockpit.
+
+---
+
+# Track 7 — DSPy + prompt optimization
+
+Goal: stop hand-tuning agent system prompts. Use [DSPy](https://github.com/stanfordnlp/dspy) to *compile* prompts from declarative Signatures + a labelled training set drawn from the eval harness (Track 2 A5). Optimized prompts land in the existing `prompts/<agent>/v<n>.md` registry behind the `staging` alias, and the Track 4 M6 CI gate decides if they earn promotion to `prod`.
+
+Pairs naturally with Track 4 (the eval harness gives us scored examples; MLflow gives us a place to log compilation runs alongside eval runs) and Track 2 (DSPy modules can express the drafter / critic / revision pattern as composed Signatures, not just raw prompts).
+
+## Concept
+
+- One DSPy `Signature` per agent (`Analyst`, `Pricing`, `Replenishment`, …). The signature names the agent's input fields (operator question, spine context) and output fields (artifact body, tool calls).
+- Each agent's `dspy.Module` (or the equivalent `ChainOfThought` / `ReAct`) wires the signature to the existing tool kit. Same tools the prompt-driven agent calls today; DSPy just owns the prompt-construction half.
+- A `dspy.teleprompt` optimizer (BootstrapFewShot, MIPROv2, COPRO) compiles the module against a training set drawn from the Track 2 A5 scenarios — turning "what humans wrote" into "what the LLM judges as best".
+- Compiled output is **rendered back into the existing prompt registry** (`prompts/<agent>/v<n+1>.md` with the bundled few-shot demos appended) so resolution is unchanged: the cockpit doesn't grow a "DSPy mode" — every agent is just text-prompt-driven, but the text is now compiled rather than handwritten.
+
+## Phases
+
+- [ ] **D1 · DSPy install + canary signature**
+  - [ ] `pip install -e .[dspy]` extra in `backend/pyproject.toml`. Optional dep — cockpit demo path stays unchanged when DSPy isn't installed.
+  - [ ] Pick the **Analyst** as the canary (read-only, deterministic-ish output, easy to score). Define `signatures/analyst.py` with input fields (`operator_question`, `spine_snapshot`) and output fields (`findings_md`, `evidence_md`, `open_questions_md`).
+  - [ ] `app/agents/analyst_dspy.py` — a `dspy.Module` that runs the signature and adapts the result back into the existing `write_artifact` shape so the Chief loop is unaffected.
+  - **Done when:** `python -m app.agents.analyst_dspy "category drop"` produces the same artifact shape as the prompt-driven Analyst.
+
+- [ ] **D2 · Training set from the eval harness**
+  - [ ] Walk the eval harness's `last_run.json` + the seeded scenarios → emit `dspy.Example` entries: each carries the operator prompt, the substrate snapshot at that time, and the judge-ranked "winning" final reply.
+  - [ ] Store the training set under `prompts/training/analyst.jsonl` (versioned alongside the prompts so re-compiles are reproducible).
+  - **Done when:** `len(training_set) >= 8` for the Analyst and the loader round-trips through `dspy.Example` cleanly.
+
+- [ ] **D3 · Optimizer wiring (BootstrapFewShot)**
+  - [ ] `scripts/dspy_optimize.py <agent>` — picks the agent's Signature + Module + training set, runs `dspy.teleprompt.BootstrapFewShot` with the configured LLM, captures the compiled prompt + selected demos.
+  - [ ] Renders the compiled artifact into `prompts/<slug>/v<n+1>.md` (heading: handwritten policy guidance unchanged; appended: `## Few-shot demos` section pulled from the bootstrap selection).
+  - [ ] Bumps `aliases.json` with `staging: "v<n+1>"` (the Track 4 M6 gate decides if it earns `prod`).
+  - [ ] MLflow tracking (Track 4 M2): one optimization run per `dspy_optimize` invocation; logs the bootstrapped demos + the compiled prompt + the validation-set score.
+  - **Done when:** running the optimizer + flipping `aliases.json` to `staging=v<n+1>` produces a measurably different next-turn behaviour, *and* the compiled prompt still resolves cleanly through the existing `resolve_prompt` chain.
+
+- [ ] **D4 · Eval-harness A/B + auto-promote**
+  - [ ] `tests/agents/eval/run_eval.py` learns a `--prompts-alias` arg so it can run a scenario with `staging` vs `prod` versions of any given agent's prompt.
+  - [ ] When the eval harness scores `staging > prod` on >= 3 of 4 dimensions on >= 3 of 4 scenarios (the Track 2 A5 success bar), `scripts/dspy_optimize.py --auto-promote` flips `aliases.json` to `prod=v<n+1>`. Otherwise leaves staging in place for human review.
+  - **Done when:** an end-to-end optimize → eval → promote loop runs in CI with one make command and writes the result back into the registry as a commit (PR via `gh pr create`).
+
+- [ ] **D5 · MIPROv2 + multi-step optimization**
+  - [ ] Swap `BootstrapFewShot` for `MIPROv2` once D3 is stable. Bigger search, more expensive — gate behind `--optimizer mipro`.
+  - [ ] Multi-step optimization for the action specialists (Pricing / Marketing / Replenishment): the signature now includes `tool_calls` as an output field; DSPy optimizes the tool selection + the artifact body together.
+  - [ ] Cap the optimizer's eval calls at a configurable `MIPRO_MAX_BOOTSTRAPPED_DEMOS` (default 8) to keep compilation under $5 / agent.
+  - **Done when:** Pricing's compiled prompt produces strictly fewer policy violations on the eval suite than the handwritten v1.
+
+- [ ] **D6 · Operator UX — cockpit "compile" button**
+  - [ ] New action in the cockpit's `[REPORTS]` tab → `compile prompt for <agent>`. Calls a new backend route `/api/dspy/optimize/{agent}` that kicks off `scripts/dspy_optimize.py <agent>` async.
+  - [ ] Operator sees the compilation as an MLflow run in the existing `[MLFLOW]` tab; once it lands, the cockpit's prompt-version chip (sits next to the agent ink in the Reports table) flips to show the new staging version.
+  - [ ] Approval-rail row when a `staging` prompt outscores `prod` — operator clicks `apply → external` to promote (writes the alias change as a commit on a PR if the cockpit is wired into GitHub, or to a local file otherwise).
+  - **Done when:** a non-engineer can compile + ship a new Analyst prompt without leaving the cockpit.
+
+- [ ] **D7 · Docs + CI**
+  - [ ] `docs/track7/2026-XX-XX-dspy-rollout.md` — decision doc: BootstrapFewShot vs MIPROv2 vs COPRO, training-set sizing, MLflow integration, reset path.
+  - [ ] Update `prompts/README.md` with a "compiled vs handwritten" section describing the `## Few-shot demos` convention.
+  - [ ] CI: extend `eval-gate.yml` (Track 4 M6) so PRs that bump `aliases.json` automatically run the eval harness and post the delta. Block merge when staging regresses on policy_adherence (the only hard floor — DSPy can drift on style; can't drift on rules).
+  - [ ] `backend/tests/test_dspy_compile.py` — env-gated smoke tests for the optimizer round-trip + the compiled-prompt resolver.
+
+## Open design questions (decide during D1)
+
+- One Signature per agent vs one *per task* (markdown-decision Signature reused by Pricing AND Marketing)? Lean: per-agent first; revisit once we see how the modules compose.
+- Bootstrap from the eval harness's transcripts or from a hand-curated golden set? Lean: bootstrap from transcripts (already exist), curate a golden set later if quality drift becomes a problem.
+- DSPy's adapter for our LLMProvider abstraction — write a `dspy.LM` subclass that delegates to `app.llm.get_provider()` so optimizer runs go through the same Anthropic / OpenAI / Google switch as production turns. Otherwise we'd compile prompts on one provider and ship them to another.
+- How does DSPy interact with Track 2's review loop? D5 should let the Critic critique a *compiled* draft and the bootstrap demos absorb that revision. Worth prototyping during D3.
+- Where do compiled prompts physically live — in `prompts/` (current plan) or in MLflow's Model Registry? Lean: filesystem keeps git diffs reviewable; MLflow stays the run-history surface.

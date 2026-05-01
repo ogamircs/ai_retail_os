@@ -1,0 +1,120 @@
+# Track 4 M6 — agent-mesh eval gate.
+#
+# Fires on PRs that touch the agent surface (specialists, the Chief, the
+# LLM provider abstraction, prompts, or the eval harness itself).
+# Runs the four-scenario eval harness in single-pass + multi-pass mode
+# against the configured LLM provider, then posts a delta comment back
+# to the PR. Blocks merge when any scenario's multi-pass total
+# regresses below single-pass by more than `EVAL_REGRESSION_THRESHOLD`
+# (default 0.05 = 5% of the per-scenario 12-point max = 0.6 points;
+# 0.20 → 2.4 points; 0.30 → 3.6 points; etc).
+#
+# Required repo secrets:
+#   ANTHROPIC_API_KEY | OPENAI_API_KEY | GOOGLE_API_KEY | GEMINI_API_KEY
+#   (any one is enough; GOOGLE_API_KEY and GEMINI_API_KEY are aliased
+#   for the Google provider, mirroring backend/app/config.py)
+#
+# Optional secrets / env:
+#   MLFLOW_TRACKING_URI       — push run scores into the team's MLflow
+#   EVAL_REGRESSION_THRESHOLD — default 0.05 (5%); set to e.g. 0.10 to
+#                               loosen the gate during a noisy refactor.
+#
+# Skip path: the workflow checks out the PR head, runs `python -m
+# tests.agents.eval.run_eval`, and parses `last_run.json`. If no API
+# key is present, the workflow short-circuits with a "skipped — no
+# eval credentials" status (yellow but not blocking) so a contributor
+# without secrets can still iterate.
+
+name: agent-mesh eval gate
+
+on:
+  pull_request:
+    paths:
+      - 'backend/app/agents/**'
+      - 'backend/app/llm/**'
+      - 'backend/tests/agents/eval/**'
+      - 'prompts/**'
+      - '.github/workflows/eval-gate.yml'
+
+concurrency:
+  group: eval-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      pull-requests: write   # needed to post the delta comment
+      contents: read
+    env:
+      MESH_ENABLED: "1"
+      MLFLOW_TRACE_ENABLED: ${{ secrets.MLFLOW_TRACKING_URI && '1' || '0' }}
+      MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install backend (with mlflow extras when tracking is configured)
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          if [ -n "$MLFLOW_TRACKING_URI" ]; then
+            pip install -e ".[mlflow]"
+          else
+            pip install -e .
+          fi
+
+      - name: Detect provider key
+        id: keycheck
+        # Mirror backend/app/config.py + tests/agents/eval/test_eval.py:
+        # the Google provider accepts EITHER GOOGLE_API_KEY or
+        # GEMINI_API_KEY in env. Repos that only set GEMINI_API_KEY
+        # would otherwise silently skip the eval gate even though the
+        # runtime would have happily used it.
+        run: |
+          if [ -n "${{ secrets.ANTHROPIC_API_KEY }}" ]; then
+            echo "provider=anthropic" >> "$GITHUB_OUTPUT"
+            echo "ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}" >> "$GITHUB_ENV"
+          elif [ -n "${{ secrets.OPENAI_API_KEY }}" ]; then
+            echo "provider=openai" >> "$GITHUB_OUTPUT"
+            echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}" >> "$GITHUB_ENV"
+          elif [ -n "${{ secrets.GOOGLE_API_KEY }}" ]; then
+            echo "provider=google" >> "$GITHUB_OUTPUT"
+            echo "GOOGLE_API_KEY=${{ secrets.GOOGLE_API_KEY }}" >> "$GITHUB_ENV"
+          elif [ -n "${{ secrets.GEMINI_API_KEY }}" ]; then
+            echo "provider=google" >> "$GITHUB_OUTPUT"
+            echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}" >> "$GITHUB_ENV"
+          else
+            echo "provider=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run eval harness (single + multi pass × 4 scenarios)
+        if: steps.keycheck.outputs.provider != ''
+        working-directory: backend
+        env:
+          RUN_EVAL: "1"
+          LLM_PROVIDER: ${{ steps.keycheck.outputs.provider }}
+        run: |
+          python -m tests.agents.eval.run_eval
+
+      - name: Compute delta vs base + post PR comment
+        if: steps.keycheck.outputs.provider != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        working-directory: backend
+        run: |
+          python tests/agents/eval/post_delta_comment.py
+        # Exit code from the script is the merge-gate verdict:
+        #   0  = no regressions beyond threshold → green
+        #   42 = regression detected → red, blocks merge
+
+      - name: Skip notice (no provider key in repo secrets)
+        if: steps.keycheck.outputs.provider == ''
+        run: |
+          echo "::warning ::eval-gate: no LLM provider secret configured (ANTHROPIC_API_KEY / OPENAI_API_KEY / GOOGLE_API_KEY / GEMINI_API_KEY). Skipping eval harness."

@@ -6,6 +6,7 @@ import InventoryTab from "./dataTabs/InventoryTab";
 import CampaignsTab from "./dataTabs/CampaignsTab";
 import IntegrationsTab from "./dataTabs/IntegrationsTab";
 import ReportsTab from "./dataTabs/ReportsTab";
+import MlflowTab from "./dataTabs/MlflowTab";
 import "./DataRail.css";
 
 const TABS = [
@@ -15,6 +16,7 @@ const TABS = [
   { id: "cmp", label: "CAMPAIGNS" },
   { id: "int", label: "INTEGRATIONS" },
   { id: "rep", label: "REPORTS" },
+  { id: "mlf", label: "MLFLOW" },
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"];
@@ -38,7 +40,7 @@ export default function DataRail() {
     if (!el) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-      const idx = ["1", "2", "3", "4", "5", "6"].indexOf(e.key);
+      const idx = ["1", "2", "3", "4", "5", "6", "7"].indexOf(e.key);
       if (idx >= 0) {
         e.preventDefault();
         setTab(TABS[idx].id);
@@ -75,6 +77,7 @@ export default function DataRail() {
             {tab === "cmp" && <CampaignsTab rows={data.campaigns} />}
             {tab === "int" && <IntegrationsTab systems={data.systems} onRefresh={refresh} />}
             {tab === "rep" && <ReportsTab artifacts={data.artifacts} />}
+            {tab === "mlf" && <MlflowTab />}
           </>
         )}
       </div>

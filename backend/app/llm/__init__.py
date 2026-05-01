@@ -1,5 +1,6 @@
 from app.config import settings
 from app.llm.base import LLMProvider
+from app.llm.tracing import wrap_provider
 
 
 def get_provider() -> LLMProvider:
@@ -13,13 +14,18 @@ def get_provider() -> LLMProvider:
     if p == "anthropic":
         from app.llm.anthropic_p import AnthropicProvider
 
-        return AnthropicProvider(api_key=key, model=model)
-    if p == "openai":
+        inner = AnthropicProvider(api_key=key, model=model)
+    elif p == "openai":
         from app.llm.openai_p import OpenAIProvider
 
-        return OpenAIProvider(api_key=key, model=model)
-    if p == "google":
+        inner = OpenAIProvider(api_key=key, model=model)
+    elif p == "google":
         from app.llm.google_p import GoogleProvider
 
-        return GoogleProvider(api_key=key, model=model)
-    raise ValueError(f"unknown provider: {p}")
+        inner = GoogleProvider(api_key=key, model=model)
+    else:
+        raise ValueError(f"unknown provider: {p}")
+    # Track 4 M2: wrap with the MLflow tracing decorator if enabled.
+    # When MLFLOW_TRACE_ENABLED is unset (or mlflow isn't installed),
+    # `wrap_provider` returns the bare provider — no overhead.
+    return wrap_provider(inner)

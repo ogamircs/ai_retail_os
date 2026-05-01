@@ -4,6 +4,7 @@ from app.agents._mesh_tools import (
     build_stage_write_artifact_tool,
 )
 from app.llm.base import Tool
+from app.llm.prompts import resolve_prompt
 from app.spine.events import append_event
 from app.substrate import inventory, pos, omnichannel
 
@@ -153,4 +154,4 @@ IMPLS = {
 
 
 def build_agent() -> Agent:
-    return Agent(name=NAME, system_prompt=SYSTEM, tools=TOOLS, tool_impls=IMPLS, max_iters=12)
+    return Agent(name=NAME, system_prompt=resolve_prompt(NAME, SYSTEM), tools=TOOLS, tool_impls=IMPLS, max_iters=12)
