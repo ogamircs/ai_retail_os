@@ -9,6 +9,7 @@ import {
 } from "../lib/api";
 import { useDrawer } from "../lib/drawerContext";
 import { agentInkStyle } from "../lib/agentInk";
+import { requireBiometric } from "../lib/biometric";
 import "./ApprovalDrawer.css";
 
 export default function ApprovalDrawer() {
@@ -72,6 +73,17 @@ function ApprovalContent() {
 
   const apply = async () => {
     if (!external) return;
+    // Track 3 B4: gate the apply behind biometric (Tauri shell) or
+    // confirm() (browser fallback). `unsupported` means neither was
+    // available in this runtime — proceed so headless / CI flows still
+    // work, but the operator's test environment reflects the gap.
+    const outcome = await requireBiometric({
+      reason: `Apply ${action.action_type} to ${external.system_id}? This will mutate the external system.`,
+      title: "Operator confirmation",
+    });
+    if (outcome === "cancelled") {
+      return;
+    }
     setPhase("applying");
     try {
       const r = await applyIntegrationAction(external.system_id, external.id);

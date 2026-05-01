@@ -27,6 +27,7 @@ import {
   listSyncRuns,
   listStores,
 } from "./api";
+import { notifyPendingApprovals } from "./pushNotifier";
 
 export type DashboardData = {
   kpis: KpiResponse | null;
@@ -97,6 +98,11 @@ export function DashboardProvider({ children }: { children: ReactNode }) {
         syncRuns,
         artifacts,
       });
+      // Track 3 B3: fire OS-level notifications for any newly pending
+      // approvals. Notifier dedups via its own SEEN cache so calling
+      // every 5s is safe; permission has to be granted via the explicit
+      // status-strip button before this does anything in the browser.
+      void notifyPendingApprovals(actions);
     } catch (e: any) {
       setError(e?.message || "Dashboard data unavailable");
     } finally {

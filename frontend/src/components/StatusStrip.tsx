@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { ConfigInfo, getConfig, getMeshStatus, MeshStatus, setProvider, Kpi } from "../lib/api";
 import { useDashboardData } from "../lib/data";
 import { useDrawer } from "../lib/drawerContext";
+import { requestApprovalPushPermission } from "../lib/pushNotifier";
 import "./StatusStrip.css";
 
 const CHIP_LABELS: Record<string, string> = {
@@ -67,6 +68,10 @@ export default function StatusStrip() {
   const [cfg, setCfg] = useState<ConfigInfo | null>(null);
   const [now, setNow] = useState<string>(utcClock());
   const [mesh, setMesh] = useState<MeshStatus | null>(null);
+  const [pushPerm, setPushPerm] = useState<NotificationPermission | "unknown">(() => {
+    if (typeof Notification === "undefined") return "unknown";
+    return Notification.permission;
+  });
 
   useEffect(() => {
     getConfig().then(setCfg).catch(() => {});
@@ -134,6 +139,20 @@ export default function StatusStrip() {
         </span>
       ))}
       {error && <span className="link-err">data link · err</span>}
+      {pushPerm !== "granted" && (
+        <button
+          className="push-toggle"
+          data-testid="push-toggle"
+          onClick={async () => setPushPerm(await requestApprovalPushPermission())}
+          title={
+            pushPerm === "denied"
+              ? "browser blocked notifications — re-enable in site settings"
+              : "enable OS notifications when an approval lands"
+          }
+        >
+          🔔 {pushPerm === "denied" ? "blocked" : "enable"}
+        </button>
+      )}
       {mesh?.recent_downgrade && (
         <span
           className="mesh-down"
