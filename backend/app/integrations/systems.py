@@ -734,21 +734,28 @@ class MauticAdapter(IntegrationAdapter):
         endpoint: str,
         key: str,
         limit: int = 200,
-        max_rows: int = 5000,
-    ) -> list[dict[str, Any]]:
+        max_rows: int | None = None,
+    ) -> tuple[list[dict[str, Any]], bool]:
         """GET /api/<endpoint> with pagination, normalised to a flat list.
 
         Mautic returns rows keyed by id (`{"42": {...}}`) plus a `total`
-        field. A single request only returns one page (`limit` rows); for
-        any real instance bigger than that we'd silently truncate the sync
-        and cache only the first page, so we walk `start` until we've
-        consumed `total` (or hit `max_rows` as a safety cap against a
-        runaway pull on a huge tenant).
+        field. A single request only returns one page (`limit` rows); we
+        walk `start` until we've consumed `total` (or hit a short page
+        when `total` isn't returned).
+
+        Returns `(rows, truncated)`. `max_rows=None` (the default and
+        what `_live_sync` passes) means no cap — sync is comprehensive
+        by design. A caller that does pass `max_rows` and hits it gets
+        `truncated=True`, and the live-sync caller surfaces that in the
+        result `summary` so it isn't silent.
         """
         out: list[dict[str, Any]] = []
         start = 0
-        while len(out) < max_rows:
-            page_limit = min(limit, max_rows - len(out))
+        truncated = False
+        while True:
+            page_limit = (
+                limit if max_rows is None else min(limit, max(1, max_rows - len(out)))
+            )
             data = self._client().request(
                 f"/api/{endpoint}?limit={page_limit}&start={start}"
             )
@@ -773,18 +780,32 @@ class MauticAdapter(IntegrationAdapter):
                 break
             if len(page) < page_limit:
                 break
+            if max_rows is not None and len(out) >= max_rows:
+                # Cap reached but the API said there's more — flag it loudly
+                # so the result summary can mark this domain as truncated.
+                truncated = total is None or total > len(out)
+                break
             start += page_limit
-        return out
+        return out, truncated
 
     def _live_sync(self) -> IntegrationResult:
         domains: dict[str, int] = {}
+        truncated_domains: list[str] = []
         records_read = 0
         records_written = 0
+
+        # Pull every page (no row cap by default — sync is comprehensive). If
+        # an explicit cap is ever wired in via env later, the helper marks
+        # truncated=True and we surface that in `summary["truncated_domains"]`
+        # so callers don't quietly act on an incomplete cache.
+        segs, seg_trunc = self._mautic_list("segments", "lists")
+        contacts, contact_trunc = self._mautic_list("contacts", "contacts", limit=500)
+        campaigns, cmp_trunc = self._mautic_list("campaigns", "campaigns")
 
         # Segments: alias == seg_id with - replaced by _ (see infra/mautic/seed.py).
         # Recover the substrate segment_id by reversing that mapping so the
         # external_refs row links the Mautic list back to the spine segment.
-        for seg in self._mautic_list("segments", "lists"):
+        for seg in segs:
             external_id = _coerce_id(seg.get("id"))
             if external_id is None:
                 continue
@@ -794,11 +815,13 @@ class MauticAdapter(IntegrationAdapter):
             domains["Segment"] = domains.get("Segment", 0) + 1
             records_written += 1
             records_read += 1
+        if seg_trunc:
+            truncated_domains.append("Segment")
 
         # Contacts: local_id is email since that's deterministic across our
         # seeded personas. If a contact has no email we still cache the row
         # but skip the external_ref (no clean local key to anchor it).
-        for contact in self._mautic_list("contacts", "contacts", limit=500):
+        for contact in contacts:
             external_id = _coerce_id(contact.get("id"))
             if external_id is None:
                 continue
@@ -808,12 +831,14 @@ class MauticAdapter(IntegrationAdapter):
             domains["Contact"] = domains.get("Contact", 0) + 1
             records_written += 1
             records_read += 1
+        if contact_trunc:
+            truncated_domains.append("Contact")
 
         # Campaigns: recover the substrate campaign_id from the
         # `[retail-os:<id>]` marker our seeder embeds in description.
         # If the marker isn't present (operator-authored campaign) we still
         # cache the row but with no local_id.
-        for cmp in self._mautic_list("campaigns", "campaigns"):
+        for cmp in campaigns:
             external_id = _coerce_id(cmp.get("id"))
             if external_id is None:
                 continue
@@ -824,12 +849,20 @@ class MauticAdapter(IntegrationAdapter):
             domains["Campaign"] = domains.get("Campaign", 0) + 1
             records_written += 1
             records_read += 1
+        if cmp_trunc:
+            truncated_domains.append("Campaign")
 
+        summary: dict[str, Any] = {"mode": "connected", "domains": domains}
+        if truncated_domains:
+            summary["truncated_domains"] = truncated_domains
+        # Status downgrades to "partial" so callers can branch on
+        # "this snapshot is incomplete" without parsing summary keys.
+        status = "partial" if truncated_domains else "success"
         return IntegrationResult(
-            status="success",
+            status=status,
             records_read=records_read,
             records_written=records_written,
-            summary={"mode": "connected", "domains": domains},
+            summary=summary,
         )
 
     # ----- mock ------------------------------------------------------------

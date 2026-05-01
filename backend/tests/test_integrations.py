@@ -122,8 +122,9 @@ class IntegrationLayerTest(unittest.TestCase):
                 return {"lists": rows, "total": len(all_rows)}
 
         adapter._client = lambda: _StubClient()  # type: ignore[method-assign]
-        out = adapter._mautic_list("segments", "lists", limit=3)
+        out, truncated = adapter._mautic_list("segments", "lists", limit=3)
         self.assertEqual(len(out), 7)
+        self.assertFalse(truncated)
         # Three pages: start=0,3,6.
         self.assertEqual(len(calls), 3)
         # Confirm we fetched every row, not just the first page.
@@ -148,9 +149,38 @@ class IntegrationLayerTest(unittest.TestCase):
                 return {"lists": {r["id"]: r for r in page}}  # no `total`
 
         adapter._client = lambda: _NoTotalClient()  # type: ignore[method-assign]
-        out = adapter._mautic_list("segments", "lists", limit=3)
+        out, truncated = adapter._mautic_list("segments", "lists", limit=3)
         # Two pages: 3 (full) + 1 (short → stop).
         self.assertEqual(len(out), 4)
+        self.assertFalse(truncated)
+
+    def test_mautic_list_flags_truncation_when_max_rows_hit(self):
+        """If a caller does pass an explicit max_rows and the API has more
+        rows than that, the helper must return truncated=True. The default
+        path through `_live_sync` passes max_rows=None (no cap) — but if a
+        future env knob ever lowers it, the truncation is loud rather than
+        silent.
+        """
+        from app.integrations.systems import MauticAdapter
+
+        adapter = MauticAdapter()
+        all_rows = [{"id": str(i)} for i in range(1, 11)]  # 10 rows
+
+        class _BigClient:
+            def request(self, path: str):
+                qs = path.split("?", 1)[1]
+                params = dict(p.split("=", 1) for p in qs.split("&"))
+                start = int(params["start"])
+                limit = int(params["limit"])
+                page = all_rows[start : start + limit]
+                return {"lists": {r["id"]: r for r in page}, "total": len(all_rows)}
+
+        adapter._client = lambda: _BigClient()  # type: ignore[method-assign]
+        out, truncated = adapter._mautic_list(
+            "segments", "lists", limit=3, max_rows=5
+        )
+        self.assertEqual(len(out), 5)
+        self.assertTrue(truncated)
 
     def test_coerce_id_rejects_missing_and_blank(self):
         """Pin the malformed-id guard: a missing/blank Mautic id must NOT
