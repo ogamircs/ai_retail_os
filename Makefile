@@ -16,7 +16,7 @@ OPENBOXES_COMPOSE := docker compose -p ai-retail-openboxes -f $(OPENBOXES_DIR)/d
         erpnext-up erpnext-down erpnext-bootstrap erpnext-seed erpnext-logs erpnext-status erpnext-nuke \
         mautic-up mautic-down mautic-bootstrap mautic-seed mautic-logs mautic-status mautic-nuke \
         medusa-up medusa-down medusa-bootstrap medusa-seed medusa-logs medusa-status medusa-nuke \
-        openboxes-up openboxes-down openboxes-bootstrap openboxes-seed openboxes-logs openboxes-status openboxes-nuke
+        openboxes-up openboxes-down openboxes-bootstrap openboxes-seed openboxes-logs openboxes-status openboxes-nuke openboxes-config
 
 help:
 	@echo "ERPNext:"
@@ -118,7 +118,10 @@ medusa-bootstrap:
 medusa-seed:
 	python3 $(MEDUSA_DIR)/seed.py
 
-openboxes-up:
+openboxes-config:
+	bash $(OPENBOXES_DIR)/render-config.sh
+
+openboxes-up: openboxes-config
 	$(OPENBOXES_COMPOSE) up -d --build
 
 openboxes-down:

@@ -12,12 +12,17 @@ set -euo pipefail
 
 ADMIN_USER="${OPENBOXES_ADMIN_USER:-openboxes}"
 ADMIN_PASSWORD="${OPENBOXES_ADMIN_PASSWORD:-password}"
+DB_USER="${OPENBOXES_DB_USER:-openboxes}"
 DB_PASSWORD="${OPENBOXES_DB_PASSWORD:-openboxes}"
+DB_NAME="${OPENBOXES_DB_NAME:-openboxes}"
 SITE_URL="${OPENBOXES_SITE_URL:-http://localhost:8082}"
 
 cd "$(dirname "$0")"
 
 COMPOSE="docker compose -p ai-retail-openboxes -f docker-compose.yml"
+
+echo ">> rendering openboxes-config.properties from template"
+bash render-config.sh
 
 echo ">> ensuring stack is up (builds the openboxes image on first run)"
 $COMPOSE up -d

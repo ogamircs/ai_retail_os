@@ -1,0 +1,25 @@
+# Demo OpenBoxes config — wires the Grails app to the compose `db` service.
+# Keys mirror infra/openboxes-docker upstream. Don't ship to prod.
+#
+# This is a *template*. infra/openboxes/bootstrap.sh renders it into a
+# sibling `openboxes-config.properties` (gitignored) before `compose up`,
+# substituting the @@…@@ placeholders with the env values that the
+# compose stack actually starts MySQL with — so the documented
+# OPENBOXES_DB_USER / OPENBOXES_DB_PASSWORD / OPENBOXES_DB_NAME
+# overrides reach Grails instead of getting silently overwritten by a
+# hardcoded password.
+
+dataSource.url=jdbc:mysql://db:3306/@@DB_NAME@@?autoReconnect=true&useSSL=false&serverTimezone=UTC
+dataSource.username=@@DB_USER@@
+dataSource.password=@@DB_PASSWORD@@
+dataSource.driverClassName=com.mysql.cj.jdbc.Driver
+dataSource.dialect=org.hibernate.dialect.MySQL5InnoDBDialect
+
+grails.serverURL=http://localhost:8080
+grails.mail.host=localhost
+grails.mail.port=25
+
+# Auto-create the demo schema on first boot. OpenBoxes' Grails app runs
+# migrations via Liquibase whenever the Tomcat container starts.
+openboxes.bootstrap.disabled=false
+openboxes.api.cors.enabled=true

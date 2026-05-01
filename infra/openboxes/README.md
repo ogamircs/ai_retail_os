@@ -35,7 +35,7 @@ OpenBoxes doesn't ship an official Docker Hub image. The upstream-recommended pa
 
 | Make target | What it does |
 |---|---|
-| `make openboxes-up` | builds the openboxes image (first run is ~5 min) and `docker compose up -d` (mysql + tomcat) |
+| `make openboxes-up` | renders `openboxes-config.properties` from the template (substitutes `OPENBOXES_DB_*` env values), builds the image (first run is ~5 min) and `docker compose up -d` (mysql + tomcat) |
 | `make openboxes-bootstrap` | waits for Liquibase migrations (no command to run by hand — Grails handles them on first Tomcat boot), prints admin creds + env block |
 | `make openboxes-seed` | projects spine demo data (5 Locations + 30 Products). Idempotent — re-runs print zero `++` lines |
 | `make openboxes-status` | `docker compose ps` |
