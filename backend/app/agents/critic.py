@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from app.agents.base import Agent
 from app.llm.base import Tool
+from app.llm.prompts import resolve_prompt
 from app.spine.events import append_event, events_since_ts
 from app.spine.artifacts import read_artifact, write_artifact
 from app.substrate import omnichannel, pos
@@ -285,7 +286,7 @@ IMPLS = {
 def build_agent() -> Agent:
     return Agent(
         name=NAME,
-        system_prompt=SYSTEM,
+        system_prompt=resolve_prompt(NAME, SYSTEM),
         tools=TOOLS,
         tool_impls=IMPLS,
         max_iters=10,

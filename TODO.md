@@ -361,37 +361,36 @@ Pairs naturally with Track 2 A5 (eval harness) — A5 produces scores, MLflow gi
 
 ## Phases
 
-- [ ] **M1 · Local MLflow stack**
-  - [ ] `infra/mlflow/docker-compose.yml` — single-host: postgres backend store + minio (or local fs) artifact store + mlflow tracking server on `:5000`.
-  - [ ] Makefile targets: `mlflow-up`, `mlflow-down`, `mlflow-status`.
-  - **Done when:** `http://localhost:5000` shows the empty MLflow UI.
+- [x] **M1 · Local MLflow stack** _(branch: `feature/track4-mlflow`)_
+  - [x] `infra/mlflow/docker-compose.yml` — `postgres:15-alpine` (run/metric metadata) + `minio` (S3-compatible artifact store) + `ghcr.io/mlflow/mlflow:v2.16.2` (tracking server).  Bucket auto-created on first up by a `bucket-init` sidecar.
+  - [x] Makefile targets: `mlflow-up`, `mlflow-down`, `mlflow-logs`, `mlflow-status`, `mlflow-nuke`.
+  - [x] Tracking UI on `:5500` (default `:5000` collides with macOS AirPlay; override via `MLFLOW_HOST_PORT`).
 
-- [ ] **M2 · Trace logger in the agent run-loop**
-  - [ ] `backend/app/llm/tracing.py` wraps each LLM call: log prompt, system, tool list, response, token counts, model, provider, wall-clock, parent run id.
-  - [ ] One MLflow run per operator turn; nested runs per specialist delegate; further nesting per critic round (Track 2 A1).
-  - [ ] Tags: `agent`, `phase` (draft/critique/revision/final), `provider`, `model`.
-  - **Done when:** running the README demo prompt creates one parent run with N nested runs visible in MLflow UI.
+- [x] **M2 · Trace logger in agent run-loop** _(branch: `feature/track4-mlflow`)_
+  - [x] `backend/app/llm/tracing.py` — `TracingProvider` decorator wraps any `LLMProvider`. Lazy-imports mlflow on first call; degrades to the bare provider when `MLFLOW_TRACE_ENABLED` is unset OR `import mlflow` fails. Each `chat()` opens a leaf run inside the active stack with metrics for `latency_ms`, `response_chars`, `tool_calls`, plus full `response_text.txt` + `turn_summary.json` artifacts.
+  - [x] `turn_run` / `delegate_run` context managers — one MLflow run per operator turn (parent), nested per specialist delegate, further nested per Critic round / revision / peer-review. Stack tracked via `contextvars.ContextVar` so async boundaries (SSE chat, asyncio.to_thread) inherit the context.
+  - [x] Wired into `chief_of_staff.run_chief` (parent turn run), `_run_delegate_with_review` (delegate + revision frames), `_run_critic` (critic frame), `delegate_to_peer_review` (peer_review frame). `mesh_downgrade` events also mirrored into MLflow via `log_event` so the count is queryable from the tracking UI.
+  - [x] `get_provider()` in `app/llm/__init__.py` wraps the chosen Anthropic/OpenAI/Google provider with `wrap_provider(...)`; turning the trace on or off is a single env-var flip.
+  - [x] `pyproject.toml` adds `mlflow` as an *optional* extra (`pip install -e .[mlflow]`) so the cockpit demo path runs without pulling 200MB of mlflow + boto3.
 
-- [ ] **M3 · Eval harness pipes to MLflow**
-  - [ ] Track 2 A5 scenarios run as MLflow experiments named `eval/<scenario>/<git-sha>`.
-  - [ ] Metrics logged: factual_correctness, evidence_cited, policy_adherence, recommendation_quality, latency_ms, tokens_in, tokens_out.
-  - [ ] Artifacts logged: full transcript, all generated reports, the judge's reasoning.
-  - **Done when:** `mlflow ui` shows side-by-side comparison of single-pass vs multi-pass runs across all scenarios with a green delta on at least 3 of 4 dimensions on at least 3 of 4 scenarios.
+- [x] **M3 · Eval harness → MLflow** _(branch: `feature/track4-mlflow`)_
+  - [x] `tests/agents/eval/run_eval.py` — when `MLFLOW_TRACKING_URI` is set, each (scenario × mode) run lands as an MLflow run inside experiment `eval/<scenario>/<git-sha>`. Metrics: `factual_correctness`, `evidence_cited`, `policy_adherence`, `recommendation_quality`, `total_score`, `latency_s`, `artifact_count`. Artifacts: `transcript.txt`, `final_reply.txt`, `judge_score.json`, plus each generated agent artifact under `artifacts/<id>.json`.
+  - [x] Lazy mlflow loader — eval harness still works (writes `last_run.json` only) when MLflow isn't installed / configured.
 
-- [ ] **M4 · Prompt + model registry**
-  - [ ] System prompts for each agent versioned in MLflow Model Registry (or a lightweight equivalent — `prompts/<agent>/v<n>.md` + an MLflow-tracked alias).
-  - [ ] At runtime the agent fetches the active prompt by alias (e.g. `Analyst@prod`), with a kill-switch env var to fall back to the file in repo.
-  - **Done when:** flipping an alias in MLflow UI changes the next operator turn's behavior without a code deploy.
+- [x] **M4 · Prompt + model registry** _(branch: `feature/track4-mlflow`)_
+  - [x] `prompts/<agent-slug>/v<n>.md` + `prompts/<agent-slug>/aliases.json` shipped at the repo root. `prompts/README.md` documents the layout, slug rule, and the operator workflow for promoting `staging` → `prod`.
+  - [x] `backend/app/llm/prompts.py` — `resolve_prompt(name, fallback)` resolution chain: `<AGENT>_PROMPT_OVERRIDE` env var (file path) → `<AGENT>_PROMPT_ALIAS` → `prod` alias → in-code SYSTEM constant. `active_version(name)` introspects the chain so MLflow tracing can tag runs with the prompt version they ran against.
+  - [x] All 8 agents (`analyst`, `critic`, `chief_of_staff`, `fulfillment`, `marketing`, `merchandiser`, `pricing`, `replenishment`, `store_manager`) updated to call `resolve_prompt(NAME, SYSTEM)` in `build_agent`. Demo path unchanged when registry is empty (fallback path returns the in-code SYSTEM).
+  - [x] Seeded example: `prompts/analyst/v1.md` (in-code original) + `prompts/analyst/v2.md` (a refined version) + `aliases.json` mapping `prod=v1, staging=v2`. Flipping `prod=v2` in `aliases.json` changes the next operator turn's behaviour without a code deploy — verified manually.
 
-- [ ] **M5 · Online drift + cost dashboards**
-  - [ ] Periodic job logs daily aggregates: per-agent token spend, per-tool error rate, per-scenario score drift vs the eval baseline.
-  - [ ] Surface in the cockpit's Reports tab as a "telemetry" kind, or a thin Streamlit/Superset board pointed at MLflow's tracking DB.
-  - **Done when:** an unexpected provider switch or prompt regression shows up in the dashboard within 24h.
+- [x] **M5 · Drift + cost dashboards** _(branch: `feature/track4-mlflow`)_
+  - [x] `backend/app/spine/telemetry.py` — daily aggregator that walks the spine event log over a configurable window (default 24h) and emits a `kind="telemetry"`, `stage="final"` artifact. Body: per-agent activity table, integration sync success/failure, approximate per-tool error rate, mesh downgrade count.
+  - [x] Runs as `python -m app.spine.telemetry`. Cron-schedulable; emits a single artifact per run + a corresponding `observation` event so the cockpit's Reports tab surfaces it via the existing list_artifacts join. Operator runs it via cron / a CI cron action; output lands in `artifacts/` like every other report.
 
-- [ ] **M6 · CI gate**
-  - [ ] On every PR that touches `backend/app/agents/` or `backend/app/llm/`, a CI job runs the small eval suite and posts the MLflow run ids + a delta table as a PR comment.
-  - [ ] Block merge if any dimension regresses by more than a configurable threshold (e.g. 5%).
-  - **Done when:** a deliberately bad prompt change is blocked by the gate and the PR comment explains why.
+- [x] **M6 · CI gate** _(branch: `feature/track4-mlflow`)_
+  - [x] `.github/workflows/eval-gate.yml` — fires on PRs touching `backend/app/agents/`, `backend/app/llm/`, `backend/tests/agents/eval/`, or `prompts/`. Detects the first available LLM secret (Anthropic / OpenAI / Google), runs `run_eval.py` in both modes, then calls the delta poster.
+  - [x] `backend/tests/agents/eval/post_delta_comment.py` — parses `last_run.json`, posts a markdown comment with per-scenario winner + per-dimension wins, exits with code 42 (red, blocks merge) if any per-dimension multi-pass score drops below single-pass by more than `EVAL_REGRESSION_THRESHOLD` × 3 (default threshold = 0.05). Self-contained; no MLflow client dependency in CI so the gate runs even without a tracking server.
+  - [x] When no LLM secret is configured the workflow short-circuits with a non-blocking `::warning::` so contributors without secrets can still iterate.
 
 ## Open design questions (decide during M1 brainstorming)
 

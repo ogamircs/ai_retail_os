@@ -25,6 +25,8 @@ from collections.abc import Iterator
 from app.agents.base import Agent, AgentEvent
 from app.config import mesh as mesh_settings
 from app.llm.base import LLMProvider, Tool
+from app.llm.prompts import resolve_prompt
+from app.llm import tracing as mesh_tracing
 from app.spine.events import append_event
 from app.spine.artifacts import read_artifact, update_artifact_stage, write_artifact
 from app.agents import (
@@ -183,17 +185,17 @@ class _MeshState:
         if self.downgraded:
             return
         self.downgraded = True
-        append_event(
-            agent=NAME,
-            kind="mesh_downgrade",
-            payload={
-                "reason": reason,
-                "tokens_used": self.tokens_used,
-                "elapsed_s": round(time.monotonic() - self.start, 2),
-                "budget_tokens": mesh_settings.turn_token_budget,
-                "wallclock_s": mesh_settings.turn_wallclock_seconds,
-            },
-        )
+        payload = {
+            "reason": reason,
+            "tokens_used": self.tokens_used,
+            "elapsed_s": round(time.monotonic() - self.start, 2),
+            "budget_tokens": mesh_settings.turn_token_budget,
+            "wallclock_s": mesh_settings.turn_wallclock_seconds,
+        }
+        append_event(agent=NAME, kind="mesh_downgrade", payload=payload)
+        # Mirror into the active MLflow run so dashboards can count
+        # downgrades per session without joining against spine.db.
+        mesh_tracing.log_event("mesh_downgrade", payload)
 
 
 def _approx_tokens(text: str) -> int:
@@ -252,7 +254,8 @@ def build_orchestrator(llm: LLMProvider, event_sink: _EventBuffer) -> Agent:
             "queries you need to verify or contradict the draft. End with one "
             "write_artifact call carrying the four required headings."
         )
-        return _run_specialist(critic_agent, critic_task)
+        with mesh_tracing.delegate_run("Critic", phase="critic"):
+            return _run_specialist(critic_agent, critic_task)
 
     def _run_delegate_with_review(
         specialist_key: str,
@@ -265,6 +268,18 @@ def build_orchestrator(llm: LLMProvider, event_sink: _EventBuffer) -> Agent:
         disabled. The converged artifact is flipped to stage="final" in
         place so the operator sees one canonical row in the Reports tab.
         """
+        # Track 4 M2: open a nested MLflow run for this delegation so
+        # the leaf LLM calls inside `_run_specialist` and `_run_critic`
+        # nest underneath. Tracing is a no-op when MLFLOW_TRACE_ENABLED
+        # is unset.
+        with mesh_tracing.delegate_run(specialist.name, phase="delegate"):
+            return _run_delegate_with_review_inner(specialist_key, specialist, task)
+
+    def _run_delegate_with_review_inner(
+        specialist_key: str,
+        specialist: Agent,
+        task: str,
+    ) -> dict:
         result = _run_specialist(specialist, task)
         result["draft_artifact"] = result["artifacts"][-1] if result["artifacts"] else None
         if specialist_key not in _REVIEW_LOOP_SPECIALISTS:
@@ -301,7 +316,8 @@ def build_orchestrator(llm: LLMProvider, event_sink: _EventBuffer) -> Agent:
             if _critique_is_clean(critique_id):
                 break
             revise_task = revise_task_for(specialist.name, current, critique_id)
-            revised = _run_specialist(specialist, revise_task)
+            with mesh_tracing.delegate_run(specialist.name, phase="revision"):
+                revised = _run_specialist(specialist, revise_task)
             if not revised["artifacts"]:
                 break
             current = revised["artifacts"][-1]
@@ -367,7 +383,8 @@ def build_orchestrator(llm: LLMProvider, event_sink: _EventBuffer) -> Agent:
             }
         peer_agent = specialists_by_key[peer_key]
         task = peer_review_task_for(peer_agent.name, artifact_id, scope)
-        return _run_specialist(peer_agent, task)
+        with mesh_tracing.delegate_run(peer_agent.name, phase="peer_review"):
+            return _run_specialist(peer_agent, task)
 
     def _log_decision(args: dict) -> dict:
         eid = append_event(
@@ -499,17 +516,23 @@ def build_orchestrator(llm: LLMProvider, event_sink: _EventBuffer) -> Agent:
         "log_decision": _log_decision,
         "write_summary_artifact": _write_summary_artifact,
     }
-    return Agent(name=NAME, system_prompt=SYSTEM, tools=tools, tool_impls=impls, max_iters=16)
+    return Agent(name=NAME, system_prompt=resolve_prompt(NAME, SYSTEM), tools=tools, tool_impls=impls, max_iters=16)
 
 
 def run_chief(user_input: str, llm: LLMProvider) -> Iterator[AgentEvent]:
     """Run the orchestrator and stream events from CoS *and* delegated specialists."""
+    # Track 4 M2: open the parent MLflow run for this operator turn.
+    # All delegate / critic / leaf-LLM runs nest underneath. No-op when
+    # MLFLOW_TRACE_ENABLED is unset.
+    provider_name = getattr(llm, "name", "unknown")
+    provider_model = getattr(llm, "model", "unknown")
     sink = _EventBuffer()
     chief = build_orchestrator(llm, sink)
-    for ev in chief.run(user_input, llm):
-        # Drain any specialist events buffered before this CoS event
+    with mesh_tracing.turn_run(user_input, provider_name, provider_model):
+        for ev in chief.run(user_input, llm):
+            # Drain any specialist events buffered before this CoS event
+            for spec_ev in sink.drain():
+                yield spec_ev
+            yield ev
         for spec_ev in sink.drain():
             yield spec_ev
-        yield ev
-    for spec_ev in sink.drain():
-        yield spec_ev
