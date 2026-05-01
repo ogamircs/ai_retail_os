@@ -1,0 +1,70 @@
+# Minimal Medusa v2 stack for the AI Retail OS demo.
+# Single-host, dev/demo only — same shape as infra/erpnext + infra/mautic.
+#
+# Brought up via:
+#   make medusa-up         # build + start the stack
+#   make medusa-bootstrap  # one-shot: db:migrate + create admin user
+#   make medusa-down       # stop, keep volumes
+#   make medusa-nuke       # stop and wipe volumes (full reset)
+#
+# Server:      http://localhost:9000
+# Admin UI:    http://localhost:9000/app
+# Admin user:  admin@retail.local
+# Admin pass:  retail-medusa   (override via MEDUSA_ADMIN_PASSWORD)
+
+x-medusa-env: &medusa_env
+  DATABASE_URL: postgres://${MEDUSA_DB_USER:-medusa}:${MEDUSA_DB_PASSWORD:-retail-db}@db:5432/${MEDUSA_DB_NAME:-medusa}
+  REDIS_URL: redis://redis:6379
+  STORE_CORS: "${MEDUSA_STORE_CORS:-http://localhost:3000,http://localhost:8000,http://localhost:9000}"
+  ADMIN_CORS: "${MEDUSA_ADMIN_CORS:-http://localhost:9000}"
+  AUTH_CORS: "${MEDUSA_AUTH_CORS:-http://localhost:9000,http://localhost:7001}"
+  JWT_SECRET: "${MEDUSA_JWT_SECRET:-retail-jwt-change-me}"
+  COOKIE_SECRET: "${MEDUSA_COOKIE_SECRET:-retail-cookie-change-me}"
+  NODE_ENV: development
+
+services:
+  db:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${MEDUSA_DB_USER:-medusa} -d ${MEDUSA_DB_NAME:-medusa}"]
+      interval: 1s
+      retries: 30
+    environment:
+      POSTGRES_USER: ${MEDUSA_DB_USER:-medusa}
+      POSTGRES_PASSWORD: ${MEDUSA_DB_PASSWORD:-retail-db}
+      POSTGRES_DB: ${MEDUSA_DB_NAME:-medusa}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+
+  medusa:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ai-retail-os/medusa:local
+    restart: unless-stopped
+    environment:
+      <<: *medusa_env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    ports:
+      - "9000:9000"
+    volumes:
+      # Persist any operator-uploaded media + starter customisations made
+      # via `medusa develop`. The build-baked /app/dist code stays inside
+      # the image and is not shadowed.
+      - medusa-uploads:/app/uploads
+
+volumes:
+  db-data:
+  redis-data:
+  medusa-uploads:
