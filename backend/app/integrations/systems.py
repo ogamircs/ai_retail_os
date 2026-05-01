@@ -1741,17 +1741,34 @@ class OpenBoxesAdapter(IntegrationAdapter):
                     f"{action_type} payload has no `pos` rows; nothing to annotate."
                 ),
             }
-        shipments = self._api_list("shipments", query={"direction": "INBOUND"}) or self._api_list("shipments")
-        # Index shipments by name/po_id for fast lookup. OpenBoxes' Shipment
-        # domain doesn't enforce a uniqueness on `name`, so we accept any
-        # match.
-        by_name = {(s.get("name") or s.get("shipmentNumber")): s for s in shipments if s.get("name") or s.get("shipmentNumber")}
+        # Prefer the inbound-filtered list. Fall back to the unfiltered
+        # list only when the filtered request *errors* — a legitimate
+        # zero-row inbound result (empty demo) must NOT silently pull
+        # outbound shipments and risk annotating the wrong record on a
+        # name collision.
+        try:
+            shipments = self._api_list("shipments", query={"direction": "INBOUND"})
+        except Exception:
+            shipments = self._api_list("shipments")
+        # Index by BOTH `name` and `shipmentNumber` when present. OpenBoxes'
+        # Shipment domain populates both fields independently across 0.9.x
+        # minors, so keying on only one would silently drop matches when
+        # the operator's payload `po_id` lines up with `shipmentNumber`
+        # but the shipment also carries a different `name`.
+        by_key: dict[str, dict[str, Any]] = {}
+        for s in shipments:
+            for k in (s.get("name"), s.get("shipmentNumber")):
+                if isinstance(k, str) and k.strip():
+                    # First write wins for any single key — order from the
+                    # API response is preserved by the list iteration.
+                    by_key.setdefault(k, s)
         annotated: list[str] = []
         for po in po_rows:
             po_id = po.get("po_id") if isinstance(po, dict) else None
             if not po_id:
                 continue
-            target = by_name.get(po_id) or by_name.get(po.get("po_number") if isinstance(po, dict) else None)
+            po_number = po.get("po_number") if isinstance(po, dict) else None
+            target = by_key.get(po_id) or (by_key.get(po_number) if po_number else None)
             if target is None:
                 continue
             ship_id = _coerce_id(target.get("id"))

@@ -622,6 +622,109 @@ class IntegrationLayerTest(unittest.TestCase):
         self.assertEqual(result["status"], "error")
         self.assertIn("no matching inbound shipments", result["result"]["error"].lower() if result["result"]["error"] else "")
 
+    def test_openboxes_apply_indexes_by_shipment_number(self):
+        """When a shipment has both `name` and `shipmentNumber` populated
+        and the payload `po_id` matches the `shipmentNumber`, the helper
+        must still resolve. Indexing on `name OR shipmentNumber` would
+        silently miss this case.
+        """
+        from app.integrations.systems import OpenBoxesAdapter
+        from app.integrations import store
+
+        os.environ["OPENBOXES_BASE_URL"] = "http://stub"
+        os.environ["OPENBOXES_API_TOKEN"] = "tok"
+
+        adapter = OpenBoxesAdapter()
+        adapter._auth_token = "tok"
+        adapter._login = lambda: "tok"  # type: ignore[method-assign]
+
+        row = store.create_outbox_action(
+            system_id="openboxes",
+            action_queue_id=None,
+            agent="Replenishment",
+            action_type="po_held",
+            title="Hold by shipmentNumber",
+            external_domain="Purchase Order",
+            payload={"pos": [{"po_id": "PO-555"}], "reason": "weather"},
+            configured=True,
+        )
+
+        posts: list[dict] = []
+
+        class _Stub:
+            def request(self, path: str, method: str = "GET", payload: dict | None = None):
+                if path.startswith("/api/shipments?direction=INBOUND") and method == "GET":
+                    return {
+                        "data": [
+                            {
+                                "id": "ship_x",
+                                "name": "Internal-Label-Foo",
+                                "shipmentNumber": "PO-555",
+                            }
+                        ]
+                    }
+                if path.startswith("/api/shipments/ship_x/comments") and method == "POST":
+                    posts.append({"path": path, "payload": payload})
+                    return {}
+                return {}
+
+        adapter._client = lambda: _Stub()  # type: ignore[method-assign]
+        result = adapter.apply_outbound(row["id"])
+        self.assertEqual(result["status"], "draft_created", msg=result)
+        self.assertEqual(result["external_id"], "ship_x")
+        self.assertEqual(len(posts), 1)
+
+    def test_openboxes_apply_does_not_fall_back_on_empty_inbound(self):
+        """Empty inbound result is a legitimate "no inbound shipments"
+        signal, not a request failure. Falling back to the unfiltered
+        shipments list could annotate an outbound record on a name/
+        shipmentNumber collision. Helper must keep the empty list
+        and land the row in `error`.
+        """
+        from app.integrations.systems import OpenBoxesAdapter
+        from app.integrations import store
+
+        os.environ["OPENBOXES_BASE_URL"] = "http://stub"
+        os.environ["OPENBOXES_API_TOKEN"] = "tok"
+
+        adapter = OpenBoxesAdapter()
+        adapter._auth_token = "tok"
+        adapter._login = lambda: "tok"  # type: ignore[method-assign]
+
+        row = store.create_outbox_action(
+            system_id="openboxes",
+            action_queue_id=None,
+            agent="Replenishment",
+            action_type="po_held",
+            title="Hold colliding po",
+            external_domain="Purchase Order",
+            payload={"pos": [{"po_id": "PO-101"}], "reason": "x"},
+            configured=True,
+        )
+
+        calls: list[tuple[str, str]] = []
+
+        class _Stub:
+            def request(self, path: str, method: str = "GET", payload: dict | None = None):
+                calls.append((method, path))
+                if "direction=INBOUND" in path:
+                    return {"data": []}
+                # Outbound shipment that happens to share the po_id name.
+                # If the helper falls back to this list, we'd annotate it.
+                if path.startswith("/api/shipments") and method == "GET":
+                    return {"data": [{"id": "ship_outbound", "name": "PO-101"}]}
+                return {}
+
+        adapter._client = lambda: _Stub()  # type: ignore[method-assign]
+        result = adapter.apply_outbound(row["id"])
+        self.assertEqual(result["status"], "error", msg=result)
+        # Only the inbound-filtered call should have fired; no fallback
+        # to the unfiltered list, no comment POST.
+        get_paths = [p for m, p in calls if m == "GET"]
+        self.assertEqual(len(get_paths), 1)
+        self.assertIn("direction=INBOUND", get_paths[0])
+        self.assertFalse(any(m == "POST" for m, _ in calls))
+
     def test_openboxes_apply_unsupported_falls_back(self):
         """`store_transfer` (declared in outbound_domain but NOT in
         LIVE_ACTION_TYPES for OpenBoxes) falls back to base mock-apply.
