@@ -821,6 +821,59 @@ class IntegrationLayerTest(unittest.TestCase):
             ["/api/rest/v1/products?limit=100", "/api/rest/v1/products?page=2"],
         )
 
+    def test_akeneo_live_sync_falls_back_to_uuid_then_marker(self):
+        """Akeneo CE 7+ allows products without `identifier` (UUID-only).
+        The sync must keep them — fall back to `uuid`, then to the
+        [retail-os:<sku>] description marker. Dropping such rows would
+        silently truncate the cache.
+        """
+        from app.integrations.systems import AkeneoAdapter
+        from app.integrations import store
+
+        os.environ["AKENEO_BASE_URL"] = "http://stub"
+        os.environ["AKENEO_CLIENT_ID"] = "cid"
+        os.environ["AKENEO_SECRET"] = "sec"
+        os.environ["AKENEO_USERNAME"] = "admin"
+        os.environ["AKENEO_PASSWORD"] = "pw"
+
+        adapter = AkeneoAdapter()
+        adapter._admin_token = "tok"
+        adapter._login = lambda: "tok"  # type: ignore[method-assign]
+
+        # Three products: classic identifier, UUID-only, marker-only.
+        products = [
+            {"identifier": "SKU-A"},
+            {"identifier": None, "uuid": "uuid-b-1234"},
+            {
+                "identifier": None,
+                "uuid": None,
+                "values": {
+                    "description": [
+                        {"locale": "en_US", "data": "[retail-os:SKU-C] fallback path"}
+                    ]
+                },
+            },
+        ]
+
+        class _Stub:
+            def request(self, path, method="GET", payload=None):
+                if path.startswith("/api/rest/v1/categories"):
+                    return {"_embedded": {"items": []}}
+                if path.startswith("/api/rest/v1/products"):
+                    return {"_embedded": {"items": products}}
+                return {}
+
+        adapter._client = lambda: _Stub()  # type: ignore[method-assign]
+        result = adapter.sync_inbound()
+        self.assertEqual(result.status, "success")
+        # All three products must have landed.
+        self.assertEqual(result.summary["domains"].get("Product"), 3)
+
+        # Cache rows: external_id should be SKU-A, uuid-b-1234, SKU-C.
+        bundle = store.list_records(system_id="akeneo", domain="Product", limit=10)
+        ext_ids = {r.get("external_id") for r in bundle["records"]}
+        self.assertEqual(ext_ids, {"SKU-A", "uuid-b-1234", "SKU-C"})
+
     def test_akeneo_apply_pim_enrich_patches_product(self):
         from app.integrations.systems import AkeneoAdapter
         from app.integrations import store

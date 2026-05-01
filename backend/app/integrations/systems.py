@@ -1955,20 +1955,28 @@ class AkeneoAdapter(IntegrationAdapter):
             records_read += 1
 
         # Products: local_id is the SKU. Akeneo's `identifier` is the
-        # product code; recover via that or via the [retail-os:<sku>]
-        # marker the seed embeds in description (mirror of OpenBoxes).
+        # legacy product code; CE 7+ also exposes UUID-only products
+        # (no identifier). Try in order: identifier → uuid → the
+        # [retail-os:<sku>] marker the seed embeds in description.
+        # Dropping rows that lack `identifier` would silently omit
+        # UUID-only products from record_cache / external_refs even
+        # though we have a perfectly usable id elsewhere.
         for prod in self._api_list("products"):
-            external_id = _coerce_id(prod.get("identifier"))
+            description = ""
+            desc_values = ((prod.get("values") or {}).get("description") or [])
+            if isinstance(desc_values, list) and desc_values:
+                description = desc_values[0].get("data") or ""
+            marker_match = _AKENEO_MARKER_RE.search(description)
+            marker_id = marker_match.group(1) if marker_match else None
+
+            external_id = (
+                _coerce_id(prod.get("identifier"))
+                or _coerce_id(prod.get("uuid"))
+                or _coerce_id(marker_id)
+            )
             if external_id is None:
                 continue
-            local_id = prod.get("identifier")
-            if not local_id:
-                desc_values = ((prod.get("values") or {}).get("description") or [])
-                if isinstance(desc_values, list) and desc_values:
-                    description = desc_values[0].get("data") or ""
-                    match = _AKENEO_MARKER_RE.search(description)
-                    if match:
-                        local_id = match.group(1)
+            local_id = prod.get("identifier") or marker_id
             self._cache("Product", external_id, prod, local_id)
             domains["Product"] = domains.get("Product", 0) + 1
             records_written += 1
