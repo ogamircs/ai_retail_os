@@ -275,6 +275,92 @@ make mautic-bootstrap
 make mautic-seed
 ```
 
+## Running with real Medusa
+
+The `medusa` adapter has its own local-stack rollout. See `infra/medusa/README.md` for the full setup; quick path:
+
+```bash
+# 1. Stack: postgres + redis + custom medusa image (first run is slow —
+#    docker build clones medusa-starter-default + yarn install, ~3-5 min)
+make medusa-up
+
+# 2. Run db:migrate + create admin user (idempotent; aborts loudly on
+#    real auth/DB errors so you don't end up with bad creds)
+make medusa-bootstrap
+# → prints MEDUSA_BASE_URL / MEDUSA_ADMIN_EMAIL / MEDUSA_ADMIN_PASSWORD
+
+# 3. Wire backend/.env with the printed creds:
+#    MEDUSA_BASE_URL=http://localhost:9000
+#    MEDUSA_ADMIN_EMAIL=admin@retail.local
+#    MEDUSA_ADMIN_PASSWORD=retail-medusa
+
+# 4. Project the spine demo data into Medusa (idempotent):
+#    1 Sales Channel, 5 Stock Locations (one per substrate store),
+#    30 Products (single Default variant, USD pricing).
+make medusa-seed
+
+# 5. (Re)start the backend so it picks up the new env:
+cd backend && uvicorn app.main:app --reload
+```
+
+Sanity-check auth:
+
+```bash
+curl -s -X POST -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$MEDUSA_ADMIN_EMAIL\",\"password\":\"$MEDUSA_ADMIN_PASSWORD\"}" \
+  "$MEDUSA_BASE_URL/auth/user/emailpass" | head -c 200; echo
+# → {"token":"eyJ..."}
+```
+
+In the cockpit's Integrations tab the `medusa` row will show a green `connected` chip. Click `sync` to pull live Sales Channels, Stock Locations, Products, and Orders into `record_cache` + `external_refs`. Approve a `Merchandiser → store_transfer` or `Fulfillment → fulfillment_routing` via the drawer's `apply → external` button — the adapter records the action as auditable metadata on the seeded entity (Medusa v2 has no inter-location transfer primitive, so we stash the audit trail directly on the from-store stock location or the Retail Demo sales channel).
+
+A walkthrough with CLI-equivalent verification steps lives in [`docs/uat/2026-04-30-medusa-p5-store-transfer-demo.md`](docs/uat/2026-04-30-medusa-p5-store-transfer-demo.md).
+
+### What lands in Medusa per action type
+
+| `action_type` | Medusa target | What gets written |
+|---|---|---|
+| `store_transfer` | from-store `Stock Location` | appended to `metadata.retail_os_pending_transfers`. Lookup by `metadata.retail_os_store_id` (the seed stash). |
+| `fulfillment_routing` | "Retail Demo" `Sales Channel` | appended to `metadata.retail_os_routing_log`. Lookup by name. |
+| anything else | falls back to base mock-apply | configured → `draft_created`, unconfigured → `applied_mock`. No external write. |
+
+Idempotency: each entry carries a `marker = sha256(payload)[:12]` — re-applying the same outbox row finds the existing log entry and returns `details.reused=true` instead of duplicating. Stable across processes.
+
+Why metadata stashes (not orders / fulfillments / reservations)? Medusa v2 has no inter-location transfer primitive, and our outbox payloads describe what the operator wants done — they don't carry a concrete order id to mutate. Inventing fake orders just to write something would be misleading. Metadata on the seeded entity is auditable from the admin UI and round-trips cleanly via the P3 sync.
+
+### Troubleshooting
+
+| Symptom | What to check |
+|---|---|
+| First `make medusa-up` takes a long time | Image build clones medusa-starter and runs yarn install. ~3–5 min on a fresh machine. Check `make medusa-logs`. |
+| Server restart-loops on `Could not find index.html` | The Dockerfile runs `npx medusa build` before `yarn start`; if you're tracking a forked starter that lacks build-time output, re-build with `make medusa-up` (or `--no-cache`). |
+| Cockpit Integrations row stays `mock` | `backend/.env` not picked up by the running uvicorn — restart the backend. The override also needs `MEDUSA_ADMIN_EMAIL` + `MEDUSA_ADMIN_PASSWORD` (not just the base URL). |
+| `apply → external` returns `error` chip on `store_transfer` | Common: `from_store` missing in the payload, or the seed didn't run so no stock location has the matching `metadata.retail_os_store_id`. Re-run `make medusa-seed`. |
+| `apply → external` returns `error` chip on `fulfillment_routing` | "Retail Demo" sales channel is missing — re-run `make medusa-seed`. |
+| `/admin/*` calls 401 mid-session | The cockpit caches Medusa's JWT. On 401 the adapter drops the cached token, re-logins via `POST /auth/user/emailpass`, and retries once — verify creds in `backend/.env` if the second attempt also fails. |
+| Sync returns `status="partial"` with `truncated_domains` populated | A future env knob lowered `max_rows` below the catalogue size. Default `_live_sync` uses `max_rows=None` (uncapped) — bump or remove the cap. |
+| Apple Silicon: image won't build | `node:22-alpine` is multi-arch. If a transitive dep needs glibc, switch to `node:22` (Debian-based) — heavier but compatible. |
+| Want a clean slate | `make medusa-nuke && make medusa-up && make medusa-bootstrap && make medusa-seed` |
+
+### Live-path tests
+
+`backend/tests/test_integrations_medusa_live.py` exercises sync + apply against a real Medusa. Skipped automatically when `MEDUSA_BASE_URL` / `MEDUSA_ADMIN_EMAIL` / `MEDUSA_ADMIN_PASSWORD` aren't set or the endpoint isn't reachable, so CI stays mock-only:
+
+```bash
+cd backend
+python -m unittest discover -s tests          # mock-only — live tests skipped
+python -m unittest discover -s tests          # all pass with backend/.env wired
+```
+
+To reset everything from scratch:
+
+```bash
+make medusa-nuke   # stop the stack and wipe volumes
+make medusa-up
+make medusa-bootstrap
+make medusa-seed
+```
+
 ## Provider swap
 
 In the header, change the provider dropdown (Anthropic / OpenAI / Google). Identical behavior, different model. Requires the corresponding API key in `.env`.

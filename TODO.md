@@ -145,9 +145,17 @@ For every system, the per-system phases are the same:
   - [x] `sync_inbound()` dispatches: configured → `_live_sync`, else → `_mock_sync` (the prior substrate-only behaviour, unchanged).
   - [x] Three new unit tests in `tests/test_integrations.py`: `_admin_list` paginates until `count` consumed, truncation flag fires when `max_rows` hit, `configured()` requires admin creds.
   - [x] `backend/tests/test_integrations_medusa_live.py` — env-gated, three live tests: live sync round-trip, seeded `retail_os_store_id` external_ref round-trip, registry reports `mode=connected`. Skipped automatically when creds aren't set so CI stays mock-only.
-- [ ] P4 · Live outbound apply
-- [ ] P5 · Agent-loop UAT
-- [ ] P6 · Docs + tests
+
+- [ ] P4 · Live outbound apply _(in flight on `feature/medusa-p4-apply` — see PR #23)_
+
+- [x] **P5 · Agent-loop UAT** _(branch: `feature/medusa-p6-docs` — bundled with P6, open PR pending)_
+  - [x] `docs/uat/2026-04-30-medusa-p5-store-transfer-demo.md` — full walkthrough with two demos (`store_transfer` lands metadata on the from-store stock_location; `fulfillment_routing` lands on the Retail Demo sales channel), CLI-equivalent verification at every step, idempotency check (re-apply → `details.reused=true`), and an acceptance checklist the operator runs before promoting the UAT.
+  - [x] Screenshots are an operator follow-up — the doc carries `> **Screenshot:** img/...` placeholders so the captures slot in without changing any other prose.
+  - [x] No frontend bug surfaced this round (the rail-filter fix from ERPNext P5 already covers configured-mode external statuses; Medusa goes through the same `PENDING_EXTERNAL_STATUSES` set).
+
+- [x] **P6 · Docs + tests** _(branch: `feature/medusa-p6-docs` — bundled with P5, open PR pending)_
+  - [x] README "Running with real Medusa" section: full quick-start (compose / bootstrap / env / seed / sanity curl), per-action-type mapping table (`store_transfer` → metadata stash on from-store stock location, `fulfillment_routing` → metadata stash on Retail Demo sales channel, anything else → base mock-apply), why metadata stashes vs orders/fulfillments/reservations, troubleshooting cheat sheet (slow first build, restart-loop on missing build output, 401 mid-session re-login, partial-sync truncation, Apple Silicon glibc fallback), live-test instructions, and reset path.
+  - [x] Live-path tests already env-gated (covered in P3 + P4); README now points at them so CI stays mock-only by design.
 
 ## OpenBoxes
 - [ ] P1 · Local instance
