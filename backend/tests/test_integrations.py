@@ -97,6 +97,106 @@ class IntegrationLayerTest(unittest.TestCase):
         self.assertEqual(applied["status"], "applied_mock")
         self.assertIn("no external system was mutated", applied["result"]["message"])
 
+    def test_mautic_list_paginates_until_total_consumed(self):
+        """Pin the pagination guard: a single Mautic instance with more rows
+        than `limit` would otherwise be truncated to the first page.
+        Walk `start` until `total` is consumed.
+        """
+        from app.integrations.systems import MauticAdapter
+
+        adapter = MauticAdapter()
+        # Build 7 fake rows; ask for limit=3. Should fetch 3 pages: 3+3+1.
+        all_rows = [{"id": str(i)} for i in range(1, 8)]
+        calls: list[str] = []
+
+        class _StubClient:
+            def request(self, path: str):
+                calls.append(path)
+                # Parse start + limit from the querystring (cheap).
+                qs = path.split("?", 1)[1]
+                params = dict(p.split("=", 1) for p in qs.split("&"))
+                start = int(params["start"])
+                limit = int(params["limit"])
+                page = all_rows[start : start + limit]
+                rows = {row["id"]: row for row in page}
+                return {"lists": rows, "total": len(all_rows)}
+
+        adapter._client = lambda: _StubClient()  # type: ignore[method-assign]
+        out, truncated = adapter._mautic_list("segments", "lists", limit=3)
+        self.assertEqual(len(out), 7)
+        self.assertFalse(truncated)
+        # Three pages: start=0,3,6.
+        self.assertEqual(len(calls), 3)
+        # Confirm we fetched every row, not just the first page.
+        self.assertEqual({r["id"] for r in out}, {str(i) for i in range(1, 8)})
+
+    def test_mautic_list_stops_on_short_page_when_total_missing(self):
+        """Some Mautic responses omit `total`. Fall back to the short-page
+        heuristic — a page shorter than the requested limit means we're done.
+        """
+        from app.integrations.systems import MauticAdapter
+
+        adapter = MauticAdapter()
+        all_rows = [{"id": str(i)} for i in range(1, 5)]  # 4 rows
+
+        class _NoTotalClient:
+            def request(self, path: str):
+                qs = path.split("?", 1)[1]
+                params = dict(p.split("=", 1) for p in qs.split("&"))
+                start = int(params["start"])
+                limit = int(params["limit"])
+                page = all_rows[start : start + limit]
+                return {"lists": {r["id"]: r for r in page}}  # no `total`
+
+        adapter._client = lambda: _NoTotalClient()  # type: ignore[method-assign]
+        out, truncated = adapter._mautic_list("segments", "lists", limit=3)
+        # Two pages: 3 (full) + 1 (short → stop).
+        self.assertEqual(len(out), 4)
+        self.assertFalse(truncated)
+
+    def test_mautic_list_flags_truncation_when_max_rows_hit(self):
+        """If a caller does pass an explicit max_rows and the API has more
+        rows than that, the helper must return truncated=True. The default
+        path through `_live_sync` passes max_rows=None (no cap) — but if a
+        future env knob ever lowers it, the truncation is loud rather than
+        silent.
+        """
+        from app.integrations.systems import MauticAdapter
+
+        adapter = MauticAdapter()
+        all_rows = [{"id": str(i)} for i in range(1, 11)]  # 10 rows
+
+        class _BigClient:
+            def request(self, path: str):
+                qs = path.split("?", 1)[1]
+                params = dict(p.split("=", 1) for p in qs.split("&"))
+                start = int(params["start"])
+                limit = int(params["limit"])
+                page = all_rows[start : start + limit]
+                return {"lists": {r["id"]: r for r in page}, "total": len(all_rows)}
+
+        adapter._client = lambda: _BigClient()  # type: ignore[method-assign]
+        out, truncated = adapter._mautic_list(
+            "segments", "lists", limit=3, max_rows=5
+        )
+        self.assertEqual(len(out), 5)
+        self.assertTrue(truncated)
+
+    def test_coerce_id_rejects_missing_and_blank(self):
+        """Pin the malformed-id guard: a missing/blank Mautic id must NOT
+        cache rows under str(None) == "None" — otherwise multiple bad rows
+        collide on a fake external_id and corrupt the cache.
+        """
+        from app.integrations.systems import _coerce_id
+
+        self.assertIsNone(_coerce_id(None))
+        self.assertIsNone(_coerce_id(""))
+        self.assertIsNone(_coerce_id("   "))
+        self.assertIsNone(_coerce_id(True))   # booleans are not valid ids
+        self.assertEqual(_coerce_id(42), "42")
+        self.assertEqual(_coerce_id("42"), "42")
+        self.assertEqual(_coerce_id("  abc  "), "abc")
+
     def test_mautic_webhook_is_recorded_as_measurement(self):
         payload = {"campaign_id": "cmp-weekend-heat", "event": "email.open", "count": 12}
         with TestClient(app) as client:

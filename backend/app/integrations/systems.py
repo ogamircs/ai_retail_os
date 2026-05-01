@@ -653,6 +653,29 @@ class ERPNextAdapter(IntegrationAdapter):
             ).fetchone()
         return row["sku"] if row else None
 
+_MAUTIC_MARKER_RE = re.compile(r"\[retail-os:([a-zA-Z0-9_\-]+)\]")
+
+
+def _coerce_id(raw: Any) -> str | None:
+    """Validate and stringify a Mautic row id.
+
+    `str(None)` is the truthy string "None" — a missing id would otherwise
+    cache rows under a fake external_id, and multiple malformed rows would
+    collide on it. Validate the raw value first, *then* cast.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        # JSON bools shouldn't appear in id positions; treat as malformed.
+        return None
+    if isinstance(raw, (int, float)):
+        return str(raw)
+    if isinstance(raw, str):
+        s = raw.strip()
+        return s or None
+    return None
+
+
 class MauticAdapter(IntegrationAdapter):
     definition = IntegrationDefinition(
         system_id="mautic",
@@ -663,23 +686,188 @@ class MauticAdapter(IntegrationAdapter):
         notes="Segments, email/campaign drafts, and webhook-based campaign telemetry.",
     )
 
+    def configured(self) -> bool:
+        # Beyond the base-class env-key check, require either the pre-baked
+        # MAUTIC_BASIC_TOKEN or the user/password pair the bootstrap script
+        # prints. Without auth there is nothing to talk to — so don't claim
+        # the adapter is configured.
+        if not super().configured():
+            return False
+        if os.getenv("MAUTIC_BASIC_TOKEN", "").strip():
+            return True
+        return bool(
+            os.getenv("MAUTIC_USERNAME", "").strip()
+            and os.getenv("MAUTIC_PASSWORD", "").strip()
+        )
+
+    def _client(self) -> JsonHttpClient:
+        headers: dict[str, str] = {}
+        token = os.getenv("MAUTIC_BASIC_TOKEN", "").strip()
+        if token:
+            headers["Authorization"] = f"Basic {token}"
+        else:
+            raw = f"{os.environ['MAUTIC_USERNAME']}:{os.environ['MAUTIC_PASSWORD']}"
+            headers["Authorization"] = f"Basic {b64encode(raw.encode()).decode()}"
+        return JsonHttpClient(os.environ["MAUTIC_BASE_URL"], headers=headers)
+
     def healthcheck(self) -> IntegrationResult:
         if not self.configured():
             return super().healthcheck()
         try:  # pragma: no cover - live-system path
-            headers = {}
-            token = os.getenv("MAUTIC_BASIC_TOKEN")
-            if token:
-                headers["Authorization"] = f"Basic {token}"
-            elif os.getenv("MAUTIC_USERNAME") and os.getenv("MAUTIC_PASSWORD"):
-                raw = f"{os.environ['MAUTIC_USERNAME']}:{os.environ['MAUTIC_PASSWORD']}"
-                headers["Authorization"] = f"Basic {b64encode(raw.encode()).decode()}"
-            data = JsonHttpClient(os.environ["MAUTIC_BASE_URL"], headers=headers).request("/api/contacts?limit=1")
+            data = self._client().request("/api/contacts?limit=1")
             return IntegrationResult(status="connected", summary={"contacts_seen": len(data.get("contacts", []))})
         except Exception as exc:
             return IntegrationResult(status="error", error=str(exc))
 
     def sync_inbound(self) -> IntegrationResult:
+        if not self.configured():
+            return self._mock_sync()
+        try:
+            return self._live_sync()
+        except Exception as exc:
+            return IntegrationResult(status="error", error=str(exc))
+
+    # ----- live ------------------------------------------------------------
+
+    def _mautic_list(
+        self,
+        endpoint: str,
+        key: str,
+        limit: int = 200,
+        max_rows: int | None = None,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """GET /api/<endpoint> with pagination, normalised to a flat list.
+
+        Mautic returns rows keyed by id (`{"42": {...}}`) plus a `total`
+        field. A single request only returns one page (`limit` rows); we
+        walk `start` until we've consumed `total` (or hit a short page
+        when `total` isn't returned).
+
+        Returns `(rows, truncated)`. `max_rows=None` (the default and
+        what `_live_sync` passes) means no cap — sync is comprehensive
+        by design. A caller that does pass `max_rows` and hits it gets
+        `truncated=True`, and the live-sync caller surfaces that in the
+        result `summary` so it isn't silent.
+        """
+        out: list[dict[str, Any]] = []
+        start = 0
+        truncated = False
+        while True:
+            page_limit = (
+                limit if max_rows is None else min(limit, max(1, max_rows - len(out)))
+            )
+            data = self._client().request(
+                f"/api/{endpoint}?limit={page_limit}&start={start}"
+            )
+            rows = data.get(key) or {}
+            if isinstance(rows, dict):
+                page = list(rows.values())
+            elif isinstance(rows, list):
+                page = rows
+            else:
+                page = []
+            if not page:
+                break
+            out.extend(page)
+            # Prefer Mautic's authoritative `total`; fall back to the
+            # short-page heuristic when total isn't returned.
+            total_raw = data.get("total")
+            try:
+                total = int(total_raw) if total_raw is not None else None
+            except (TypeError, ValueError):
+                total = None
+            if total is not None and start + len(page) >= total:
+                break
+            if len(page) < page_limit:
+                break
+            if max_rows is not None and len(out) >= max_rows:
+                # Cap reached but the API said there's more — flag it loudly
+                # so the result summary can mark this domain as truncated.
+                truncated = total is None or total > len(out)
+                break
+            start += page_limit
+        return out, truncated
+
+    def _live_sync(self) -> IntegrationResult:
+        domains: dict[str, int] = {}
+        truncated_domains: list[str] = []
+        records_read = 0
+        records_written = 0
+
+        # Pull every page (no row cap by default — sync is comprehensive). If
+        # an explicit cap is ever wired in via env later, the helper marks
+        # truncated=True and we surface that in `summary["truncated_domains"]`
+        # so callers don't quietly act on an incomplete cache.
+        segs, seg_trunc = self._mautic_list("segments", "lists")
+        contacts, contact_trunc = self._mautic_list("contacts", "contacts", limit=500)
+        campaigns, cmp_trunc = self._mautic_list("campaigns", "campaigns")
+
+        # Segments: alias == seg_id with - replaced by _ (see infra/mautic/seed.py).
+        # Recover the substrate segment_id by reversing that mapping so the
+        # external_refs row links the Mautic list back to the spine segment.
+        for seg in segs:
+            external_id = _coerce_id(seg.get("id"))
+            if external_id is None:
+                continue
+            alias = (seg.get("alias") or "").strip()
+            local_id = alias.replace("_", "-") if alias else None
+            self._cache("Segment", external_id, seg, local_id)
+            domains["Segment"] = domains.get("Segment", 0) + 1
+            records_written += 1
+            records_read += 1
+        if seg_trunc:
+            truncated_domains.append("Segment")
+
+        # Contacts: local_id is email since that's deterministic across our
+        # seeded personas. If a contact has no email we still cache the row
+        # but skip the external_ref (no clean local key to anchor it).
+        for contact in contacts:
+            external_id = _coerce_id(contact.get("id"))
+            if external_id is None:
+                continue
+            fields = (contact.get("fields") or {}).get("core") or {}
+            email = (fields.get("email") or {}).get("value") or contact.get("email")
+            self._cache("Contact", external_id, contact, email)
+            domains["Contact"] = domains.get("Contact", 0) + 1
+            records_written += 1
+            records_read += 1
+        if contact_trunc:
+            truncated_domains.append("Contact")
+
+        # Campaigns: recover the substrate campaign_id from the
+        # `[retail-os:<id>]` marker our seeder embeds in description.
+        # If the marker isn't present (operator-authored campaign) we still
+        # cache the row but with no local_id.
+        for cmp in campaigns:
+            external_id = _coerce_id(cmp.get("id"))
+            if external_id is None:
+                continue
+            description = cmp.get("description") or ""
+            match = _MAUTIC_MARKER_RE.search(description)
+            local_id = match.group(1) if match else None
+            self._cache("Campaign", external_id, cmp, local_id)
+            domains["Campaign"] = domains.get("Campaign", 0) + 1
+            records_written += 1
+            records_read += 1
+        if cmp_trunc:
+            truncated_domains.append("Campaign")
+
+        summary: dict[str, Any] = {"mode": "connected", "domains": domains}
+        if truncated_domains:
+            summary["truncated_domains"] = truncated_domains
+        # Status downgrades to "partial" so callers can branch on
+        # "this snapshot is incomplete" without parsing summary keys.
+        status = "partial" if truncated_domains else "success"
+        return IntegrationResult(
+            status=status,
+            records_read=records_read,
+            records_written=records_written,
+            summary=summary,
+        )
+
+    # ----- mock ------------------------------------------------------------
+
+    def _mock_sync(self) -> IntegrationResult:
         domains: dict[str, int] = {}
         records_written = 0
         with conn() as c:
@@ -701,8 +889,33 @@ class MauticAdapter(IntegrationAdapter):
             status="success",
             records_read=records_written,
             records_written=records_written,
-            summary={"mode": "mock" if not self.configured() else "connected_stub", "domains": domains},
+            summary={"mode": "mock", "domains": domains},
         )
+
+    def _cache(self, domain: str, external_id: str, payload: dict[str, Any], local_id: str | None) -> None:
+        store.cache_record(self.definition.system_id, domain, str(external_id), payload, local_id=local_id)
+        if local_id:
+            store.record_external_ref(
+                self.definition.system_id,
+                domain,
+                str(local_id),
+                str(external_id),
+                external_url=self._external_url(domain, str(external_id)),
+                props={"source": "Mautic"},
+            )
+
+    def _external_url(self, domain: str, external_id: str) -> str | None:
+        base = os.getenv("MAUTIC_BASE_URL")
+        if not base:
+            return None
+        path = {
+            "Segment": "s/segments/view",
+            "Contact": "s/contacts/view",
+            "Campaign": "s/campaigns/view",
+        }.get(domain)
+        if not path:
+            return None
+        return f"{base.rstrip('/')}/{path}/{quote(external_id)}"
 
     def outbound_domain(self, action_type: str) -> str:
         return {
