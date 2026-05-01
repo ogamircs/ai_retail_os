@@ -51,8 +51,34 @@ for _ in $(seq 1 90); do
   sleep 2
 done
 
-echo ">> running pim:installer:db (idempotent — re-runs are no-ops)"
-$COMPOSE exec -T akeneo bin/console pim:installer:db --env=prod --catalog=src/PimCommunity/Bundle/InstallerBundle/Resources/fixtures/minimal || true
+echo ">> running pim:installer:db"
+# Akeneo's installer is idempotent in spirit (it can be re-run on an
+# already-installed database) but it surfaces "already installed"
+# conditions as non-zero exits with predictable messages. Capture
+# stderr + the exit code; swallow ONLY when the message matches a
+# known benign signal. Anything else (MySQL still unavailable,
+# OpenSearch unhealthy, command shape changed, fixture path missing)
+# must abort the bootstrap rather than print usable-looking creds
+# against a partially-initialised instance.
+set +e
+installer_output=$(
+  $COMPOSE exec -T akeneo \
+    bin/console pim:installer:db --env=prod \
+      --catalog=src/PimCommunity/Bundle/InstallerBundle/Resources/fixtures/minimal 2>&1
+)
+installer_rc=$?
+set -e
+if [ $installer_rc -eq 0 ]; then
+  echo "++ pim:installer:db completed"
+elif echo "$installer_output" | grep -qiE "already (installed|loaded|exist|present)|schema is already|tables already|database (is )?not empty|nothing to install"; then
+  echo "   pim:installer:db reports already-installed (continuing)"
+else
+  echo "$installer_output"
+  echo "!! pim:installer:db failed (exit=$installer_rc) — bootstrap aborted."
+  echo "   Fix the underlying error (mysql/opensearch readiness, fixture"
+  echo "   path, or command shape change) and re-run."
+  exit "$installer_rc"
+fi
 
 echo ">> ensuring admin user (idempotent)"
 set +e
