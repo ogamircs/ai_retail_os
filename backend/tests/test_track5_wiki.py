@@ -348,6 +348,37 @@ class WikiAutoPublishTest(unittest.TestCase):
         # ALL critiques must be clean → mixed turn keeps draft.
         self.assertEqual(page.status, "draft")
 
+    def test_run_chief_resets_turn_id_even_when_chief_raises(self):
+        """current_turn_id contextvar must be cleared even if
+        chief.run raises mid-stream — otherwise the next request on
+        the same worker mis-tags its append_event calls.
+        """
+        from app.agents import chief_of_staff
+        from app.spine.events import current_turn_id
+
+        # Sanity: contextvar starts empty.
+        self.assertEqual(current_turn_id.get(), "")
+
+        class _RaisingLLM:
+            name = "stub"
+            model = "stub-1"
+
+            def chat(self, *_a, **_kw):
+                raise RuntimeError("boom mid-turn")
+
+        # Drain the generator — should propagate / yield error event,
+        # but the finally block must still reset the contextvar.
+        gen = chief_of_staff.run_chief("trigger error", _RaisingLLM())
+        try:
+            for _ in gen:
+                pass
+        except Exception:
+            pass
+        # Critical assertion: contextvar is empty again after the
+        # generator exhausts/raises. Stale value would mean future
+        # turns on the same worker leak.
+        self.assertEqual(current_turn_id.get(), "")
+
     def test_concurrent_turns_do_not_cross_publish(self):
         """Two overlapping turns: turn-A has a clean Pricing critique +
         Pricing wiki_edit; turn-B has only a Replenishment wiki_edit

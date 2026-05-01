@@ -633,50 +633,60 @@ def run_chief(user_input: str, llm: LLMProvider) -> Iterator[AgentEvent]:
     turn_start_iso = datetime.now(timezone.utc).isoformat()
     turn_id = uuid.uuid4().hex
     _turn_id_token = current_turn_id.set(turn_id)
-    with mesh_tracing.turn_run(user_input, provider_name, provider_model):
-        for ev in chief.run(user_input, llm):
-            # Drain any specialist events buffered before this CoS event
+    # Outer try/finally ensures the contextvar resets even when
+    # chief.run raises mid-stream or the surrounding tracing context
+    # blows up. Without this, the worker thread would keep the stale
+    # turn id and a subsequent /api/chat dispatch on the same worker
+    # would mis-tag every append_event call — cross-contaminating
+    # auto-publish + curator scoping across requests.
+    try:
+        with mesh_tracing.turn_run(user_input, provider_name, provider_model):
+            for ev in chief.run(user_input, llm):
+                # Drain any specialist events buffered before this CoS event
+                for spec_ev in sink.drain():
+                    yield spec_ev
+                yield ev
             for spec_ev in sink.drain():
                 yield spec_ev
-            yield ev
-        for spec_ev in sink.drain():
-            yield spec_ev
-    # Track 5 W4 — fire auto-publish AFTER all events are streamed so
-    # the post-turn wiki state reflects every draft + critique that
-    # landed in the turn. Pass turn_id so concurrent turns don't cross-
-    # publish each other's drafts.
-    try:
-        _wiki_auto_publish_clean_drafts(turn_start_iso, llm, turn_id=turn_id)
-    except Exception:
-        # Never break the operator-facing reply because of a wiki
-        # post-processing error.
-        pass
-    # Track 5 W6 — Wiki Curator. Read-only post-turn observer that
-    # decides what's worth committing to the wiki. Runs under its own
-    # MLflow nested run so token spend shows up in the same dashboard
-    # as the operator-facing turn. Curator errors are caught so a bad
-    # LLM response can't break the chat path.
-    #
-    # Critically, we do NOT re-run _wiki_auto_publish_clean_drafts
-    # after the Curator. Curator drafts land *after* the Critic phase
-    # has already finished — they have no critique of their own. A
-    # second post-curator publish would auto-promote curator-authored
-    # drafts whenever the earlier turn-level critiques happened to be
-    # clean, which is unsafe (the curator may have hallucinated a
-    # lesson the agent's draft never actually proved). Curator drafts
-    # therefore always wait for explicit operator approval via the
-    # WikiTab — even on a turn whose agent draft was reviewed clean.
-    try:
-        from app.agents import wiki_curator
+        # Track 5 W4 — fire auto-publish AFTER all events are streamed
+        # so the post-turn wiki state reflects every draft + critique
+        # that landed in the turn. Pass turn_id so concurrent turns
+        # don't cross-publish each other's drafts.
+        try:
+            _wiki_auto_publish_clean_drafts(turn_start_iso, llm, turn_id=turn_id)
+        except Exception:
+            # Never break the operator-facing reply because of a wiki
+            # post-processing error.
+            pass
+        # Track 5 W6 — Wiki Curator. Read-only post-turn observer that
+        # decides what's worth committing to the wiki. Runs under its
+        # own MLflow nested run so token spend shows up in the same
+        # dashboard as the operator-facing turn. Curator errors are
+        # caught so a bad LLM response can't break the chat path.
+        #
+        # Critically, we do NOT re-run _wiki_auto_publish_clean_drafts
+        # after the Curator. Curator drafts land *after* the Critic
+        # phase has already finished — they have no critique of their
+        # own. A second post-curator publish would auto-promote
+        # curator-authored drafts whenever the earlier turn-level
+        # critiques happened to be clean, which is unsafe (the
+        # curator may have hallucinated a lesson the agent's draft
+        # never actually proved). Curator drafts therefore always
+        # wait for explicit operator approval via the WikiTab — even
+        # on a turn whose agent draft was reviewed clean.
+        try:
+            from app.agents import wiki_curator
 
-        with mesh_tracing.delegate_run(wiki_curator.NAME, phase="curator"):
-            wiki_curator.curate_turn(
-                turn_start_iso, user_input, llm, turn_id=turn_id
-            )
-    except Exception:
-        pass
+            with mesh_tracing.delegate_run(wiki_curator.NAME, phase="curator"):
+                wiki_curator.curate_turn(
+                    turn_start_iso, user_input, llm, turn_id=turn_id
+                )
+        except Exception:
+            pass
     finally:
-        # Reset the contextvar so a future request in the same task
-        # group sees a clean slate and doesn't accidentally inherit
-        # this turn's id.
+        # Reset the contextvar so a future request on this worker
+        # sees a clean slate. Runs unconditionally — chief.run raising
+        # mid-stream, the tracing context manager blowing up, or any
+        # other failure inside the try-block all still hit this
+        # cleanup.
         current_turn_id.reset(_turn_id_token)
