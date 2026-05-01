@@ -100,6 +100,51 @@ class WikiStorageTest(unittest.TestCase):
         wiki.set_pinned("x/y", False)
         self.assertEqual(wiki.list_pinned(), [])
 
+    def test_api_pages_status_empty_returns_all_stages(self):
+        """status='' on /api/wiki/pages must bypass the default
+        published-only filter so the cockpit's 'all stages' toggle
+        actually returns drafts + deprecated."""
+        from fastapi.testclient import TestClient
+        from app.main import app
+
+        wiki.propose_edit("d/x", "Draft only", "b", "A")  # draft, never published
+        wiki.propose_edit("p/y", "Published one", "b", "A")
+        wiki.publish_page("p/y", "Operator")
+
+        c = TestClient(app)
+        r_default = c.get("/api/wiki/pages")  # default: status=published
+        slugs_pub = {p["slug"] for p in r_default.json()["pages"]}
+        self.assertIn("p/y", slugs_pub)
+        self.assertNotIn("d/x", slugs_pub)
+
+        r_all = c.get("/api/wiki/pages?status=")  # explicit empty = all stages
+        slugs_all = {p["slug"] for p in r_all.json()["pages"]}
+        self.assertIn("p/y", slugs_all)
+        self.assertIn("d/x", slugs_all)
+
+    def test_api_search_honours_status_filter(self):
+        """Searching with status=draft must hide published matches."""
+        from fastapi.testclient import TestClient
+        from app.main import app
+
+        wiki.propose_edit("d/foo", "FOOTITLE", "body about FOO", "A")  # draft
+        wiki.propose_edit("p/foo", "FOOTITLE pub", "body about FOO too", "A")
+        wiki.publish_page("p/foo", "Operator")
+
+        c = TestClient(app)
+        r_draft = c.get("/api/wiki/search?q=FOO&status=draft")
+        slugs_draft = {p["slug"] for p in r_draft.json()["pages"]}
+        self.assertEqual(slugs_draft, {"d/foo"})
+
+        r_pub = c.get("/api/wiki/search?q=FOO&status=published")
+        slugs_pub = {p["slug"] for p in r_pub.json()["pages"]}
+        self.assertEqual(slugs_pub, {"p/foo"})
+
+        # No status filter (or empty) returns both.
+        r_all = c.get("/api/wiki/search?q=FOO&status=")
+        slugs_all = {p["slug"] for p in r_all.json()["pages"]}
+        self.assertEqual(slugs_all, {"d/foo", "p/foo"})
+
     def test_deprecate_marks_status(self):
         wiki.propose_edit("x/y", "T", "b", "A")
         wiki.publish_page("x/y", "Operator")

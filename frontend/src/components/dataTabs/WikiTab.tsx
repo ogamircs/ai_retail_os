@@ -39,12 +39,10 @@ export default function WikiTab() {
   const refresh = useMemo(
     () => async () => {
       try {
+        const status = statusFilter === "all" ? null : statusFilter;
         const list = q.trim()
-          ? await searchWikiPages(q.trim(), 50)
-          : await listWikiPages({
-              status: statusFilter === "all" ? null : statusFilter,
-              limit: 50,
-            });
+          ? await searchWikiPages(q.trim(), { status, limit: 50 })
+          : await listWikiPages({ status, limit: 50 });
         setPages(list);
         // Keep current selection if still in the list, otherwise pick the first.
         setSelected((cur) =>

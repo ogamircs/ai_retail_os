@@ -201,12 +201,14 @@ def wiki_list_pages(status: str | None = "published", limit: int = 50, owner: st
     """Track 5 W5 — list wiki pages, filtered by status / owner.
 
     Default `status='published'` so the cockpit's main view shows only
-    finalised lessons. The WikiTab toggles to `status=null` (all
-    stages) when the operator wants to scrub drafts.
+    finalised lessons. Pass `status=""` (explicit empty string) to
+    bypass the filter and return drafts/deprecated alongside
+    published — the cockpit's "all stages" toggle uses this.
     """
     from app.spine import wiki as wiki_store
 
-    pages = wiki_store.list_pages(status=status, owner_agent=owner, limit=limit)
+    effective_status = status if (status not in (None, "")) else None
+    pages = wiki_store.list_pages(status=effective_status, owner_agent=owner, limit=limit)
     return {"pages": [p.to_dict() for p in pages]}
 
 
@@ -222,10 +224,17 @@ def wiki_get_page(slug: str):
 
 
 @app.get("/api/wiki/search")
-def wiki_search(q: str = "", limit: int = 20):
+def wiki_search(q: str = "", limit: int = 20, status: str | None = None):
+    """Mirror /api/wiki/pages: optional `status` filter so operators
+    can search within `draft` / `deprecated` / `published` instead of
+    seeing mixed-status results when they're triaging in-flight wiki
+    edits."""
     from app.spine import wiki as wiki_store
 
     pages = wiki_store.search_pages(q, limit=limit)
+    effective_status = status if (status not in (None, "")) else None
+    if effective_status is not None:
+        pages = [p for p in pages if p.status == effective_status]
     return {"pages": [p.to_dict() for p in pages]}
 
 

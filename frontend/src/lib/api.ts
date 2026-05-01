@@ -341,15 +341,37 @@ export type WikiPage = {
 
 export async function listWikiPages(opts: { status?: string | null; limit?: number } = {}): Promise<WikiPage[]> {
   const params = new URLSearchParams();
-  if (opts.status !== undefined && opts.status !== null) params.set("status", opts.status);
+  // null/undefined for status means "all stages" — pass an explicit
+  // empty string so the backend's default (`published`) doesn't kick
+  // in. Backend treats empty status as "no filter" (FastAPI allows
+  // the str|None query param to come through as "" and the wiki
+  // store's list_pages skips the filter when status is falsy).
+  if (opts.status === undefined || opts.status === null) {
+    params.set("status", "");
+  } else {
+    params.set("status", opts.status);
+  }
   if (opts.limit) params.set("limit", String(opts.limit));
   const r = await fetch(`/api/wiki/pages?${params}`);
   const j = await r.json();
   return j.pages ?? [];
 }
 
-export async function searchWikiPages(q: string, limit = 20): Promise<WikiPage[]> {
-  const r = await fetch(`/api/wiki/search?q=${encodeURIComponent(q)}&limit=${limit}`);
+export async function searchWikiPages(
+  q: string,
+  opts: { status?: string | null; limit?: number } = {},
+): Promise<WikiPage[]> {
+  const params = new URLSearchParams({ q });
+  if (opts.limit) params.set("limit", String(opts.limit));
+  // Mirror listWikiPages: explicit empty string for "all stages" so
+  // operator-driven status filters (draft / deprecated) aren't
+  // silently dropped during search.
+  if (opts.status === undefined || opts.status === null) {
+    params.set("status", "");
+  } else {
+    params.set("status", opts.status);
+  }
+  const r = await fetch(`/api/wiki/search?${params}`);
   const j = await r.json();
   return j.pages ?? [];
 }
