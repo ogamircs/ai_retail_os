@@ -102,7 +102,7 @@ For every system, the per-system phases are the same:
   - [x] `sync_inbound()` dispatches: configured → `_live_sync`, else → `_mock_sync` (the prior behaviour, unchanged so substrate-only demos keep working).
   - [x] `backend/tests/test_integrations_mautic_live.py` — env-gated. Three tests: live sync round-trip, seeded-alias external_ref round-trip, registry reports `mode=connected`. Skipped automatically when creds aren't set so CI stays mock-only.
 
-- [x] **P4 · Live outbound apply** _(branch: `feature/mautic-p4-apply` — open PR pending)_
+- [x] **P4 · Live outbound apply** _(merged: `feature/mautic-p4-apply` → main)_
   - [x] `MauticAdapter.LIVE_ACTION_TYPES = {"campaign_launch", "campaign_brief"}` — every other action_type falls back to the base mock-apply behaviour, same shape as ERPNext.
   - [x] `apply_outbound` dispatches: configured + supported type → `_dispatch_outbound`; else → `super().apply_outbound`. Adapter rejection lands the row in `error` instead of `draft_created` so the cockpit's red chip surfaces it; outbox `external_id` mirrors the Mautic doc id.
   - [x] `_mautic_create_campaign` (campaign_launch) → POST `/api/campaigns/new` with `name=title`, `isPublished=false`, and a description that embeds `[retail-os:<campaign_id>]` so the next sync round-trips back to the same substrate row via the existing P3 marker parser.
@@ -110,10 +110,14 @@ For every system, the per-system phases are the same:
   - [x] Helpers: `_post(endpoint, body, key)` (factored POST + Mautic-shape unwrap) and `_mautic_find_one(endpoint, key, filters)` (mirrors the seed's column-scoped `where[]` lookup).
   - [x] Four new unit tests in `tests/test_integrations.py` (stub `_client`): campaign-launch happy path, brief-segment reuse, unsupported-type fallback, missing-payload → error landing.
   - [x] Two new env-gated live tests in `tests/test_integrations_mautic_live.py` (`MauticLiveApplyTest`): real campaign_launch creates a Mautic draft; campaign_brief reuses the seeded segment instead of duplicating.
-- [ ] P5 · Agent-loop UAT
-- [ ] P4 · Live outbound apply
-- [ ] P5 · Agent-loop UAT
-- [ ] P6 · Docs + tests
+
+- [ ] **P5 · Agent-loop UAT** _(operator-driven — needs live Mautic + cockpit + screenshots)_
+  - Suggested demo: cockpit chat "draft a heatwave campaign for summer apparel" → Marketing agent proposes `campaign_brief` + `campaign_launch` → drawer apply → real Mautic Segment (already seeded as `seg_vacation`) reused + new draft Campaign with `[retail-os:<id>]` marker visible at `/s/campaigns`.
+  - Output should land alongside the ERPNext walkthrough at `docs/uat/<date>-mautic-p5-campaign-demo.md` with screenshots of: Marketing draft, drawer apply, Mautic UI showing the new Campaign + reused Segment, second cockpit sync surfacing the Mautic id back as the substrate `local_id`.
+
+- [x] **P6 · Docs + tests** _(branch: `feature/mautic-p6-docs` — open PR pending)_
+  - [x] README "Running with real Mautic" section: full quick-start (compose / bootstrap / env / seed / sanity curl), per-action-type mapping table (`campaign_launch` → draft Campaign, `campaign_brief` → idempotent Segment, `campaign_measurement` → mock-apply), troubleshooting cheat sheet (auth drift, partial-sync truncation, alias round-trip mismatch, Apple Silicon digest pin), live-test instructions, and reset path.
+  - [x] Live-path tests already env-gated (covered in P3 + P4); README now points at them so CI stays mock-only by design.
 
 ## Medusa
 - [ ] P1 · Local instance

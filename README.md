@@ -198,6 +198,83 @@ make erpnext-bootstrap
 make erpnext-seed
 ```
 
+## Running with real Mautic
+
+The `mautic` adapter has its own local-stack rollout — same shape as ERPNext. See `infra/mautic/README.md` for the full setup; quick path:
+
+```bash
+# 1. Stack: mariadb + apache + cron + worker on :8081
+make mautic-up
+
+# 2. Run mautic:install once, enable API basic-auth,
+#    print admin URL + credentials (idempotent on re-runs)
+make mautic-bootstrap
+# → prints MAUTIC_BASE_URL / MAUTIC_USERNAME / MAUTIC_PASSWORD
+
+# 3. Wire backend/.env with the printed creds:
+#    MAUTIC_BASE_URL=http://localhost:8081
+#    MAUTIC_USERNAME=admin
+#    MAUTIC_PASSWORD=retail-mautic
+
+# 4. Project the spine demo data into Mautic (idempotent):
+#    4 Segments, 20 Contacts (5 personas × 4 segments), N Campaign drafts.
+make mautic-seed
+
+# 5. (Re)start the backend so it picks up the new env:
+cd backend && uvicorn app.main:app --reload
+```
+
+Sanity-check auth:
+
+```bash
+curl -s -u "$MAUTIC_USERNAME:$MAUTIC_PASSWORD" \
+  "$MAUTIC_BASE_URL/api/contacts?limit=1" | head -c 200; echo
+# → {"total":..., "contacts":{...}}
+```
+
+In the cockpit's Integrations tab the `mautic` row will show a green `connected` chip. Click `sync` to pull live Segments / Contacts / Campaigns into `record_cache` + `external_refs`. Approve a `Marketing → campaign launch` via the drawer's `apply → external` button — the adapter creates a real draft Campaign in Mautic with the spine `[retail-os:<campaign_id>]` marker embedded so a follow-up sync round-trips it back to the same substrate row.
+
+### What lands in Mautic per action type
+
+| `action_type` | Mautic doc | Notes |
+|---|---|---|
+| `campaign_launch` | `Campaign` (draft) | `isPublished=false` — Mautic campaigns need events / triggers before publish; the operator wires those in the UI. Description embeds `[retail-os:<campaign_id>]` so re-sync recovers via the P3 marker parser. |
+| `campaign_brief` | `Segment` (list) | Idempotent — alias-eq lookup first; only POSTs if absent. Re-applying twice does not duplicate the list. Alias mirrors the seed (`segment_id` with `-` → `_`). |
+| `campaign_measurement` | n/a — falls back to base mock-apply | Measurement flows through the existing `POST /api/integrations/mautic/webhook` path; nothing to push. |
+
+Nothing auto-publishes — every Mautic doc lands as a draft so the operator can wire events / approve in the Mautic desk before the campaign goes live.
+
+### Troubleshooting
+
+| Symptom | What to check |
+|---|---|
+| Cockpit Integrations row stays `mock` | `backend/.env` not picked up by the running uvicorn — restart the backend. |
+| `/api/contacts` returns 401 from the bootstrap sanity-check | Re-run `make mautic-bootstrap`; the script always re-applies the `api_enable_basic_auth` toggle (it can drift on Mautic version upgrades). |
+| `apply → external` returns `error` chip on `campaign_launch` | Common: payload missing `campaign_id` (lands in `error`, not `draft_created`). Check `outbox_actions.result.error`. |
+| Sync returns `status="partial"` with `truncated_domains` populated | A future env knob lowered `max_rows` below the tenant size. Default `_live_sync` uses `max_rows=None` (no cap) — bump or remove the cap; the snapshot is incomplete by design until you do. |
+| `seg_loyalists` round-trip not mapping to `seg-loyalists` | Operator-renamed the Mautic alias. The P3 sync's local_id recovery is `alias.replace("_", "-")`; if the alias doesn't follow that scheme it stays unlinked and the cache row carries no spine `local_id`. |
+| Apple Silicon: image won't pull | Compose pins `mautic/mautic:5-apache` by index digest (multi-arch). Daily rolling tags occasionally drop arm64 — keep the digest pinned. |
+| Want a clean slate | `make mautic-nuke && make mautic-up && make mautic-bootstrap && make mautic-seed` |
+
+### Live-path tests
+
+`backend/tests/test_integrations_mautic_live.py` exercises sync + apply against a real Mautic. Skipped automatically when `MAUTIC_BASE_URL` / `MAUTIC_USERNAME` / `MAUTIC_PASSWORD` aren't set or the endpoint isn't reachable, so CI stays mock-only:
+
+```bash
+cd backend
+python -m unittest discover -s tests          # mock-only — live tests skipped
+python -m unittest discover -s tests          # all pass with backend/.env wired
+```
+
+To reset everything from scratch:
+
+```bash
+make mautic-nuke   # stop the stack and wipe volumes
+make mautic-up
+make mautic-bootstrap
+make mautic-seed
+```
+
 ## Provider swap
 
 In the header, change the provider dropdown (Anthropic / OpenAI / Google). Identical behavior, different model. Requires the corresponding API key in `.env`.
