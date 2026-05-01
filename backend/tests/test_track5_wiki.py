@@ -152,6 +152,20 @@ class WikiStorageTest(unittest.TestCase):
         p = wiki.get_page("x/y")
         self.assertEqual(p.status, "deprecated")
 
+    def test_deprecate_updates_latest_revision_status(self):
+        """list_revisions must report the latest revision as
+        'deprecated' after deprecate_page — otherwise audit consumers
+        walking revisions see stale 'published' / 'draft' status."""
+        wiki.propose_edit("x/y", "T", "b", "A")
+        wiki.publish_page("x/y", "Operator")
+        # Latest revision is published before deprecation.
+        revs_before = wiki.list_revisions("x/y")
+        self.assertEqual(revs_before[0]["status"], "published")
+
+        wiki.deprecate_page("x/y", "Operator")
+        revs_after = wiki.list_revisions("x/y")
+        self.assertEqual(revs_after[0]["status"], "deprecated")
+
 
 class WikiToolsTest(unittest.TestCase):
     def setUp(self):

@@ -247,6 +247,15 @@ def deprecate_page(slug: str, by_agent: str, reason: str = "") -> WikiPage | Non
             "UPDATE wiki_pages SET status = 'deprecated', updated_ts = ? WHERE slug = ?",
             (now, slug),
         )
+        # Also flip the latest revision's status so list_revisions /
+        # /api/wiki/pages/{slug} report consistent stage history.
+        # Without this the revision row would still read 'published'
+        # or 'draft' after the page is retired, misleading any audit
+        # consumer that walks revisions instead of the page row.
+        c.execute(
+            "UPDATE wiki_revisions SET status = 'deprecated' WHERE slug = ? AND version = ?",
+            (slug, page.version),
+        )
     append_event(
         agent=by_agent,
         kind="wiki_deprecate",
