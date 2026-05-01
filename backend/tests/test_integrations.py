@@ -97,6 +97,61 @@ class IntegrationLayerTest(unittest.TestCase):
         self.assertEqual(applied["status"], "applied_mock")
         self.assertIn("no external system was mutated", applied["result"]["message"])
 
+    def test_mautic_list_paginates_until_total_consumed(self):
+        """Pin the pagination guard: a single Mautic instance with more rows
+        than `limit` would otherwise be truncated to the first page.
+        Walk `start` until `total` is consumed.
+        """
+        from app.integrations.systems import MauticAdapter
+
+        adapter = MauticAdapter()
+        # Build 7 fake rows; ask for limit=3. Should fetch 3 pages: 3+3+1.
+        all_rows = [{"id": str(i)} for i in range(1, 8)]
+        calls: list[str] = []
+
+        class _StubClient:
+            def request(self, path: str):
+                calls.append(path)
+                # Parse start + limit from the querystring (cheap).
+                qs = path.split("?", 1)[1]
+                params = dict(p.split("=", 1) for p in qs.split("&"))
+                start = int(params["start"])
+                limit = int(params["limit"])
+                page = all_rows[start : start + limit]
+                rows = {row["id"]: row for row in page}
+                return {"lists": rows, "total": len(all_rows)}
+
+        adapter._client = lambda: _StubClient()  # type: ignore[method-assign]
+        out = adapter._mautic_list("segments", "lists", limit=3)
+        self.assertEqual(len(out), 7)
+        # Three pages: start=0,3,6.
+        self.assertEqual(len(calls), 3)
+        # Confirm we fetched every row, not just the first page.
+        self.assertEqual({r["id"] for r in out}, {str(i) for i in range(1, 8)})
+
+    def test_mautic_list_stops_on_short_page_when_total_missing(self):
+        """Some Mautic responses omit `total`. Fall back to the short-page
+        heuristic — a page shorter than the requested limit means we're done.
+        """
+        from app.integrations.systems import MauticAdapter
+
+        adapter = MauticAdapter()
+        all_rows = [{"id": str(i)} for i in range(1, 5)]  # 4 rows
+
+        class _NoTotalClient:
+            def request(self, path: str):
+                qs = path.split("?", 1)[1]
+                params = dict(p.split("=", 1) for p in qs.split("&"))
+                start = int(params["start"])
+                limit = int(params["limit"])
+                page = all_rows[start : start + limit]
+                return {"lists": {r["id"]: r for r in page}}  # no `total`
+
+        adapter._client = lambda: _NoTotalClient()  # type: ignore[method-assign]
+        out = adapter._mautic_list("segments", "lists", limit=3)
+        # Two pages: 3 (full) + 1 (short → stop).
+        self.assertEqual(len(out), 4)
+
     def test_coerce_id_rejects_missing_and_blank(self):
         """Pin the malformed-id guard: a missing/blank Mautic id must NOT
         cache rows under str(None) == "None" — otherwise multiple bad rows

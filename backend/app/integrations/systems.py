@@ -729,19 +729,52 @@ class MauticAdapter(IntegrationAdapter):
 
     # ----- live ------------------------------------------------------------
 
-    def _mautic_list(self, endpoint: str, key: str, limit: int = 200) -> list[dict[str, Any]]:
-        """GET /api/<endpoint>?limit=N and normalise the row shape.
+    def _mautic_list(
+        self,
+        endpoint: str,
+        key: str,
+        limit: int = 200,
+        max_rows: int = 5000,
+    ) -> list[dict[str, Any]]:
+        """GET /api/<endpoint> with pagination, normalised to a flat list.
 
-        Mautic returns rows keyed by id (`{"42": {...}}`); we flatten to a
-        list so the rest of the sync looks like ERPNext's.
+        Mautic returns rows keyed by id (`{"42": {...}}`) plus a `total`
+        field. A single request only returns one page (`limit` rows); for
+        any real instance bigger than that we'd silently truncate the sync
+        and cache only the first page, so we walk `start` until we've
+        consumed `total` (or hit `max_rows` as a safety cap against a
+        runaway pull on a huge tenant).
         """
-        data = self._client().request(f"/api/{endpoint}?limit={limit}")
-        rows = data.get(key) or {}
-        if isinstance(rows, dict):
-            return list(rows.values())
-        if isinstance(rows, list):
-            return rows
-        return []
+        out: list[dict[str, Any]] = []
+        start = 0
+        while len(out) < max_rows:
+            page_limit = min(limit, max_rows - len(out))
+            data = self._client().request(
+                f"/api/{endpoint}?limit={page_limit}&start={start}"
+            )
+            rows = data.get(key) or {}
+            if isinstance(rows, dict):
+                page = list(rows.values())
+            elif isinstance(rows, list):
+                page = rows
+            else:
+                page = []
+            if not page:
+                break
+            out.extend(page)
+            # Prefer Mautic's authoritative `total`; fall back to the
+            # short-page heuristic when total isn't returned.
+            total_raw = data.get("total")
+            try:
+                total = int(total_raw) if total_raw is not None else None
+            except (TypeError, ValueError):
+                total = None
+            if total is not None and start + len(page) >= total:
+                break
+            if len(page) < page_limit:
+                break
+            start += page_limit
+        return out
 
     def _live_sync(self) -> IntegrationResult:
         domains: dict[str, int] = {}
