@@ -612,14 +612,20 @@ def run_chief(user_input: str, llm: LLMProvider) -> Iterator[AgentEvent]:
     # MLflow nested run so token spend shows up in the same dashboard
     # as the operator-facing turn. Curator errors are caught so a bad
     # LLM response can't break the chat path.
+    #
+    # Critically, we do NOT re-run _wiki_auto_publish_clean_drafts
+    # after the Curator. Curator drafts land *after* the Critic phase
+    # has already finished — they have no critique of their own. A
+    # second post-curator publish would auto-promote curator-authored
+    # drafts whenever the earlier turn-level critiques happened to be
+    # clean, which is unsafe (the curator may have hallucinated a
+    # lesson the agent's draft never actually proved). Curator drafts
+    # therefore always wait for explicit operator approval via the
+    # WikiTab — even on a turn whose agent draft was reviewed clean.
     try:
         from app.agents import wiki_curator
 
         with mesh_tracing.delegate_run(wiki_curator.NAME, phase="curator"):
             wiki_curator.curate_turn(turn_start_iso, user_input, llm)
-        # Auto-publish a SECOND time so any clean Curator drafts that
-        # landed during the curator pass also get promoted (the first
-        # auto-publish call ran before the Curator fired).
-        _wiki_auto_publish_clean_drafts(turn_start_iso, llm)
     except Exception:
         pass

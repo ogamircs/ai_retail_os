@@ -333,6 +333,39 @@ class WikiAutoPublishTest(unittest.TestCase):
         # ALL critiques must be clean → mixed turn keeps draft.
         self.assertEqual(page.status, "draft")
 
+    def test_curator_drafts_only_auto_publish_via_first_pass(self):
+        """Auto-publish must run exactly ONCE per turn — before the
+        Curator fires. Curator drafts authored after the Critic phase
+        have no critique of their own; a second publish pass would
+        promote them on the agent draft's clean review, which is
+        unsafe. Verified by inspecting chief_of_staff.run_chief
+        source — only one _wiki_auto_publish_clean_drafts call site
+        exists (pre-curator); the post-curator pass was removed."""
+        import inspect
+        from app.agents import chief_of_staff
+
+        src = inspect.getsource(chief_of_staff.run_chief)
+        # Exactly one call to the helper inside run_chief.
+        self.assertEqual(
+            src.count("_wiki_auto_publish_clean_drafts("), 1,
+            msg="run_chief must call the wiki auto-publish helper exactly once",
+        )
+
+    def test_search_status_filter_applied_before_limit(self):
+        """A broad query whose first `limit` rows are all published
+        must still surface draft matches when status='draft'.
+        Filtering AFTER the LIMIT would silently hide them."""
+        # Seed 3 published + 1 draft, all matching the search needle.
+        for i in range(3):
+            wiki.propose_edit(f"p/foo{i}", "FOO published", "FOO body", "A")
+            wiki.publish_page(f"p/foo{i}", "Operator")
+        wiki.propose_edit("d/foo3", "FOO draft", "FOO body draft", "A")
+
+        # Limit=3 — published rows would otherwise consume all slots.
+        rs_draft = wiki.search_pages("FOO", limit=3, status="draft")
+        slugs = {p.slug for p in rs_draft}
+        self.assertEqual(slugs, {"d/foo3"})
+
     def test_no_critique_leaves_draft_untouched(self):
         """A turn without any Critic involvement (e.g. plain Analyst
         question, no review loop) must not auto-publish wiki drafts.

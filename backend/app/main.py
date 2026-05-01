@@ -228,13 +228,13 @@ def wiki_search(q: str = "", limit: int = 20, status: str | None = None):
     """Mirror /api/wiki/pages: optional `status` filter so operators
     can search within `draft` / `deprecated` / `published` instead of
     seeing mixed-status results when they're triaging in-flight wiki
-    edits."""
+    edits. Filter is applied at the SQL layer (before LIMIT) so a
+    broad query never gets its draft matches crowded out by
+    published rows."""
     from app.spine import wiki as wiki_store
 
-    pages = wiki_store.search_pages(q, limit=limit)
     effective_status = status if (status not in (None, "")) else None
-    if effective_status is not None:
-        pages = [p for p in pages if p.status == effective_status]
+    pages = wiki_store.search_pages(q, limit=limit, status=effective_status)
     return {"pages": [p.to_dict() for p in pages]}
 
 

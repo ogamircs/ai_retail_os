@@ -116,8 +116,18 @@ def list_pages(
     return [_row_to_page(r) for r in rows]
 
 
-def search_pages(query: str, limit: int = 20) -> list[WikiPage]:
+def search_pages(
+    query: str,
+    limit: int = 20,
+    status: str | None = None,
+) -> list[WikiPage]:
     """Cheap LIKE-based search over title + body.
+
+    `status` filters at the SQL layer (NOT post-fetch) so a broad
+    query like `q=foo&status=draft` doesn't get its draft rows
+    crowded out by published rows that happened to fill the first
+    `limit` slots. Applying the filter before LIMIT is the only way
+    to make draft triage reliable.
 
     SQLite FTS5 is the right answer when the wiki grows past a few
     hundred pages — but for the demo footprint, three LIKE clauses
@@ -127,15 +137,20 @@ def search_pages(query: str, limit: int = 20) -> list[WikiPage]:
     """
     q = (query or "").strip()
     if not q:
-        return list_pages(status=None, limit=limit)
+        return list_pages(status=status, limit=limit)
     needle = f"%{q}%"
+    where = "(slug LIKE ? OR title LIKE ? OR body_md LIKE ?)"
+    args: list[Any] = [needle, needle, needle]
+    if status is not None:
+        where += " AND status = ?"
+        args.append(status)
     sql = (
-        "SELECT * FROM wiki_pages "
-        "WHERE slug LIKE ? OR title LIKE ? OR body_md LIKE ? "
+        f"SELECT * FROM wiki_pages WHERE {where} "
         "ORDER BY status = 'published' DESC, updated_ts DESC LIMIT ?"
     )
+    args.append(int(limit))
     with conn() as c:
-        rows = c.execute(sql, (needle, needle, needle, int(limit))).fetchall()
+        rows = c.execute(sql, args).fetchall()
     return [_row_to_page(r) for r in rows]
 
 
