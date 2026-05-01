@@ -1,0 +1,88 @@
+# Minimal Akeneo PIM Community Edition stack for the AI Retail OS demo.
+# Single-host, dev/demo only — same shape as infra/erpnext + infra/mautic +
+# infra/medusa + infra/openboxes.
+#
+# Brought up via:
+#   make akeneo-up         # build + start the stack
+#   make akeneo-bootstrap  # waits for migrations + prints API creds
+#   make akeneo-down       # stop, keep volumes
+#   make akeneo-nuke       # stop and wipe volumes (full reset)
+#
+# Server:      http://localhost:8083
+# Admin user:  admin
+# Admin pass:  retail-akeneo  (override via AKENEO_ADMIN_PASSWORD)
+#
+# Akeneo CE 7.0+ requires MySQL 8.0 + OpenSearch 2.x. The stack files
+# here are *demo scaffolding* — Akeneo's CE Docker setup is a moving
+# target across versions and many operators run it from the upstream
+# pim-community-standard repo's own docker-compose. If your minor
+# differs, override the relevant build args + env values via .env.
+
+x-akeneo-env: &akeneo_env
+  APP_ENV: prod
+  APP_SECRET: ${AKENEO_APP_SECRET:-retail-akeneo-secret}
+  APP_DATABASE_URL: mysql://${AKENEO_DB_USER:-akeneo}:${AKENEO_DB_PASSWORD:-akeneo}@db:3306/${AKENEO_DB_NAME:-akeneo_pim}?serverVersion=8.0
+  APP_INDEX_HOSTS: opensearch:9200
+
+services:
+  db:
+    image: mysql:8.0
+    platform: linux/amd64
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u root --password=${AKENEO_DB_ROOT_PASSWORD:-root}"]
+      interval: 2s
+      retries: 30
+    environment:
+      MYSQL_ROOT_PASSWORD: ${AKENEO_DB_ROOT_PASSWORD:-root}
+      MYSQL_DATABASE: ${AKENEO_DB_NAME:-akeneo_pim}
+      MYSQL_USER: ${AKENEO_DB_USER:-akeneo}
+      MYSQL_PASSWORD: ${AKENEO_DB_PASSWORD:-akeneo}
+    command:
+      - --default-authentication-plugin=caching_sha2_password
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --explicit-defaults-for-timestamp=1
+      - --innodb-buffer-pool-size=512M
+      - --max-allowed-packet=128M
+    volumes:
+      - db-data:/var/lib/mysql
+
+  opensearch:
+    image: opensearchproject/opensearch:2.11.1
+    restart: unless-stopped
+    environment:
+      discovery.type: single-node
+      DISABLE_SECURITY_PLUGIN: "true"
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health || exit 1"]
+      interval: 5s
+      retries: 30
+
+  akeneo:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ai-retail-os/akeneo:local
+    platform: linux/amd64
+    restart: unless-stopped
+    environment:
+      <<: *akeneo_env
+    depends_on:
+      db:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+    ports:
+      - "8083:80"
+    volumes:
+      - akeneo-uploads:/srv/pim/var/file_storage
+
+volumes:
+  db-data:
+  opensearch-data:
+  akeneo-uploads:

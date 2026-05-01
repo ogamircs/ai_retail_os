@@ -194,13 +194,40 @@ For every system, the per-system phases are the same:
   - [x] README "Running with real OpenBoxes" section: full quick-start (compose / bootstrap / first-login password change / env wiring / seed / restart), per-action-type mapping table (`po_held` / `po_expedited` → Comment on matching Shipment, `store_transfer` → base mock-apply, anything else → base mock-apply), Apple Silicon emulation caveat, troubleshooting cheat sheet (slow first boot, Liquibase wait, mock-mode auth requirements, 401 mid-session re-login, no-match error, reset path).
   - [x] `backend/tests/test_integrations_openboxes_live.py` — env-gated, three live tests (live sync round-trip, seeded `[retail-os:<store_id>]` external_ref round-trip, registry reports `mode=connected`). Skipped automatically when creds aren't set so CI stays mock-only.
 
-## Akeneo
-- [ ] P1 · Local instance
-- [ ] P2 · Demo seed
-- [ ] P3 · Inbound sync
-- [ ] P4 · Live outbound apply
-- [ ] P5 · Agent-loop UAT
-- [ ] P6 · Docs + tests
+## Akeneo _(branch: `feature/akeneo-p1-p6` — open PR pending; bundles all six phases)_
+
+- [x] **P1 · Local instance**
+  - [x] `infra/akeneo/Dockerfile` — `php:8.1-apache`, clones `akeneo/pim-community-standard` v7.0 (override via `--build-arg AKENEO_REF=…`) + composer install. Akeneo doesn't ship an all-in-one Hub image; this is the upstream-recommended CE Docker pattern. Pinned `platform: linux/amd64` in compose because composer pulls a few amd64-only deps.
+  - [x] `infra/akeneo/docker-compose.yml` — `mysql:8.0` (CE 7.x targets this dialect) + `opensearchproject/opensearch:2.11.1` (drop-in for ES 7) + custom akeneo Apache+PHP container on `:8083`. Healthchecks on both backing services.
+  - [x] `infra/akeneo/bootstrap.sh` — runs `bin/console pim:installer:db` (idempotent), `pim:user:create` (tolerates "already exists" exit cleanly; non-OK errors abort), `pim:oauth-server:create-client retail-os --grant_type=password --grant_type=refresh_token`. Prints admin URL + creds + the `AKENEO_BASE_URL` / `AKENEO_CLIENT_ID` / `AKENEO_SECRET` / `AKENEO_USERNAME` / `AKENEO_PASSWORD` env block.
+  - [x] `infra/akeneo/README.md` — quick-start, why custom image, lifecycle, REST surface (`/api/oauth/v1/token` + `/api/rest/v1/categories|products`), Apple Silicon caveats, troubleshooting, reset path.
+  - [x] Root `Makefile` targets: `akeneo-up`, `akeneo-down`, `akeneo-bootstrap`, `akeneo-seed`, `akeneo-logs`, `akeneo-status`, `akeneo-nuke`. `akeneo-up` does `up -d --build`.
+
+- [x] **P2 · Demo seed**
+  - [x] `infra/akeneo/seed.py` — REST-based, idempotent, stdlib-only. Auth via `POST /api/oauth/v1/token` (Basic-auth client_id:secret + form-encoded `grant_type=password&username=&password=`). Creates 3 Categories (one per `substrate_categories`, parent=master) + 30 Products (one per substrate SKU, family=`default`, `[retail-os:<sku>]` marker embedded in `description` for round-trip). Idempotent via per-resource GET-by-code.
+  - [x] Out of scope (deferred): Families / Attributes / AttributeOptions (Akeneo CE's bundled `default` family covers the demo); asset / media; multi-locale enrichment.
+
+- [x] **P3 · Inbound sync**
+  - [x] `AkeneoAdapter.configured()` overridden to require `AKENEO_BASE_URL` + `AKENEO_CLIENT_ID` + `AKENEO_SECRET` + `AKENEO_USERNAME` + `AKENEO_PASSWORD`.
+  - [x] `AkeneoAdapter._login()` — OAuth2 password-grant via `/api/oauth/v1/token`. Two-layer auth: Basic (client) + body (user). Cached on instance; `_admin_request` 401 → drop + re-login + retry once (mirror of Mautic / Medusa / OpenBoxes).
+  - [x] `AkeneoAdapter._api_list(endpoint)` — walks Akeneo's `_links.next` HATEOAS pagination until exhausted. Strips the host so the JsonHttpClient (already configured with the base URL) can request just the path.
+  - [x] `AkeneoAdapter._live_sync()` pulls Categories + Products. Categories cache with `code` as both external_id and local_id. Products cache with `identifier` as external_id; local_id recovered from `identifier` (preferred) or the `[retail-os:<sku>]` marker in `values.description.en_US.data` (mirror of OpenBoxes).
+  - [x] `external_url` deep-links: `#/configuration/category/tree/<code>`, `#/enrich/product/<sku>`.
+  - [x] `sync_inbound()` dispatches: configured → `_live_sync`, else → `_mock_sync` (the prior substrate-only path, unchanged).
+
+- [x] **P4 · Live outbound apply**
+  - [x] `AkeneoAdapter.LIVE_ACTION_TYPES = {"pim_enrich"}` — extension point. No agent currently emits this type; the dispatcher is wired so a future Merchandiser-driven copy edit can apply without further adapter work.
+  - [x] `apply_outbound` mirrors the established Medusa / Mautic / OpenBoxes shape: configured + supported → `_dispatch_outbound`; rejection → `error`; outbox `external_id` = product SKU.
+  - [x] `_akeneo_enrich_product` (pim_enrich) → PATCH `/api/rest/v1/products/{sku}` with `values` / `categories` / `enabled` from the payload. Akeneo's PATCH semantics merge — fields not in the body stay untouched, so the same payload re-runs cleanly.
+  - [x] No-sku → row lands in `error` with a clear remediation hint.
+  - [x] Four new unit tests in `tests/test_integrations.py`: `configured()` requires OAuth credentials; `_api_list` walks `_links.next` paginated responses; `pim_enrich` PATCHes the product correctly; missing-sku → `error`.
+
+- [x] **P5 · Agent-loop UAT**
+  - [x] `docs/uat/2026-04-30-akeneo-p5-pim-enrich-demo.md` — full walkthrough using the substrate stand-in (the future Merchandiser agent isn't built yet). PATCH idempotency note + acceptance checklist + screenshot placeholders for operator follow-up.
+
+- [x] **P6 · Docs + tests**
+  - [x] README "Running with real Akeneo PIM" section: full quick-start (compose / bootstrap / OAuth client mint / env wiring / seed / restart), per-action-type table (`pim_enrich` → PATCH product, anything else → base mock-apply), troubleshooting cheat sheet (slow first build, OpenSearch wait, OAuth2 400, 401 mid-session re-login, Apple Silicon caveats, reset path).
+  - [x] `backend/tests/test_integrations_akeneo_live.py` — env-gated, three live tests (live sync round-trip with `mode=connected`, seeded category code round-trip, registry reports `mode=connected`). Skipped automatically when `AKENEO_*` creds aren't set or the OAuth2 token round-trip fails so CI stays mock-only by design.
 
 ## Superset
 - [ ] P1 · Local instance

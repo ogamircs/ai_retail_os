@@ -725,6 +725,315 @@ class IntegrationLayerTest(unittest.TestCase):
         self.assertIn("direction=INBOUND", get_paths[0])
         self.assertFalse(any(m == "POST" for m, _ in calls))
 
+    def test_akeneo_configured_requires_oauth_credentials(self):
+        from app.integrations.systems import AkeneoAdapter
+
+        os.environ["AKENEO_BASE_URL"] = "http://stub"
+        for k in ("AKENEO_CLIENT_ID", "AKENEO_SECRET", "AKENEO_USERNAME", "AKENEO_PASSWORD"):
+            os.environ.pop(k, None)
+        self.assertFalse(AkeneoAdapter().configured())
+
+        os.environ["AKENEO_CLIENT_ID"] = "cid"
+        os.environ["AKENEO_SECRET"] = "sec"
+        self.assertFalse(AkeneoAdapter().configured())  # missing user/pw
+
+        os.environ["AKENEO_USERNAME"] = "admin"
+        os.environ["AKENEO_PASSWORD"] = "pw"
+        self.assertTrue(AkeneoAdapter().configured())
+
+    def test_akeneo_api_list_walks_paginated_links(self):
+        """Akeneo paginates via _links.next; helper must follow until exhausted."""
+        from app.integrations.systems import AkeneoAdapter
+
+        os.environ["AKENEO_BASE_URL"] = "http://stub"
+        os.environ["AKENEO_CLIENT_ID"] = "cid"
+        os.environ["AKENEO_SECRET"] = "sec"
+        os.environ["AKENEO_USERNAME"] = "admin"
+        os.environ["AKENEO_PASSWORD"] = "pw"
+
+        adapter = AkeneoAdapter()
+        adapter._admin_token = "tok"
+        adapter._login = lambda: "tok"  # type: ignore[method-assign]
+
+        pages = {
+            "/api/rest/v1/products?limit=100": {
+                "_embedded": {"items": [{"identifier": "A"}, {"identifier": "B"}]},
+                "_links": {"next": {"href": "http://stub/api/rest/v1/products?page=2"}},
+            },
+            "/api/rest/v1/products?page=2": {
+                "_embedded": {"items": [{"identifier": "C"}]},
+                # no _links.next → stop
+            },
+        }
+
+        class _Stub:
+            def request(self, path, method="GET", payload=None):
+                return pages.get(path, {})
+
+        adapter._client = lambda: _Stub()  # type: ignore[method-assign]
+        out = adapter._api_list("products")
+        self.assertEqual([r["identifier"] for r in out], ["A", "B", "C"])
+
+    def test_akeneo_api_list_handles_proxy_rewritten_next_links(self):
+        """Akeneo's _links.next.href can carry a different scheme/host
+        than AKENEO_BASE_URL (proxy / canonical rewrite). Pagination
+        must still work — strip to path+query rather than relying on
+        startswith(base_url).
+        """
+        from app.integrations.systems import AkeneoAdapter
+
+        os.environ["AKENEO_BASE_URL"] = "http://stub"
+        os.environ["AKENEO_CLIENT_ID"] = "cid"
+        os.environ["AKENEO_SECRET"] = "sec"
+        os.environ["AKENEO_USERNAME"] = "admin"
+        os.environ["AKENEO_PASSWORD"] = "pw"
+
+        adapter = AkeneoAdapter()
+        adapter._admin_token = "tok"
+        adapter._login = lambda: "tok"  # type: ignore[method-assign]
+
+        seen: list[str] = []
+        pages = {
+            "/api/rest/v1/products?limit=100": {
+                "_embedded": {"items": [{"identifier": "A"}]},
+                # Different host (proxy rewrite). Old code would forward
+                # this absolute URL and JsonHttpClient would prepend
+                # AKENEO_BASE_URL, producing junk.
+                "_links": {"next": {"href": "https://akeneo.internal.example/api/rest/v1/products?page=2"}},
+            },
+            "/api/rest/v1/products?page=2": {
+                "_embedded": {"items": [{"identifier": "B"}]},
+            },
+        }
+
+        class _Stub:
+            def request(self, path, method="GET", payload=None):
+                seen.append(path)
+                return pages.get(path, {})
+
+        adapter._client = lambda: _Stub()  # type: ignore[method-assign]
+        out = adapter._api_list("products")
+        self.assertEqual([r["identifier"] for r in out], ["A", "B"])
+        # Both calls must have hit relative paths the JsonHttpClient
+        # can prepend its base to.
+        self.assertEqual(
+            seen,
+            ["/api/rest/v1/products?limit=100", "/api/rest/v1/products?page=2"],
+        )
+
+    def test_akeneo_live_sync_pulls_uuid_endpoint_for_identifier_less_products(self):
+        """Akeneo CE 7+ identifier-based /api/rest/v1/products doesn't
+        return products without an identifier — those only show up under
+        /api/rest/v1/products-uuid. Sync must query both and dedupe so
+        UUID-only products land in record_cache.
+        """
+        from app.integrations.systems import AkeneoAdapter
+        from app.integrations import store
+
+        os.environ["AKENEO_BASE_URL"] = "http://stub"
+        os.environ["AKENEO_CLIENT_ID"] = "cid"
+        os.environ["AKENEO_SECRET"] = "sec"
+        os.environ["AKENEO_USERNAME"] = "admin"
+        os.environ["AKENEO_PASSWORD"] = "pw"
+
+        adapter = AkeneoAdapter()
+        adapter._admin_token = "tok"
+        adapter._login = lambda: "tok"  # type: ignore[method-assign]
+
+        # uuid endpoint returns ALL products (with + without identifier)
+        # legacy /products endpoint returns only ones with identifiers.
+        # Dedup must collapse the overlap.
+        uuid_endpoint = [
+            {"identifier": "SKU-A", "uuid": "uuid-a"},
+            {"identifier": None, "uuid": "uuid-b"},
+        ]
+        legacy_endpoint = [
+            {"identifier": "SKU-A", "uuid": "uuid-a"},  # duplicate of uuid endpoint
+        ]
+
+        class _Stub:
+            def request(self, path, method="GET", payload=None):
+                if path.startswith("/api/rest/v1/categories"):
+                    return {"_embedded": {"items": []}}
+                if path.startswith("/api/rest/v1/products-uuid"):
+                    return {"_embedded": {"items": uuid_endpoint}}
+                if path.startswith("/api/rest/v1/products"):
+                    return {"_embedded": {"items": legacy_endpoint}}
+                return {}
+
+        adapter._client = lambda: _Stub()  # type: ignore[method-assign]
+        result = adapter.sync_inbound()
+        self.assertEqual(result.status, "success")
+        # Two unique products (SKU-A from either endpoint, uuid-b from
+        # uuid endpoint only). The duplicate must NOT inflate the count.
+        self.assertEqual(result.summary["domains"].get("Product"), 2)
+        bundle = store.list_records(system_id="akeneo", domain="Product", limit=10)
+        self.assertEqual(
+            {r.get("external_id") for r in bundle["records"]},
+            {"SKU-A", "uuid-b"},
+        )
+
+    def test_akeneo_live_sync_tolerates_missing_uuid_endpoint(self):
+        """Older Akeneo minors don't expose /products-uuid (404). The
+        sync must keep going against /products instead of failing the
+        whole run.
+        """
+        from urllib.error import HTTPError
+        from app.integrations.systems import AkeneoAdapter
+
+        os.environ["AKENEO_BASE_URL"] = "http://stub"
+        os.environ["AKENEO_CLIENT_ID"] = "cid"
+        os.environ["AKENEO_SECRET"] = "sec"
+        os.environ["AKENEO_USERNAME"] = "admin"
+        os.environ["AKENEO_PASSWORD"] = "pw"
+
+        adapter = AkeneoAdapter()
+        adapter._admin_token = "tok"
+        adapter._login = lambda: "tok"  # type: ignore[method-assign]
+
+        class _Stub:
+            def request(self, path, method="GET", payload=None):
+                if path.startswith("/api/rest/v1/categories"):
+                    return {"_embedded": {"items": []}}
+                if path.startswith("/api/rest/v1/products-uuid"):
+                    raise HTTPError(url=path, code=404, msg="Not Found", hdrs=None, fp=None)
+                if path.startswith("/api/rest/v1/products"):
+                    return {"_embedded": {"items": [{"identifier": "SKU-X"}]}}
+                return {}
+
+        adapter._client = lambda: _Stub()  # type: ignore[method-assign]
+        result = adapter.sync_inbound()
+        self.assertEqual(result.status, "success")
+        self.assertEqual(result.summary["domains"].get("Product"), 1)
+
+    def test_akeneo_live_sync_falls_back_to_uuid_then_marker(self):
+        """Akeneo CE 7+ allows products without `identifier` (UUID-only).
+        The sync must keep them — fall back to `uuid`, then to the
+        [retail-os:<sku>] description marker. Dropping such rows would
+        silently truncate the cache.
+        """
+        from app.integrations.systems import AkeneoAdapter
+        from app.integrations import store
+
+        os.environ["AKENEO_BASE_URL"] = "http://stub"
+        os.environ["AKENEO_CLIENT_ID"] = "cid"
+        os.environ["AKENEO_SECRET"] = "sec"
+        os.environ["AKENEO_USERNAME"] = "admin"
+        os.environ["AKENEO_PASSWORD"] = "pw"
+
+        adapter = AkeneoAdapter()
+        adapter._admin_token = "tok"
+        adapter._login = lambda: "tok"  # type: ignore[method-assign]
+
+        # Three products: classic identifier, UUID-only, marker-only.
+        products = [
+            {"identifier": "SKU-A"},
+            {"identifier": None, "uuid": "uuid-b-1234"},
+            {
+                "identifier": None,
+                "uuid": None,
+                "values": {
+                    "description": [
+                        {"locale": "en_US", "data": "[retail-os:SKU-C] fallback path"}
+                    ]
+                },
+            },
+        ]
+
+        class _Stub:
+            def request(self, path, method="GET", payload=None):
+                if path.startswith("/api/rest/v1/categories"):
+                    return {"_embedded": {"items": []}}
+                if path.startswith("/api/rest/v1/products"):
+                    return {"_embedded": {"items": products}}
+                return {}
+
+        adapter._client = lambda: _Stub()  # type: ignore[method-assign]
+        result = adapter.sync_inbound()
+        self.assertEqual(result.status, "success")
+        # All three products must have landed.
+        self.assertEqual(result.summary["domains"].get("Product"), 3)
+
+        # Cache rows: external_id should be SKU-A, uuid-b-1234, SKU-C.
+        bundle = store.list_records(system_id="akeneo", domain="Product", limit=10)
+        ext_ids = {r.get("external_id") for r in bundle["records"]}
+        self.assertEqual(ext_ids, {"SKU-A", "uuid-b-1234", "SKU-C"})
+
+    def test_akeneo_apply_pim_enrich_patches_product(self):
+        from app.integrations.systems import AkeneoAdapter
+        from app.integrations import store
+
+        os.environ["AKENEO_BASE_URL"] = "http://stub"
+        os.environ["AKENEO_CLIENT_ID"] = "cid"
+        os.environ["AKENEO_SECRET"] = "sec"
+        os.environ["AKENEO_USERNAME"] = "admin"
+        os.environ["AKENEO_PASSWORD"] = "pw"
+
+        adapter = AkeneoAdapter()
+        adapter._admin_token = "tok"
+        adapter._login = lambda: "tok"  # type: ignore[method-assign]
+
+        row = store.create_outbox_action(
+            system_id="akeneo",
+            action_queue_id=None,
+            agent="Merchandiser",
+            action_type="pim_enrich",
+            title="Enrich SKU-001",
+            external_domain="Product",
+            payload={
+                "sku": "SKU-001",
+                "values": {
+                    "name": [{"locale": "en_US", "scope": None, "data": "Updated name"}],
+                },
+            },
+            configured=True,
+        )
+
+        captured: dict = {}
+
+        class _Stub:
+            def request(self, path, method="GET", payload=None):
+                captured["path"] = path
+                captured["method"] = method
+                captured["payload"] = payload
+                return {}
+
+        adapter._client = lambda: _Stub()  # type: ignore[method-assign]
+        result = adapter.apply_outbound(row["id"])
+        self.assertEqual(result["status"], "draft_created", msg=result)
+        self.assertEqual(result["external_id"], "SKU-001")
+        self.assertEqual(captured["method"], "PATCH")
+        self.assertIn("/api/rest/v1/products/SKU-001", captured["path"])
+        self.assertEqual(captured["payload"]["identifier"], "SKU-001")
+
+    def test_akeneo_apply_missing_sku_lands_in_error(self):
+        from app.integrations.systems import AkeneoAdapter
+        from app.integrations import store
+
+        os.environ["AKENEO_BASE_URL"] = "http://stub"
+        os.environ["AKENEO_CLIENT_ID"] = "cid"
+        os.environ["AKENEO_SECRET"] = "sec"
+        os.environ["AKENEO_USERNAME"] = "admin"
+        os.environ["AKENEO_PASSWORD"] = "pw"
+
+        adapter = AkeneoAdapter()
+        adapter._admin_token = "tok"
+        adapter._login = lambda: "tok"  # type: ignore[method-assign]
+
+        row = store.create_outbox_action(
+            system_id="akeneo",
+            action_queue_id=None,
+            agent="Merchandiser",
+            action_type="pim_enrich",
+            title="Bad payload",
+            external_domain="Product",
+            payload={"values": {"name": []}},  # no sku
+            configured=True,
+        )
+        result = adapter.apply_outbound(row["id"])
+        self.assertEqual(result["status"], "error")
+        self.assertIn("sku", result["result"]["error"].lower())
+
     def test_openboxes_apply_unsupported_falls_back(self):
         """`store_transfer` (declared in outbound_domain but NOT in
         LIVE_ACTION_TYPES for OpenBoxes) falls back to base mock-apply.

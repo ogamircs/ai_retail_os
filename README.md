@@ -444,6 +444,65 @@ To reset everything from scratch:
 make openboxes-nuke && make openboxes-up && make openboxes-bootstrap && make openboxes-seed
 ```
 
+## Running with real Akeneo PIM
+
+The `akeneo` adapter has its own local-stack rollout. See `infra/akeneo/README.md` for the full setup; quick path:
+
+```bash
+# 1. Stack: mysql 8 + opensearch 2 + custom akeneo image (first run
+#    composer-installs ~3000 deps, ~5-10 min)
+make akeneo-up
+
+# 2. pim:installer:db + admin user + OAuth2 client (all idempotent)
+make akeneo-bootstrap
+# → prints AKENEO_BASE_URL / AKENEO_CLIENT_ID / AKENEO_SECRET /
+#   AKENEO_USERNAME / AKENEO_PASSWORD
+
+# 3. Wire backend/.env with the printed creds.
+
+# 4. Project the spine demo data (3 Categories + 30 Products):
+make akeneo-seed
+
+# 5. (Re)start the backend so it picks up the new env:
+cd backend && uvicorn app.main:app --reload
+```
+
+Sanity-check auth (OAuth2 password grant):
+
+```bash
+curl -s -u "$AKENEO_CLIENT_ID:$AKENEO_SECRET" \
+  -X POST "$AKENEO_BASE_URL/api/oauth/v1/token" \
+  -d "grant_type=password&username=$AKENEO_USERNAME&password=$AKENEO_PASSWORD" \
+  | head -c 200; echo
+# → {"access_token":"...","expires_in":3600,...}
+```
+
+In the cockpit's Integrations tab the `akeneo` row will show a green `connected` chip. Click `sync` to pull live Categories / Products into `record_cache` + `external_refs`. Categories round-trip via their `code`; Products via their `identifier` (== substrate SKU when seeded). Outbound enrichment is wired through `pim_enrich` (PATCH `/api/rest/v1/products/{code}` with merge semantics) — currently no agent emits this type, but the dispatcher is in place for a future Merchandiser-driven copy edit.
+
+A walkthrough lives in [`docs/uat/2026-04-30-akeneo-p5-pim-enrich-demo.md`](docs/uat/2026-04-30-akeneo-p5-pim-enrich-demo.md).
+
+### What lands in Akeneo per action type
+
+| `action_type` | Akeneo target | What gets written |
+|---|---|---|
+| `pim_enrich` | `Product` | PATCH `/api/rest/v1/products/{sku}` with `values` / `categories` / `enabled` from the payload. Merge semantics — fields not in the body stay untouched. |
+| anything else | base mock-apply | configured → `draft_created`, unconfigured → `applied_mock`. No external write. Akeneo's role in the demo is mostly read-only enrichment surfacing. |
+
+### Troubleshooting
+
+| Symptom | What to check |
+|---|---|
+| First `make akeneo-up` takes a long time | Composer install runs against ~3000 packages. Watch with `make akeneo-logs`. |
+| `pim:installer:db` errors | OpenSearch isn't healthy yet — re-run `make akeneo-bootstrap`. The installer is idempotent. |
+| OAuth2 token endpoint returns 400 | Akeneo needs Basic auth (client_id:secret) AND `grant_type=password` body. Missing either fails. |
+| `/api/rest/v1/*` returns 401 mid-session | The cockpit caches the bearer. On 401 the adapter re-logins and retries once. |
+| Apple Silicon: slow boot | Akeneo's stack pins `platform: linux/amd64` and runs under qemu. Expected. |
+| Want a clean slate | `make akeneo-nuke && make akeneo-up && make akeneo-bootstrap && make akeneo-seed` |
+
+### Live-path tests
+
+`backend/tests/test_integrations_akeneo_live.py` exercises sync + apply against a real Akeneo. Skipped automatically when `AKENEO_*` creds aren't set or the OAuth2 round-trip fails, so CI stays mock-only.
+
 ## Provider swap
 
 In the header, change the provider dropdown (Anthropic / OpenAI / Google). Identical behavior, different model. Requires the corresponding API key in `.env`.

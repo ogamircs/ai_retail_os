@@ -12,11 +12,15 @@ MEDUSA_COMPOSE := docker compose -p ai-retail-medusa -f $(MEDUSA_DIR)/docker-com
 OPENBOXES_DIR := infra/openboxes
 OPENBOXES_COMPOSE := docker compose -p ai-retail-openboxes -f $(OPENBOXES_DIR)/docker-compose.yml
 
+AKENEO_DIR := infra/akeneo
+AKENEO_COMPOSE := docker compose -p ai-retail-akeneo -f $(AKENEO_DIR)/docker-compose.yml
+
 .PHONY: help \
         erpnext-up erpnext-down erpnext-bootstrap erpnext-seed erpnext-logs erpnext-status erpnext-nuke \
         mautic-up mautic-down mautic-bootstrap mautic-seed mautic-logs mautic-status mautic-nuke \
         medusa-up medusa-down medusa-bootstrap medusa-seed medusa-logs medusa-status medusa-nuke \
-        openboxes-up openboxes-down openboxes-bootstrap openboxes-seed openboxes-logs openboxes-status openboxes-nuke openboxes-config
+        openboxes-up openboxes-down openboxes-bootstrap openboxes-seed openboxes-logs openboxes-status openboxes-nuke openboxes-config \
+        akeneo-up akeneo-down akeneo-bootstrap akeneo-seed akeneo-logs akeneo-status akeneo-nuke
 
 help:
 	@echo "ERPNext:"
@@ -54,6 +58,15 @@ help:
 	@echo "  openboxes-logs        tail logs from the stack"
 	@echo "  openboxes-down        stop the stack (volumes preserved)"
 	@echo "  openboxes-nuke        stop and wipe volumes (full reset)"
+	@echo ""
+	@echo "Akeneo PIM:"
+	@echo "  akeneo-up             build + start Akeneo stack (mysql + opensearch + akeneo on :8083)"
+	@echo "  akeneo-bootstrap      pim:installer:db + admin user + OAuth client (idempotent)"
+	@echo "  akeneo-seed           project the spine demo data into Akeneo (idempotent)"
+	@echo "  akeneo-status         show running containers"
+	@echo "  akeneo-logs           tail logs from the stack"
+	@echo "  akeneo-down           stop the stack (volumes preserved)"
+	@echo "  akeneo-nuke           stop and wipe volumes (full reset)"
 
 erpnext-up:
 	$(ERPNEXT_COMPOSE) up -d
@@ -141,3 +154,24 @@ openboxes-bootstrap:
 
 openboxes-seed:
 	python3 $(OPENBOXES_DIR)/seed.py
+
+akeneo-up:
+	$(AKENEO_COMPOSE) up -d --build
+
+akeneo-down:
+	$(AKENEO_COMPOSE) down
+
+akeneo-nuke:
+	$(AKENEO_COMPOSE) down -v
+
+akeneo-status:
+	$(AKENEO_COMPOSE) ps
+
+akeneo-logs:
+	$(AKENEO_COMPOSE) logs -f --tail=50
+
+akeneo-bootstrap:
+	bash $(AKENEO_DIR)/bootstrap.sh
+
+akeneo-seed:
+	python3 $(AKENEO_DIR)/seed.py
