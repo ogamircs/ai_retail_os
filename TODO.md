@@ -415,39 +415,34 @@ Pairs with Track 2 (mesh) and Track 4 (MLflow) — critique loops surface lesson
 
 ## Phases
 
-- [ ] **W1 · Storage + spine wiring**
-  - [ ] New `wiki_pages` table in `spine.db`: `slug PRIMARY KEY, title, body_md, owner_agent, status (draft/published/deprecated), version, updated_ts, refs_json`.
-  - [ ] New `wiki_revisions` table: full history per slug.
-  - [ ] Spine event kinds added: `wiki_edit`, `wiki_publish`, `wiki_deprecate`.
-  - **Done when:** programmatic create/edit round-trips through the spine.
+- [x] **W1 · Storage + spine wiring** _(branch: `feature/track5-wiki`)_
+  - [x] `wiki_pages` table — slug PK, title, body_md, owner_agent, status (draft/published/deprecated), version, updated_ts, refs_json, pinned. `wiki_revisions` carries full history per slug; UNIQUE(slug, version) so re-applying a write doesn't break.
+  - [x] Spine event kinds: `wiki_edit` (every propose), `wiki_publish` (status flip → published), `wiki_deprecate`.
+  - [x] `app/spine/wiki.py` exposes the read/write surface — `propose_edit` (drops back to draft when re-edited on a published page so W4 fires), `publish_page` (idempotent), `deprecate_page`, `search_pages` (LIKE-based; FTS5 deferred until catalog grows), `set_pinned` / `list_pinned`.
 
-- [ ] **W2 · Read tools across specialists**
-  - [ ] `wiki_search(query, limit)` — keyword + tag search; reuses the existing artifact body search pattern.
-  - [ ] `wiki_read(slug)` — returns body + citations + last-updated.
-  - [ ] All specialists get both tools by default (read-only). System prompts updated to encourage citing the wiki.
-  - **Done when:** Analyst answers a familiar question by quoting a wiki page with the slug surfaced in the trace.
+- [x] **W2 · Read tools across specialists** _(branch: `feature/track5-wiki`)_
+  - [x] `wiki_search(query, limit)` returns slug + title + 240-char excerpt; full body fetched via `wiki_read(slug)`.
+  - [x] All 8 agents (Analyst, Pricing, Marketing, Replenishment, Merchandiser, Fulfillment, Store Manager, Critic) carry both. Critic is read-only — does NOT get `wiki_propose_edit` (it audits, doesn't author).
 
-- [ ] **W3 · Write tools (propose-edit)**
-  - [ ] `wiki_propose_edit(slug, body_md, refs)` writes a `draft` revision and emits `wiki_edit`.
-  - [ ] Drafts surface in the cockpit's approval rail beside outbox actions; operator approves → `published`.
-  - **Done when:** an Analyst running a fresh investigation can leave a published learning behind that the next turn reads.
+- [x] **W3 · Write tools (propose-edit)** _(branch: `feature/track5-wiki`)_
+  - [x] `wiki_propose_edit(slug, title, body_md, refs)` lands the page as `draft` + emits `wiki_edit`. Refs are required but not strictly validated against the spine (operators can cite external systems too).
+  - [x] Drafts surface in the cockpit's `[WIKI]` tab with the `draft` stage chip; operator promotes to published from the drawer (or it auto-promotes via W4).
 
-- [ ] **W4 · Critic-gated auto-publish**
-  - [ ] When Track 2 A1 Critic is online, drafts that survive critique with no Risks/Gaps auto-publish.
-  - [ ] Operator override always wins.
-  - **Done when:** a clean draft promotes itself within one turn without operator action; a flagged draft sits in approvals.
+- [x] **W4 · Critic-gated auto-publish** _(branch: `feature/track5-wiki`)_
+  - [x] `chief_of_staff._wiki_auto_publish_clean_drafts` runs after every operator turn. Walks turn events for `wiki_edit` rows; checks the turn's Critic critiques via `_critique_is_clean` (regex over `## Gaps` + `## Risks` headings). If at least one critique returned `*No material findings.*` for both, the turn's wiki drafts auto-publish. Otherwise drafts wait for operator approval.
+  - [x] Two passes — first runs after the chat stream finishes (catches agent-authored drafts), second runs after the Curator (W6) has proposed its own drafts.
+  - [x] Operator override always wins — the WikiTab's `publish` / `deprecate` buttons hit the same backend route.
 
-- [ ] **W5 · UI surface**
-  - [ ] New `[WIKI]` tab in the cockpit's data rail (search + recent edits).
-  - [ ] Drawer renders pages with citations as inline links to the source events / artifacts.
-  - [ ] Stage chip (`draft` / `published` / `deprecated`) reused from the chip-token system.
-  - **Done when:** operator can pin a wiki page from the drawer; pinned slugs surface in the status strip as a chip.
+- [x] **W5 · UI surface — `[WIKI]` tab** _(branch: `feature/track5-wiki`)_
+  - [x] New 7th tab in DataRail (`[WIKI]`, hotkey `7`). Two-pane layout: search + status filter (published default; draft / deprecated / all toggle) + page list on the left; markdown body + actions (publish / deprecate / pin) on the right.
+  - [x] Stage chips reused from Track 2 A4 (`stage-draft`, `stage-final` for published, `stage-revision` for deprecated).
+  - [x] StatusStrip pinned-page chip (`★ wiki N`) surfaces operator-pinned slugs across all tabs.
+  - [x] Backend routes: `GET /api/wiki/pages`, `GET /api/wiki/pages/{slug}`, `GET /api/wiki/search`, `POST /api/wiki/pages/{slug}/publish`, `POST /api/wiki/pages/{slug}/deprecate`, `POST /api/wiki/pages/{slug}/pin`, `GET /api/wiki/pinned`.
 
-- [ ] **W6 · Cross-agent learning loop**
-  - [ ] After every chat turn, a background `Wiki Curator` agent (read-only over the turn's events + new artifacts) decides whether anything is wiki-worthy and proposes drafts.
-  - [ ] Rate-limited: max 3 proposals per turn; max 1 proposal per slug per day.
-  - [ ] Curator runs use the same MLflow tracing path (Track 4 M2) so we can score whether wiki growth is helping.
-  - **Done when:** a week of operator turns produces a non-trivial wiki, and an A/B comparison (Track 4 M3) shows scenarios where the wiki is read score higher.
+- [x] **W6 · Cross-agent learning loop** _(branch: `feature/track5-wiki`)_
+  - [x] `app/agents/wiki_curator.py` — read-only post-turn agent. Tools: `read_artifact`, `wiki_search`, `wiki_read`, `wiki_propose_edit` (capped). Wired into `run_chief` post-turn under its own MLflow nested run (`phase="curator"`) so token spend rolls up alongside the operator turn.
+  - [x] Rate limits enforced in code regardless of LLM behaviour: max 3 proposals per turn (counted via spine events); max 1 proposal per slug per 24h (also via spine events). Caps return structured errors the LLM sees as tool failures.
+  - [x] Operator can disable entirely with `WIKI_CURATOR_ENABLED=0`. Curator errors are caught — chat path never breaks because of a bad Curator response.
 
 ## Open design questions (decide during W1 brainstorming)
 

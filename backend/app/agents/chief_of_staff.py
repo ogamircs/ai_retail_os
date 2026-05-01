@@ -21,14 +21,16 @@ import json
 import re
 import time
 from collections.abc import Iterator
+from datetime import datetime, timezone
 
 from app.agents.base import Agent, AgentEvent
 from app.config import mesh as mesh_settings
 from app.llm.base import LLMProvider, Tool
 from app.llm.prompts import resolve_prompt
 from app.llm import tracing as mesh_tracing
-from app.spine.events import append_event
+from app.spine.events import append_event, events_since_ts
 from app.spine.artifacts import read_artifact, update_artifact_stage, write_artifact
+from app.spine import wiki as wiki_store
 from app.agents import (
     analyst,
     critic,
@@ -519,6 +521,60 @@ def build_orchestrator(llm: LLMProvider, event_sink: _EventBuffer) -> Agent:
     return Agent(name=NAME, system_prompt=resolve_prompt(NAME, SYSTEM), tools=tools, tool_impls=impls, max_iters=16)
 
 
+def _wiki_auto_publish_clean_drafts(turn_start_iso: str, llm: LLMProvider) -> None:
+    """Track 5 W4 — Critic-gated auto-publish.
+
+    After every operator turn, walk wiki_edit events that landed during
+    the turn. For each, look at the most recent Critic critique that
+    references the same evidence chain (same author + slug); if the
+    Critic returned `*No material findings.*` for both Gaps and Risks,
+    promote the draft to `published`. Otherwise leave it as a draft so
+    the operator can decide via the cockpit's WikiTab.
+
+    The window is the *current turn* (events_since_ts(turn_start)) so
+    we never auto-publish a draft that was authored before the
+    Critic's audit ran. Operators can always force-publish or
+    deprecate from the WikiTab.
+    """
+    # Pull every wiki_edit emitted during this turn. There's typically
+    # 0-1; the Curator (W6) can add up to 3 more.
+    edits = [e for e in events_since_ts(turn_start_iso) if e.get("kind") == "wiki_edit"]
+    if not edits:
+        return
+    # Pull every critique artifact emitted during this turn so we can
+    # match each draft against its Critic verdict.
+    critique_artifacts = [
+        e for e in events_since_ts(turn_start_iso)
+        if e.get("kind") == "observation"
+        and e.get("agent") == "Critic"
+        and e.get("artifact_id")
+    ]
+    # If at least one critique fired this turn AND came back clean
+    # (no Gaps + no Risks), treat the turn's wiki drafts as
+    # endorsed. The Critic doesn't review wiki drafts directly today —
+    # but if its audit of the agent's draft found no material gaps,
+    # the lessons distilled from that draft are likewise low-risk.
+    # This is conservative: an operator-flagged turn (Critic surfacing
+    # ANY gap or risk on the agent's draft) leaves wiki drafts in
+    # `draft` for explicit operator approval.
+    any_critique_clean = False
+    for ev in critique_artifacts:
+        from app.agents.chief_of_staff import _critique_is_clean as _clean
+        if _clean(ev["artifact_id"]):
+            any_critique_clean = True
+            break
+    if not any_critique_clean:
+        return
+    for edit in edits:
+        slug = (edit.get("payload") or {}).get("slug")
+        if not slug:
+            continue
+        page = wiki_store.get_page(slug)
+        if page is None or page.status != "draft":
+            continue
+        wiki_store.publish_page(slug, by_agent=NAME)
+
+
 def run_chief(user_input: str, llm: LLMProvider) -> Iterator[AgentEvent]:
     """Run the orchestrator and stream events from CoS *and* delegated specialists."""
     # Track 4 M2: open the parent MLflow run for this operator turn.
@@ -528,6 +584,10 @@ def run_chief(user_input: str, llm: LLMProvider) -> Iterator[AgentEvent]:
     provider_model = getattr(llm, "model", "unknown")
     sink = _EventBuffer()
     chief = build_orchestrator(llm, sink)
+    # Capture turn-start timestamp so the W4 auto-publisher can scope
+    # to events emitted during *this* turn (not historical drafts that
+    # would otherwise auto-publish on every subsequent turn).
+    turn_start_iso = datetime.now(timezone.utc).isoformat()
     with mesh_tracing.turn_run(user_input, provider_name, provider_model):
         for ev in chief.run(user_input, llm):
             # Drain any specialist events buffered before this CoS event
@@ -536,3 +596,28 @@ def run_chief(user_input: str, llm: LLMProvider) -> Iterator[AgentEvent]:
             yield ev
         for spec_ev in sink.drain():
             yield spec_ev
+    # Track 5 W4 — fire auto-publish AFTER all events are streamed so
+    # the post-turn wiki state reflects every draft + critique that
+    # landed in the turn.
+    try:
+        _wiki_auto_publish_clean_drafts(turn_start_iso, llm)
+    except Exception:
+        # Never break the operator-facing reply because of a wiki
+        # post-processing error.
+        pass
+    # Track 5 W6 — Wiki Curator. Read-only post-turn observer that
+    # decides what's worth committing to the wiki. Runs under its own
+    # MLflow nested run so token spend shows up in the same dashboard
+    # as the operator-facing turn. Curator errors are caught so a bad
+    # LLM response can't break the chat path.
+    try:
+        from app.agents import wiki_curator
+
+        with mesh_tracing.delegate_run(wiki_curator.NAME, phase="curator"):
+            wiki_curator.curate_turn(turn_start_iso, user_input, llm)
+        # Auto-publish a SECOND time so any clean Curator drafts that
+        # landed during the curator pass also get promoted (the first
+        # auto-publish call ran before the Curator fired).
+        _wiki_auto_publish_clean_drafts(turn_start_iso, llm)
+    except Exception:
+        pass

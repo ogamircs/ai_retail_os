@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ConfigInfo, getConfig, getMeshStatus, MeshStatus, setProvider, Kpi } from "../lib/api";
+import { ConfigInfo, getConfig, getMeshStatus, MeshStatus, setProvider, Kpi, listPinnedWikiPages, WikiPage } from "../lib/api";
 import { useDashboardData } from "../lib/data";
 import { useDrawer } from "../lib/drawerContext";
 import { requestApprovalPushPermission } from "../lib/pushNotifier";
@@ -72,6 +72,7 @@ export default function StatusStrip() {
     if (typeof Notification === "undefined") return "unknown";
     return Notification.permission;
   });
+  const [pinnedWiki, setPinnedWiki] = useState<WikiPage[]>([]);
 
   useEffect(() => {
     getConfig().then(setCfg).catch(() => {});
@@ -92,6 +93,13 @@ export default function StatusStrip() {
       getMeshStatus(300)
         .then((s) => {
           if (!cancelled) setMesh(s);
+        })
+        .catch(() => {});
+      // Track 5 W5: refresh pinned wiki pages so the chips stay live
+      // when the operator pins/unpins from the WikiTab.
+      listPinnedWikiPages()
+        .then((p) => {
+          if (!cancelled) setPinnedWiki(p);
         })
         .catch(() => {});
     };
@@ -152,6 +160,15 @@ export default function StatusStrip() {
         >
           🔔 {pushPerm === "denied" ? "blocked" : "enable"}
         </button>
+      )}
+      {pinnedWiki.length > 0 && (
+        <span
+          className="wiki-pinned"
+          data-testid="wiki-pinned-chip"
+          title={pinnedWiki.map((p) => `${p.slug} · ${p.title}`).join("\n")}
+        >
+          ★ wiki {pinnedWiki.length}
+        </span>
       )}
       {mesh?.recent_downgrade && (
         <span

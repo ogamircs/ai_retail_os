@@ -225,6 +225,39 @@ CREATE TABLE IF NOT EXISTS outbox_actions (
 );
 CREATE INDEX IF NOT EXISTS idx_outbox_actions_queue ON outbox_actions(action_queue_id);
 CREATE INDEX IF NOT EXISTS idx_outbox_actions_system ON outbox_actions(system_id, status);
+
+-- Track 5 W1 — agentic wiki. One markdown page per topic. Pages are
+-- agent-coined slugs (e.g. category/summer_apparel/markdown_playbook).
+-- Each edit appends a row in wiki_revisions; wiki_pages always points
+-- at the latest published revision (or the latest draft when nothing
+-- has been published yet) so reads are O(1) without joining.
+CREATE TABLE IF NOT EXISTS wiki_pages (
+    slug TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    body_md TEXT NOT NULL,
+    owner_agent TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'draft', -- 'draft' | 'published' | 'deprecated'
+    version INTEGER NOT NULL DEFAULT 1,
+    updated_ts TEXT NOT NULL,
+    refs_json TEXT NOT NULL DEFAULT '[]',
+    pinned INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_wiki_pages_status ON wiki_pages(status, updated_ts DESC);
+CREATE INDEX IF NOT EXISTS idx_wiki_pages_owner ON wiki_pages(owner_agent, status);
+
+CREATE TABLE IF NOT EXISTS wiki_revisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    slug TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    body_md TEXT NOT NULL,
+    author_agent TEXT NOT NULL,
+    status TEXT NOT NULL, -- 'draft' | 'published' | 'deprecated' at time of write
+    refs_json TEXT NOT NULL DEFAULT '[]',
+    ts TEXT NOT NULL,
+    UNIQUE(slug, version)
+);
+CREATE INDEX IF NOT EXISTS idx_wiki_revisions_slug ON wiki_revisions(slug, version DESC);
 """
 
 

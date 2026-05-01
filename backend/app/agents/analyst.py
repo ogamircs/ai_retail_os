@@ -1,5 +1,8 @@
 from app.agents.base import Agent
 from app.agents._mesh_tools import (
+    build_wiki_search_tool,
+    build_wiki_read_tool,
+    build_wiki_propose_edit_tool,
     build_read_artifact_tool,
     build_stage_write_artifact_tool,
 )
@@ -69,6 +72,9 @@ _READ_ARTIFACT_TOOL, _read_artifact_impl = build_read_artifact_tool()
 _WRITE_ARTIFACT_TOOL, _write_artifact_impl = build_stage_write_artifact_tool(
     NAME, default_kind="report"
 )
+_WIKI_SEARCH_TOOL, _wiki_search_impl = build_wiki_search_tool()
+_WIKI_READ_TOOL, _wiki_read_impl = build_wiki_read_tool()
+_WIKI_PROPOSE_TOOL, _wiki_propose_impl = build_wiki_propose_edit_tool(NAME)
 
 
 TOOLS = [
@@ -145,6 +151,9 @@ TOOLS = [
     ),
     _READ_ARTIFACT_TOOL,
     _WRITE_ARTIFACT_TOOL,
+    _WIKI_SEARCH_TOOL,
+    _WIKI_READ_TOOL,
+    _WIKI_PROPOSE_TOOL,
 ]
 
 IMPLS = {
@@ -159,6 +168,9 @@ IMPLS = {
     "list_orders": _tool_list_orders,
     "read_artifact": _read_artifact_impl,
     "write_artifact": _write_artifact_impl,
+    "wiki_search": _wiki_search_impl,
+    "wiki_read": _wiki_read_impl,
+    "wiki_propose_edit": _wiki_propose_impl,
 }
 
 

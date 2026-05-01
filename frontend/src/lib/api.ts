@@ -327,6 +327,72 @@ export async function getMlflowStatus(limitRuns = 10): Promise<MlflowStatus> {
   return await r.json();
 }
 
+export type WikiPage = {
+  slug: string;
+  title: string;
+  body_md: string;
+  owner_agent: string;
+  status: "draft" | "published" | "deprecated";
+  version: number;
+  updated_ts: string;
+  refs: string[];
+  pinned: boolean;
+};
+
+export async function listWikiPages(opts: { status?: string | null; limit?: number } = {}): Promise<WikiPage[]> {
+  const params = new URLSearchParams();
+  if (opts.status !== undefined && opts.status !== null) params.set("status", opts.status);
+  if (opts.limit) params.set("limit", String(opts.limit));
+  const r = await fetch(`/api/wiki/pages?${params}`);
+  const j = await r.json();
+  return j.pages ?? [];
+}
+
+export async function searchWikiPages(q: string, limit = 20): Promise<WikiPage[]> {
+  const r = await fetch(`/api/wiki/search?q=${encodeURIComponent(q)}&limit=${limit}`);
+  const j = await r.json();
+  return j.pages ?? [];
+}
+
+export async function getWikiPage(slug: string): Promise<{ page: WikiPage; revisions: any[] }> {
+  const r = await fetch(`/api/wiki/pages/${encodeURIComponent(slug)}`);
+  if (!r.ok) throw new Error(`wiki page not found: ${slug}`);
+  return await r.json();
+}
+
+export async function publishWikiPage(slug: string): Promise<WikiPage> {
+  const r = await fetch(`/api/wiki/pages/${encodeURIComponent(slug)}/publish`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ by_agent: "Operator" }),
+  });
+  return (await r.json()).page;
+}
+
+export async function deprecateWikiPage(slug: string, reason = ""): Promise<WikiPage> {
+  const r = await fetch(`/api/wiki/pages/${encodeURIComponent(slug)}/deprecate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ by_agent: "Operator", reason }),
+  });
+  return (await r.json()).page;
+}
+
+export async function pinWikiPage(slug: string, pinned: boolean): Promise<WikiPage> {
+  const r = await fetch(`/api/wiki/pages/${encodeURIComponent(slug)}/pin`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pinned }),
+  });
+  return (await r.json()).page;
+}
+
+export async function listPinnedWikiPages(): Promise<WikiPage[]> {
+  const r = await fetch("/api/wiki/pinned");
+  const j = await r.json();
+  return j.pages ?? [];
+}
+
 export async function syncIntegration(systemId: string): Promise<{
   sync_run: SyncRun;
   result: Record<string, any>;
