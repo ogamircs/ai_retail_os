@@ -67,7 +67,13 @@ def aggregate(window_hours: int = 24) -> dict[str, Any]:
         payload = ev.get("payload") or {}
         if kind == "mesh_downgrade":
             downgrade_count += 1
-        if kind == "measurement" and payload.get("action") == "sync_inbound":
+        # Integration sync results land as `measurement` on success and
+        # `rollback` on failure (see app/integrations/registry.sync_system).
+        # Counting only `measurement` would silently undercount failures
+        # and make the sync table look healthier than it actually is.
+        # Trust the embedded `status` field over the event kind so a
+        # future rename of either constant doesn't desync this count.
+        if (kind in ("measurement", "rollback")) and payload.get("action") == "sync_inbound":
             sys_id = payload.get("system_id", "?")
             ok = payload.get("status") == "success"
             sync_results[sys_id]["success" if ok else "failure"] += 1

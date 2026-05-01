@@ -435,6 +435,42 @@ class TelemetryAggregatorTest(unittest.TestCase):
         self.assertGreaterEqual(data["syncs"]["akeneo"].get("success", 0), 1)
         self.assertGreaterEqual(data["syncs"]["akeneo"].get("failure", 0), 1)
 
+    def test_aggregate_counts_rollback_kind_as_sync_failure(self):
+        """Integration registry emits kind="rollback" on a failed sync
+        (not kind="measurement" with status=error). Telemetry must
+        recognise both kinds — otherwise failed syncs vanish from the
+        Integration sync results table.
+        """
+        append_event(
+            agent="Integration",
+            kind="measurement",
+            payload={"action": "sync_inbound", "system_id": "mautic", "status": "success"},
+        )
+        append_event(
+            agent="Integration",
+            kind="rollback",
+            payload={
+                "action": "sync_inbound",
+                "system_id": "mautic",
+                "status": "error",
+                "error": "401 Unauthorized",
+            },
+        )
+        append_event(
+            agent="Integration",
+            kind="rollback",
+            payload={
+                "action": "sync_inbound",
+                "system_id": "mautic",
+                "status": "error",
+                "error": "connection refused",
+            },
+        )
+        data = telemetry.aggregate(window_hours=24)
+        self.assertEqual(data["syncs"]["mautic"].get("success", 0), 1)
+        # Both rollback events must land in the failure bucket.
+        self.assertEqual(data["syncs"]["mautic"].get("failure", 0), 2)
+
 
 class MlflowStatusEndpointTest(unittest.TestCase):
     """The cockpit's /api/mlflow/status route. When MLFLOW_TRACKING_URI
