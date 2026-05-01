@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import re
 import time
+import uuid
 from collections.abc import Iterator
 from datetime import datetime, timezone
 
@@ -28,7 +29,7 @@ from app.config import mesh as mesh_settings
 from app.llm.base import LLMProvider, Tool
 from app.llm.prompts import resolve_prompt
 from app.llm import tracing as mesh_tracing
-from app.spine.events import append_event, events_since_ts
+from app.spine.events import append_event, events_for_turn, events_since_ts, current_turn_id
 from app.spine.artifacts import read_artifact, update_artifact_stage, write_artifact
 from app.spine import wiki as wiki_store
 from app.agents import (
@@ -521,7 +522,11 @@ def build_orchestrator(llm: LLMProvider, event_sink: _EventBuffer) -> Agent:
     return Agent(name=NAME, system_prompt=resolve_prompt(NAME, SYSTEM), tools=tools, tool_impls=impls, max_iters=16)
 
 
-def _wiki_auto_publish_clean_drafts(turn_start_iso: str, llm: LLMProvider) -> None:
+def _wiki_auto_publish_clean_drafts(
+    turn_start_iso: str,
+    llm: LLMProvider,
+    turn_id: str | None = None,
+) -> None:
     """Track 5 W4 — Critic-gated auto-publish.
 
     After every operator turn, walk wiki_edit events that landed during
@@ -536,15 +541,21 @@ def _wiki_auto_publish_clean_drafts(turn_start_iso: str, llm: LLMProvider) -> No
     Critic's audit ran. Operators can always force-publish or
     deprecate from the WikiTab.
     """
-    # Pull every wiki_edit emitted during this turn. There's typically
-    # 0-1; the Curator (W6) can add up to 3 more.
-    edits = [e for e in events_since_ts(turn_start_iso) if e.get("kind") == "wiki_edit"]
+    # Use the per-turn id when available (set by run_chief via the
+    # current_turn_id contextvar) so concurrent /api/chat requests
+    # don't see each other's events. Fall back to the wall-clock
+    # window only when no turn id was propagated — preserves backwards
+    # compatibility for callers (tests) that drive the helper without
+    # opening a turn.
+    if turn_id:
+        scoped = events_for_turn(turn_id, since_ts=turn_start_iso)
+    else:
+        scoped = events_since_ts(turn_start_iso)
+    edits = [e for e in scoped if e.get("kind") == "wiki_edit"]
     if not edits:
         return
-    # Pull every critique artifact emitted during this turn so we can
-    # match each draft against its Critic verdict.
     critique_artifacts = [
-        e for e in events_since_ts(turn_start_iso)
+        e for e in scoped
         if e.get("kind") == "observation"
         and e.get("agent") == "Critic"
         and e.get("artifact_id")
@@ -613,10 +624,15 @@ def run_chief(user_input: str, llm: LLMProvider) -> Iterator[AgentEvent]:
     provider_model = getattr(llm, "model", "unknown")
     sink = _EventBuffer()
     chief = build_orchestrator(llm, sink)
-    # Capture turn-start timestamp so the W4 auto-publisher can scope
-    # to events emitted during *this* turn (not historical drafts that
-    # would otherwise auto-publish on every subsequent turn).
+    # Capture turn-start timestamp + mint a unique turn_id so the W4
+    # auto-publisher and W6 Curator can scope to *this* turn's events
+    # only. Without the per-turn id, two concurrent /api/chat requests
+    # would share a wall-clock window and cross-contaminate (one
+    # operator's clean Critic could auto-publish another operator's
+    # wiki drafts).
     turn_start_iso = datetime.now(timezone.utc).isoformat()
+    turn_id = uuid.uuid4().hex
+    _turn_id_token = current_turn_id.set(turn_id)
     with mesh_tracing.turn_run(user_input, provider_name, provider_model):
         for ev in chief.run(user_input, llm):
             # Drain any specialist events buffered before this CoS event
@@ -627,9 +643,10 @@ def run_chief(user_input: str, llm: LLMProvider) -> Iterator[AgentEvent]:
             yield spec_ev
     # Track 5 W4 — fire auto-publish AFTER all events are streamed so
     # the post-turn wiki state reflects every draft + critique that
-    # landed in the turn.
+    # landed in the turn. Pass turn_id so concurrent turns don't cross-
+    # publish each other's drafts.
     try:
-        _wiki_auto_publish_clean_drafts(turn_start_iso, llm)
+        _wiki_auto_publish_clean_drafts(turn_start_iso, llm, turn_id=turn_id)
     except Exception:
         # Never break the operator-facing reply because of a wiki
         # post-processing error.
@@ -653,6 +670,13 @@ def run_chief(user_input: str, llm: LLMProvider) -> Iterator[AgentEvent]:
         from app.agents import wiki_curator
 
         with mesh_tracing.delegate_run(wiki_curator.NAME, phase="curator"):
-            wiki_curator.curate_turn(turn_start_iso, user_input, llm)
+            wiki_curator.curate_turn(
+                turn_start_iso, user_input, llm, turn_id=turn_id
+            )
     except Exception:
         pass
+    finally:
+        # Reset the contextvar so a future request in the same task
+        # group sees a clean slate and doesn't accidentally inherit
+        # this turn's id.
+        current_turn_id.reset(_turn_id_token)

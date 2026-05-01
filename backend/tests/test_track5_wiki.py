@@ -334,6 +334,59 @@ class WikiAutoPublishTest(unittest.TestCase):
         # ALL critiques must be clean → mixed turn keeps draft.
         self.assertEqual(page.status, "draft")
 
+    def test_concurrent_turns_do_not_cross_publish(self):
+        """Two overlapping turns: turn-A has a clean Pricing critique +
+        Pricing wiki_edit; turn-B has only a Replenishment wiki_edit
+        with no critique of its own. With the per-turn-id gate,
+        turn-A's auto-publish must not flip turn-B's draft to
+        published.
+        """
+        from app.agents.chief_of_staff import _wiki_auto_publish_clean_drafts
+        from app.spine.events import append_event, current_turn_id
+        from app.spine.artifacts import write_artifact
+        from datetime import datetime, timezone
+
+        turn_start_a = datetime.now(timezone.utc).isoformat()
+        turn_a_id = "turn-a-uuid"
+        turn_b_id = "turn-b-uuid"
+
+        # Turn A — Pricing draft + clean critique + Pricing wiki_edit
+        token_a = current_turn_id.set(turn_a_id)
+        try:
+            pricing_draft_id = write_artifact(
+                agent="Pricing & Promo", kind="plan", title="A draft",
+                body_md="b", refs=[], stage="draft",
+            )
+            critique_id = write_artifact(
+                agent="Critic", kind="critique", title="C",
+                body_md=(
+                    "## Verified\nok\n## Gaps\n*No material findings.*\n"
+                    "## Risks\n*No material findings.*\n## Counter-recommendation\nhold\n"
+                ),
+                refs=[pricing_draft_id], stage="critique",
+            )
+            append_event(
+                agent="Critic", kind="observation",
+                payload={"artifact_title": "C"}, artifact_id=critique_id,
+            )
+            wiki.propose_edit("policy/turn-a", "P", "BODY", "Pricing & Promo")
+        finally:
+            current_turn_id.reset(token_a)
+
+        # Turn B (overlapping) — only a Replenishment wiki_edit
+        token_b = current_turn_id.set(turn_b_id)
+        try:
+            wiki.propose_edit("policy/turn-b", "P2", "BODY2", "Replenishment")
+        finally:
+            current_turn_id.reset(token_b)
+
+        # Auto-publish for turn A only
+        _wiki_auto_publish_clean_drafts(turn_start_a, llm=None, turn_id=turn_a_id)
+
+        # Turn A's draft published; turn B's stays a draft.
+        self.assertEqual(wiki.get_page("policy/turn-a").status, "published")
+        self.assertEqual(wiki.get_page("policy/turn-b").status, "draft")
+
     def test_unreviewed_author_draft_held_even_when_other_critique_clean(self):
         """An Analyst (or any agent whose draft wasn't critiqued this
         turn) authoring a wiki_edit must NOT get auto-published just

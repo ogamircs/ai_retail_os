@@ -30,7 +30,7 @@ from app.agents._mesh_tools import (
 )
 from app.llm.base import LLMProvider, Tool
 from app.llm.prompts import resolve_prompt
-from app.spine.events import append_event, events_since_ts
+from app.spine.events import append_event, events_for_turn, events_since_ts
 from app.spine.artifacts import read_artifact
 
 NAME = "Wiki Curator"
@@ -88,15 +88,23 @@ def _check_rate_limit(slug: str) -> bool:
     return True
 
 
-def _proposals_this_turn(turn_start_iso: str) -> int:
+def _proposals_this_turn(turn_start_iso: str, turn_id: str | None = None) -> int:
     """Count Curator proposals already emitted this turn — backstop for
     the per-turn cap so a single misbehaving LLM call can't spam the
-    wiki even if the prompt's "max 3" guidance is ignored."""
-    count = 0
-    for ev in events_since_ts(turn_start_iso):
-        if ev.get("kind") == "wiki_edit" and ev.get("agent") == NAME:
-            count += 1
-    return count
+    wiki even if the prompt's "max 3" guidance is ignored.
+
+    Scoped by turn_id when present — concurrent turns each get their
+    own counter and can't starve each other below the cap.
+    """
+    if turn_id:
+        scoped = events_for_turn(turn_id, since_ts=turn_start_iso)
+    else:
+        scoped = events_since_ts(turn_start_iso)
+    return sum(
+        1
+        for ev in scoped
+        if ev.get("kind") == "wiki_edit" and ev.get("agent") == NAME
+    )
 
 
 _READ_ARTIFACT_TOOL, _read_artifact_impl = build_read_artifact_tool()
@@ -105,13 +113,13 @@ _WIKI_READ_TOOL, _wiki_read_impl = build_wiki_read_tool()
 _WIKI_PROPOSE_TOOL_BASE, _wiki_propose_impl_base = build_wiki_propose_edit_tool(NAME)
 
 
-def _wiki_propose_with_caps(turn_start_iso: str):
+def _wiki_propose_with_caps(turn_start_iso: str, turn_id: str | None = None):
     """Wrap the bare propose impl with per-turn + per-slug rate
     limiting so the Curator can't blow past either cap regardless of
     what the LLM does."""
 
     def _impl(args: dict) -> dict:
-        if _proposals_this_turn(turn_start_iso) >= MAX_PROPOSALS_PER_TURN:
+        if _proposals_this_turn(turn_start_iso, turn_id=turn_id) >= MAX_PROPOSALS_PER_TURN:
             return {
                 "error": (
                     f"per-turn cap reached: max {MAX_PROPOSALS_PER_TURN} "
@@ -132,16 +140,21 @@ def _wiki_propose_with_caps(turn_start_iso: str):
     return _impl
 
 
-def build_agent(turn_start_iso: str | None = None) -> Agent:
+def build_agent(
+    turn_start_iso: str | None = None,
+    turn_id: str | None = None,
+) -> Agent:
     """Curator builder. `turn_start_iso` scopes the per-turn cap; if
-    None, uses now() — useful for ad-hoc invocations / tests."""
+    None, uses now() — useful for ad-hoc invocations / tests.
+    `turn_id` (optional) further scopes counters to a specific turn so
+    concurrent /api/chat requests don't share the cap."""
     if turn_start_iso is None:
         turn_start_iso = datetime.now(timezone.utc).isoformat()
     impls = {
         "read_artifact": _read_artifact_impl,
         "wiki_search": _wiki_search_impl,
         "wiki_read": _wiki_read_impl,
-        "wiki_propose_edit": _wiki_propose_with_caps(turn_start_iso),
+        "wiki_propose_edit": _wiki_propose_with_caps(turn_start_iso, turn_id=turn_id),
     }
     tools = [_READ_ARTIFACT_TOOL, _WIKI_SEARCH_TOOL, _WIKI_READ_TOOL, _WIKI_PROPOSE_TOOL_BASE]
     return Agent(
@@ -157,16 +170,27 @@ def curate_turn(
     turn_start_iso: str,
     operator_input: str,
     llm: LLMProvider,
+    turn_id: str | None = None,
 ) -> dict:
     """Drive the Curator over a finished turn. Idempotent — caller is
     expected to invoke at most once per turn. Returns a small summary
     dict (count, slugs_proposed, error) for the orchestrator's logs.
+
+    `turn_id` (when provided) scopes the evidence walk to events
+    tagged with that id — prevents cross-contamination between
+    concurrent /api/chat requests, which would otherwise share a
+    wall-clock window via events_since_ts.
     """
     if not _is_enabled():
         return {"enabled": False, "count": 0, "slugs": []}
     # Walk events from this turn so the Curator has the evidence it
-    # needs to ground its proposals.
-    turn_events = events_since_ts(turn_start_iso)
+    # needs to ground its proposals. Per-turn id when available; the
+    # ts fallback preserves backwards compatibility for unit tests
+    # that drive curate_turn directly.
+    if turn_id:
+        turn_events = events_for_turn(turn_id, since_ts=turn_start_iso)
+    else:
+        turn_events = events_since_ts(turn_start_iso)
     # Pull artifact bodies for any artifact_id that landed during the
     # turn — gives the Curator the actual draft text instead of just
     # event metadata.
@@ -202,7 +226,7 @@ def curate_turn(
         "keeping, reply with one line saying so and emit no edits."
     )
 
-    agent = build_agent(turn_start_iso=turn_start_iso)
+    agent = build_agent(turn_start_iso=turn_start_iso, turn_id=turn_id)
     final_text = ""
     slugs_proposed: list[str] = []
     t0 = time.monotonic()
