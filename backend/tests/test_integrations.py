@@ -774,6 +774,53 @@ class IntegrationLayerTest(unittest.TestCase):
         out = adapter._api_list("products")
         self.assertEqual([r["identifier"] for r in out], ["A", "B", "C"])
 
+    def test_akeneo_api_list_handles_proxy_rewritten_next_links(self):
+        """Akeneo's _links.next.href can carry a different scheme/host
+        than AKENEO_BASE_URL (proxy / canonical rewrite). Pagination
+        must still work — strip to path+query rather than relying on
+        startswith(base_url).
+        """
+        from app.integrations.systems import AkeneoAdapter
+
+        os.environ["AKENEO_BASE_URL"] = "http://stub"
+        os.environ["AKENEO_CLIENT_ID"] = "cid"
+        os.environ["AKENEO_SECRET"] = "sec"
+        os.environ["AKENEO_USERNAME"] = "admin"
+        os.environ["AKENEO_PASSWORD"] = "pw"
+
+        adapter = AkeneoAdapter()
+        adapter._admin_token = "tok"
+        adapter._login = lambda: "tok"  # type: ignore[method-assign]
+
+        seen: list[str] = []
+        pages = {
+            "/api/rest/v1/products?limit=100": {
+                "_embedded": {"items": [{"identifier": "A"}]},
+                # Different host (proxy rewrite). Old code would forward
+                # this absolute URL and JsonHttpClient would prepend
+                # AKENEO_BASE_URL, producing junk.
+                "_links": {"next": {"href": "https://akeneo.internal.example/api/rest/v1/products?page=2"}},
+            },
+            "/api/rest/v1/products?page=2": {
+                "_embedded": {"items": [{"identifier": "B"}]},
+            },
+        }
+
+        class _Stub:
+            def request(self, path, method="GET", payload=None):
+                seen.append(path)
+                return pages.get(path, {})
+
+        adapter._client = lambda: _Stub()  # type: ignore[method-assign]
+        out = adapter._api_list("products")
+        self.assertEqual([r["identifier"] for r in out], ["A", "B"])
+        # Both calls must have hit relative paths the JsonHttpClient
+        # can prepend its base to.
+        self.assertEqual(
+            seen,
+            ["/api/rest/v1/products?limit=100", "/api/rest/v1/products?page=2"],
+        )
+
     def test_akeneo_apply_pim_enrich_patches_product(self):
         from app.integrations.systems import AkeneoAdapter
         from app.integrations import store

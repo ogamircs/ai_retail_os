@@ -82,14 +82,31 @@ else
 fi
 
 echo ">> minting OAuth2 client"
+set +e
 client_output=$(
   $COMPOSE exec -T \
     -e BS_CLIENT_LABEL="$CLIENT_LABEL" \
     akeneo bash -c '
       bin/console pim:oauth-server:create-client "$BS_CLIENT_LABEL" \
         --grant_type=password --grant_type=refresh_token --no-interaction
-    ' 2>&1 || true
+    ' 2>&1
 )
+client_rc=$?
+set -e
+if [ $client_rc -eq 0 ]; then
+  echo "++ OAuth2 client created"
+elif echo "$client_output" | grep -qiE "already exists|duplicate|unique constraint|label.*used"; then
+  # CE prints something like "Client with label 'retail-os' already exists"
+  # on a re-run — that's fine; the operator can re-list existing clients.
+  echo "   OAuth2 client '$CLIENT_LABEL' already exists (continuing; re-list with"
+  echo "   \`bin/console pim:oauth-server:list-clients\` to recover client_id/secret)"
+else
+  echo "$client_output"
+  echo "!! pim:oauth-server:create-client failed (exit=$client_rc) — bootstrap aborted."
+  echo "   Fix the underlying error (service not ready / command shape change)"
+  echo "   and re-run."
+  exit "$client_rc"
+fi
 client_id=$(echo "$client_output" | grep -oE 'client_id:\s*\S+' | awk -F: '{print $2}' | xargs || true)
 client_secret=$(echo "$client_output" | grep -oE 'secret:\s*\S+' | awk -F: '{print $2}' | xargs || true)
 

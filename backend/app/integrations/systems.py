@@ -7,7 +7,7 @@ import os
 import re
 from typing import Any
 from urllib.error import HTTPError
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 from app.integrations.base import IntegrationAdapter, IntegrationDefinition, IntegrationResult
@@ -1925,10 +1925,16 @@ class AkeneoAdapter(IntegrationAdapter):
             next_link = ((data.get("_links") or {}).get("next") or {}).get("href")
             if not next_link:
                 break
-            # Akeneo returns full URLs; trim the host so the client (which
-            # already has the base URL) can request just the path.
-            base_url = os.environ["AKENEO_BASE_URL"].rstrip("/")
-            next_path = next_link.replace(base_url, "") if next_link.startswith(base_url) else next_link
+            # Akeneo returns absolute URLs; rebuild as a path+query so the
+            # client (which already prepends AKENEO_BASE_URL) gets a valid
+            # request even when Akeneo's serverURL differs from our env
+            # value (proxy / canonical host rewrite). Falls back to the
+            # raw string only when urlsplit yields nothing usable.
+            parts = urlsplit(next_link)
+            if parts.path:
+                next_path = parts.path + (f"?{parts.query}" if parts.query else "")
+            else:
+                next_path = next_link
         return out
 
     def _live_sync(self) -> IntegrationResult:
