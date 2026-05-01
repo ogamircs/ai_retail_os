@@ -1,7 +1,10 @@
 from app.agents.base import Agent
+from app.agents._mesh_tools import (
+    build_read_artifact_tool,
+    build_stage_write_artifact_tool,
+)
 from app.llm.base import Tool
 from app.spine.events import append_event
-from app.spine.artifacts import write_artifact
 from app.substrate import omnichannel
 
 NAME = "Marketing"
@@ -53,21 +56,10 @@ def _tool_request_approval(args: dict) -> dict:
     )
 
 
-def _tool_write_artifact(args: dict) -> dict:
-    aid = write_artifact(
-        agent=NAME,
-        kind=args.get("kind", "campaign_brief"),
-        title=args.get("title", "Marketing campaign brief"),
-        body_md=args.get("body_md", ""),
-        refs=args.get("refs", []),
-    )
-    eid = append_event(
-        agent=NAME,
-        kind="proposal",
-        payload={"artifact_title": args.get("title", "")},
-        artifact_id=aid,
-    )
-    return {"artifact_id": aid, "event_id": eid}
+_READ_ARTIFACT_TOOL, _read_artifact_impl = build_read_artifact_tool()
+_WRITE_ARTIFACT_TOOL, _write_artifact_impl = build_stage_write_artifact_tool(
+    NAME, default_kind="campaign_brief"
+)
 
 
 TOOLS = [
@@ -126,20 +118,8 @@ TOOLS = [
             "required": ["title", "reason"],
         },
     ),
-    Tool(
-        name="write_artifact",
-        description="Persist a campaign artifact. Returns artifact_id.",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "kind": {"type": "string"},
-                "title": {"type": "string"},
-                "body_md": {"type": "string"},
-                "refs": {"type": "array", "items": {"type": "string"}},
-            },
-            "required": ["title", "body_md"],
-        },
-    ),
+    _READ_ARTIFACT_TOOL,
+    _WRITE_ARTIFACT_TOOL,
 ]
 
 IMPLS = {
@@ -148,7 +128,8 @@ IMPLS = {
     "launch_mock_campaign": _tool_launch_mock_campaign,
     "measure_campaign": _tool_measure_campaign,
     "request_approval": _tool_request_approval,
-    "write_artifact": _tool_write_artifact,
+    "read_artifact": _read_artifact_impl,
+    "write_artifact": _write_artifact_impl,
 }
 
 

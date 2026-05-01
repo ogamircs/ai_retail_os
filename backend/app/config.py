@@ -65,3 +65,50 @@ class Settings:
 
 
 settings = Settings()
+
+
+# ----------------------------------------------------------------------
+# Track 2 A6 — agent-mesh guardrails.
+#
+# All overridable via env vars. Defaults are conservative — the cockpit
+# can run a multi-pass turn end-to-end without blowing past 60s.
+# ----------------------------------------------------------------------
+
+class MeshSettings:
+    @property
+    def enabled(self) -> bool:
+        return os.getenv("MESH_ENABLED", "1").strip() not in ("0", "false", "False", "no", "")
+
+    @property
+    def max_revision_rounds(self) -> int:
+        try:
+            return int(os.getenv("MESH_MAX_REVISION_ROUNDS", "2"))
+        except ValueError:
+            return 2
+
+    @property
+    def max_critic_per_draft(self) -> int:
+        try:
+            return int(os.getenv("MESH_MAX_CRITIC_PER_DRAFT", "2"))
+        except ValueError:
+            return 2
+
+    @property
+    def turn_token_budget(self) -> int:
+        """Soft cap; if a single specialist round produced this many words
+        of artifact body, the Chief downgrades the rest of the turn to
+        single-pass and logs a `mesh_downgrade` event. ~1.3 tokens/word."""
+        try:
+            return int(os.getenv("MESH_TURN_TOKEN_BUDGET", "12000"))
+        except ValueError:
+            return 12000
+
+    @property
+    def turn_wallclock_seconds(self) -> int:
+        try:
+            return int(os.getenv("MESH_TURN_WALLCLOCK_SECONDS", "60"))
+        except ValueError:
+            return 60
+
+
+mesh = MeshSettings()

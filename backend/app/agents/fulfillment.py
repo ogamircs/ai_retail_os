@@ -1,7 +1,9 @@
 from app.agents.base import Agent
+from app.agents._mesh_tools import (
+    build_read_artifact_tool,
+    build_stage_write_artifact_tool,
+)
 from app.llm.base import Tool
-from app.spine.events import append_event
-from app.spine.artifacts import write_artifact
 from app.substrate import omnichannel
 
 NAME = "Fulfillment"
@@ -30,21 +32,10 @@ def _tool_route_fulfillment(args: dict) -> dict:
     return omnichannel.route_fulfillment(args["category"])
 
 
-def _tool_write_artifact(args: dict) -> dict:
-    aid = write_artifact(
-        agent=NAME,
-        kind=args.get("kind", "fulfillment_plan"),
-        title=args.get("title", "Fulfillment routing plan"),
-        body_md=args.get("body_md", ""),
-        refs=args.get("refs", []),
-    )
-    eid = append_event(
-        agent=NAME,
-        kind="proposal",
-        payload={"artifact_title": args.get("title", "")},
-        artifact_id=aid,
-    )
-    return {"artifact_id": aid, "event_id": eid}
+_READ_ARTIFACT_TOOL, _read_artifact_impl = build_read_artifact_tool()
+_WRITE_ARTIFACT_TOOL, _write_artifact_impl = build_stage_write_artifact_tool(
+    NAME, default_kind="fulfillment_plan"
+)
 
 
 TOOLS = [
@@ -68,26 +59,15 @@ TOOLS = [
             "required": ["category"],
         },
     ),
-    Tool(
-        name="write_artifact",
-        description="Persist a fulfillment artifact. Returns artifact_id.",
-        input_schema={
-            "type": "object",
-            "properties": {
-                "kind": {"type": "string"},
-                "title": {"type": "string"},
-                "body_md": {"type": "string"},
-                "refs": {"type": "array", "items": {"type": "string"}},
-            },
-            "required": ["title", "body_md"],
-        },
-    ),
+    _READ_ARTIFACT_TOOL,
+    _WRITE_ARTIFACT_TOOL,
 ]
 
 IMPLS = {
     "list_orders": _tool_list_orders,
     "route_fulfillment": _tool_route_fulfillment,
-    "write_artifact": _tool_write_artifact,
+    "read_artifact": _read_artifact_impl,
+    "write_artifact": _write_artifact_impl,
 }
 
 

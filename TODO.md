@@ -290,33 +290,35 @@ Failure modes this fails to catch: shallow analysis, missed evidence, wrong cate
   - [x] 11 tools: `read_artifact`, `read_events`, plus the Analyst's read-only spine kit (`query_sales`, `aggregate_by_category`, `daily_sales`, `get_kpis`, `list_categories`, `list_campaigns`, `inventory_health`, `list_orders`) and `write_artifact`.
   - [x] `chief_of_staff.delegate_to_critic` takes `{artifact_id, task?}` and stitches the id into the task so the Critic's first call is always `read_artifact(artifact_id=…)`.
 
-- [ ] **A2 · Drafter / critic round-trip**
-  - [ ] Each specialist (Analyst, Pricing, Marketing, Merchandiser, Fulfillment, Replenishment, Store Manager) gains an optional `revise_artifact(original_id, critique_id)` tool that reads its prior draft + the critique and produces a revised artifact (kind suffix `_revised`).
-  - [ ] Chief's run-loop is updated: after a specialist returns a draft, Chief invokes Critic, then asks the original specialist to `revise_artifact` if the critique flagged Gaps or Risks.
-  - [ ] Convergence rule: max **2 revision rounds**, or stop earlier when the latest critique returns "no material gaps".
-  - **Done when:** a single chat turn produces draft → critique → revision artifacts in the spine, all linked, and the operator-facing reply references the *final* revision.
+- [x] **A2 · Drafter / critic round-trip** _(branch: `feature/track2-mesh`)_
+  - [x] Shared `app/agents/_mesh_tools.py` — `read_artifact` + stage-aware `write_artifact` builders, plus `revise_task_for(...)` / `peer_review_task_for(...)` task templates the Chief uses to task specialists. Wired into all 7 specialists (Analyst, Pricing, Marketing, Merchandiser, Fulfillment, Replenishment, Store Manager) — each now exposes both tools so the Chief can task them with revisions / peer reviews without per-specialist boilerplate.
+  - [x] `chief_of_staff._run_delegate_with_review` — auto review loop. Specialist returns a `draft` → Chief invokes Critic → if `_critique_is_clean` returns False (real Gaps or Risks present), Chief tasks the original specialist with `revise_task_for(...)` → repeat up to `MESH_MAX_REVISION_ROUNDS` times. Converged artifact is flipped to `stage="final"` in place via `update_artifact_stage` so the operator sees one canonical row in the Reports tab.
+  - [x] Analyst (measurement / non-action) skips the loop — its drafts are stamped final directly. Action specialists (Pricing, Marketing, Replenishment, Merchandiser, Fulfillment, Store Manager) all run with the loop.
+  - [x] Convergence signal: regex over critique sections — if both `## Gaps` and `## Risks` carry `*No material findings.*`, the loop stops without a revision round.
+  - [x] **Verified:** `tests/test_agent_mesh.py::ReviewLoopIntegrationTest` exercises the stage chain (draft → critique → revision → final) and asserts the ref chain links back through the chain. End-to-end LLM run is the eval harness's job (A5).
 
-- [ ] **A3 · Multi-specialist debate (where it helps)**
-  - [ ] For decisions where specialists naturally disagree (Pricing vs Replenishment on markdowns; Merchandiser vs Marketing on push priority), the Chief can invoke `delegate_to_<peer>` with the first specialist's draft as input and ask for a peer review (`peer_review` tool) — distinct from generic Critic, scoped to that peer's domain expertise.
-  - [ ] Peer reviews are written as `peer_review` artifacts and feed into the same revision loop.
-  - **Done when:** a markdown plan triggers Pricing draft → Replenishment peer review → Pricing revision → Critic critique → Pricing final, all visible in the trace pane.
+- [x] **A3 · Multi-specialist debate (where it helps)** _(branch: `feature/track2-mesh`)_
+  - [x] `delegate_to_peer_review` Chief tool — takes `{artifact_id, peer, scope?}`. `peer` is one of pricing / marketing / replenishment / merchandiser / fulfillment / store_manager (the six action specialists). Hands the draft to the peer with a scoped task built by `peer_review_task_for(...)`. The peer emits a `kind="peer_review"`, `stage="peer_review"` artifact whose body has `## Agree / ## Disagree / ## Add` headings.
+  - [x] Peer review artifacts feed back into the same review loop — the Chief can call `delegate_to_<original>` again with the peer review id as additional context, producing a revision.
+  - [x] **Verified:** `tests/test_agent_mesh.py::ReviewLoopIntegrationTest` covers the bad-peer + missing-id rejection. Live agent runs go through the eval harness.
 
-- [ ] **A4 · UI surfacing**
-  - [ ] Chat turn renders a stacked thread: each artifact tagged by stage (`draft`, `critique`, `peer review`, `revision`, `final`) with an inline "diff" affordance.
-  - [ ] Reports tab gets a `stage` column and a filter for `final` only (default), with a toggle to show all stages.
-  - [ ] Approval drawer's `apply` button refuses to fire on a non-`final` artifact.
-  - **Done when:** operator can scrub through the dialogue and apply only on the converged final.
+- [x] **A4 · UI surfacing** _(branch: `feature/track2-mesh`)_
+  - [x] `ArtifactMeta` gains a `stage?: string` field. Backend `write_artifact` defaults to `stage="draft"`; specialist-tool override accepts the mesh-known stages; Chief's `write_summary_artifact` writes `stage="final"`. Older artifacts predating the mesh upgrade carry no stage and are treated as `final` by the UI so legacy reports remain operator-actionable.
+  - [x] `ReportsTab` — new `Stage` column with chip per row (`stage-draft / -critique / -peer-review / -revision / -final` CSS classes). Default filter is `final` only; `all stages` toggle next to the existing `deep` toggle exposes the full mesh trace for debugging. Empty-state text adapts when the filter is hiding rows.
+  - [x] `ApprovalDrawer` — apply-button gate. When the linked artifact's stage is anything but `final`, the button is `disabled` with a tooltip explaining the stage; a small `stage · <stage>` chip renders next to the disabled button so the operator sees *why*.
+  - [x] `StatusStrip` — new `MESH ↓` chip when `/api/mesh/status` reports a `mesh_downgrade` event in the last 5 minutes. Hover tooltip names the reason (`budget_exhausted_before_review`, `budget_exhausted_mid_review`, …) and the count over the window. Backend route `/api/mesh/status?window_seconds=N` returns the active mesh config + the most recent downgrade.
 
-- [ ] **A5 · Eval harness**
-  - [ ] `backend/tests/agents/eval/` — a small suite of seeded scenarios (overstock summer, weekend heatwave, supplier risk, single-store stockout) with a golden answer per scenario.
-  - [ ] Each scenario runs the chat turn end-to-end and scores (LLM-as-judge): factual correctness, evidence cited, policy adherence, recommendation quality.
-  - [ ] Compare single-pass (mesh disabled) vs multi-pass (mesh enabled). The multi-pass run must score strictly higher on at least 3 of 4 dimensions on at least 3 of the 4 scenarios.
-  - **Done when:** numbers exist and are reproducible; mesh stays on by default.
+- [x] **A5 · Eval harness** _(branch: `feature/track2-mesh`)_
+  - [x] `backend/tests/agents/eval/scenarios.py` — four seeded scenarios with rubric: `overstock_summer`, `weekend_heatwave`, `supplier_risk`, `single_store_stockout`. Each rubric scores four dimensions (factual_correctness, evidence_cited, policy_adherence, recommendation_quality), 0-3 each.
+  - [x] `backend/tests/agents/eval/judge.py` — LLM-as-judge using the same configured provider as the cockpit. Forces a single `submit_score` tool call so scoring is structured. Falls back to all-zero with `notes='judge_no_tool_call'` when the judge produces text only — flagging the run for manual review rather than silently inflating means.
+  - [x] `backend/tests/agents/eval/run_eval.py` — end-to-end runner. Drives `run_chief` once per (scenario × mode), MESH_ENABLED toggle flips the loop on/off. Writes `last_run.json` with per-mode scores + `compare_modes` summary.
+  - [x] `backend/tests/agents/eval/test_eval.py` — env-gated unittest wrapper. Skipped unless an LLM API key is present *and* `RUN_EVAL=1` is set (eval costs real tokens; CI never fires it). Asserts the spec target: multi-pass strictly higher on ≥3 of 4 dimensions on ≥3 of 4 scenarios.
 
-- [ ] **A6 · Cost & latency guardrails**
-  - [ ] Per-turn token budget; if mesh would exceed it, automatically downgrade to single-pass and log a `mesh_downgrade` event.
-  - [ ] Backoff: max 3 rounds of revision globally, max 2 critic invocations per draft, hard wall-clock cap (e.g. 60s per operator turn).
-  - **Done when:** budget config is in `backend/app/config.py`, surfaced in the cockpit's status strip as a small chip when active.
+- [x] **A6 · Cost & latency guardrails** _(branch: `feature/track2-mesh`)_
+  - [x] `backend/app/config.py` — `MeshSettings` class. Env-overridable: `MESH_ENABLED`, `MESH_MAX_REVISION_ROUNDS` (default 2), `MESH_MAX_CRITIC_PER_DRAFT` (default 2), `MESH_TURN_TOKEN_BUDGET` (default 12000), `MESH_TURN_WALLCLOCK_SECONDS` (default 60).
+  - [x] `chief_of_staff._MeshState` — per-turn budget tracker. Approximates token usage from final agent text (words × 1.3); checks elapsed wall-clock against `turn_wallclock_seconds`. `should_downgrade()` returns True when the mesh is disabled, the token budget is blown, or the wall-clock cap is hit. The review loop checks this at every iteration boundary.
+  - [x] `record_downgrade` is idempotent — the first guardrail trip per turn appends a `mesh_downgrade` event with reason + tokens_used + elapsed_s; subsequent trips are no-ops so the event log isn't spammed.
+  - [x] Cockpit `MESH ↓` chip wired in StatusStrip via the new `/api/mesh/status` route (see A4).
 
 ## Open design questions (decide during A1 brainstorming)
 

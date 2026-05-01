@@ -101,3 +101,28 @@ a { color: var(--info); text-decoration: none; }
 .chip-warn { color: var(--warn); background: var(--warn-bg); border-color: var(--warn); }
 .chip-bad  { color: var(--bad);  background: var(--bad-bg);  border-color: var(--bad);  }
 .chip-info { color: var(--info); background: var(--info-bg); border-color: var(--info); }
+
+/* Track 2 A4 — agent-mesh lifecycle stage chips. Colour ramp follows the
+   audit flow: in-flight stages are warm/dim, the converged final is the
+   confident green so operators can scan one column and find the
+   actionable rows. */
+.stage-draft       { color: var(--ink-mute); background: transparent;        border-color: var(--line);     }
+.stage-critique    { color: var(--warn);     background: var(--warn-bg);     border-color: var(--warn);     }
+.stage-peer-review { color: var(--info);     background: var(--info-bg);     border-color: var(--info);     }
+.stage-revision    { color: var(--ink);      background: transparent;        border-color: var(--ink-mute); }
+.stage-final       { color: var(--good);     background: var(--good-bg);     border-color: var(--good);     }
+
+/* Mesh-downgrade chip used by StatusStrip when the orchestrator hits a
+   token / wall-clock guardrail and falls back to single-pass for the
+   rest of the turn. Uses the warning ramp — operator should notice but
+   it isn't an error. */
+.mesh-down {
+  display: inline-block;
+  padding: 0 var(--sp-1);
+  border: 1px solid var(--warn);
+  color: var(--warn);
+  background: var(--warn-bg);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+  cursor: help;
+}
