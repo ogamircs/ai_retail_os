@@ -44,10 +44,17 @@ export default function WikiTab() {
           ? await searchWikiPages(q.trim(), { status, limit: 50 })
           : await listWikiPages({ status, limit: 50 });
         setPages(list);
-        // Keep current selection if still in the list, otherwise pick the first.
-        setSelected((cur) =>
-          cur && list.some((p) => p.slug === cur.slug) ? cur : list[0] ?? null,
-        );
+        // Refresh the selected page from the latest poll. Operators
+        // (or other agent turns) can flip status / bump version /
+        // edit body between polls; keeping the stale `cur` object
+        // would render outdated stage chips + action buttons.
+        // Re-bind to the freshest copy of the same slug, falling
+        // back to the first list item when the slug disappeared.
+        setSelected((cur) => {
+          if (!cur) return list[0] ?? null;
+          const fresh = list.find((p) => p.slug === cur.slug);
+          return fresh ?? list[0] ?? null;
+        });
         setError("");
       } catch (e: any) {
         setError(e?.message ?? "wiki fetch failed");

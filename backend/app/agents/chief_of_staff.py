@@ -567,9 +567,36 @@ def _wiki_auto_publish_clean_drafts(turn_start_iso: str, llm: LLMProvider) -> No
     all_clean = all(_critique_is_clean(ev["artifact_id"]) for ev in critique_artifacts)
     if not all_clean:
         return
+    # Per-draft gate (PR #31 follow-up fix): a clean turn-level
+    # critique is necessary but not sufficient. Each wiki_edit must
+    # also have been authored by an agent whose own draft was
+    # critiqued this turn — otherwise an Analyst (whose delegations
+    # bypass the auto-Critic loop) could land a wiki_edit that gets
+    # auto-published on the back of a Pricing critique that knows
+    # nothing about the Analyst's lesson.
+    #
+    # Build the set of reviewed-draft authors by walking each
+    # critique's refs[0] (the audited draft id) and reading its
+    # `agent` field. Drafts authored by anyone outside that set wait
+    # for explicit operator approval via the WikiTab.
+    reviewed_authors: set[str] = set()
+    for c_ev in critique_artifacts:
+        critique = read_artifact(c_ev["artifact_id"])
+        if not critique:
+            continue
+        for ref in critique.get("refs") or []:
+            target = read_artifact(ref)
+            if target and target.get("agent"):
+                reviewed_authors.add(target["agent"])
     for edit in edits:
         slug = (edit.get("payload") or {}).get("slug")
         if not slug:
+            continue
+        author = edit.get("agent")
+        if author not in reviewed_authors:
+            # Author wasn't reviewed by Critic this turn → hold the
+            # draft for the operator regardless of how clean the
+            # other critiques were.
             continue
         page = wiki_store.get_page(slug)
         if page is None or page.status != "draft":

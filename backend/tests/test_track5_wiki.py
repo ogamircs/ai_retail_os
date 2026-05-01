@@ -224,36 +224,37 @@ class WikiAutoPublishTest(unittest.TestCase):
 
     def test_clean_critique_promotes_wiki_draft(self):
         """Turn produces:
-          - wiki_edit (draft)
-          - critique with no Gaps + no Risks
-        → auto-publish runs → page is published.
+          - Pricing draft artifact (the agent draft being reviewed)
+          - Critic critique referencing it; clean (no Gaps + no Risks)
+          - Pricing wiki_edit
+        → auto-publish runs → wiki page is published because Pricing's
+        own draft was the reviewed-clean target.
         """
         from app.agents.chief_of_staff import _wiki_auto_publish_clean_drafts
         from datetime import datetime, timezone
+        from app.spine.events import append_event
 
         turn_start = datetime.now(timezone.utc).isoformat()
-        # Curator emits a draft
-        wiki.propose_edit("x/y", "T", "BODY", "Wiki Curator")
-        # Clean Critic critique
+        # Pricing's draft (the artifact being audited)
+        pricing_draft_id = write_artifact(
+            agent="Pricing & Promo", kind="plan", title="Markdown",
+            body_md="markdown 25%", refs=[], stage="draft",
+        )
+        # Pricing emits the wiki edit (matches the reviewed author)
+        wiki.propose_edit("x/y", "T", "BODY", "Pricing & Promo")
+        # Critic critique referencing the Pricing draft, clean
         critique_id = write_artifact(
-            agent="Critic",
-            kind="critique",
-            title="C",
+            agent="Critic", kind="critique", title="C",
             body_md=(
                 "## Verified\nok\n"
                 "## Gaps\n*No material findings.*\n"
                 "## Risks\n*No material findings.*\n"
                 "## Counter-recommendation\nhold\n"
             ),
-            refs=["dummy"],
-            stage="critique",
+            refs=[pricing_draft_id], stage="critique",
         )
-        # Need the observation event so auto-publish discovers the critique
-        from app.spine.events import append_event
-
         append_event(
-            agent="Critic",
-            kind="observation",
+            agent="Critic", kind="observation",
             payload={"artifact_title": "C", "stage": "critique"},
             artifact_id=critique_id,
         )
@@ -332,6 +333,47 @@ class WikiAutoPublishTest(unittest.TestCase):
         page = wiki.get_page("x/y")
         # ALL critiques must be clean → mixed turn keeps draft.
         self.assertEqual(page.status, "draft")
+
+    def test_unreviewed_author_draft_held_even_when_other_critique_clean(self):
+        """An Analyst (or any agent whose draft wasn't critiqued this
+        turn) authoring a wiki_edit must NOT get auto-published just
+        because Pricing's draft happened to get a clean critique.
+        Per-draft gate must match wiki_edit.agent against the set of
+        agents whose drafts were actually reviewed this turn.
+        """
+        from app.agents.chief_of_staff import _wiki_auto_publish_clean_drafts
+        from app.spine.events import append_event
+        from datetime import datetime, timezone
+
+        turn_start = datetime.now(timezone.utc).isoformat()
+        # Pricing's draft lands + gets a clean critique
+        pricing_draft_id = write_artifact(
+            agent="Pricing & Promo", kind="plan", title="Pricing draft",
+            body_md="markdown 25%", refs=[], stage="draft",
+        )
+        clean_id = write_artifact(
+            agent="Critic", kind="critique", title="C",
+            body_md=(
+                "## Verified\nok\n## Gaps\n*No material findings.*\n"
+                "## Risks\n*No material findings.*\n## Counter-recommendation\nhold\n"
+            ),
+            refs=[pricing_draft_id], stage="critique",
+        )
+        append_event(
+            agent="Critic", kind="observation",
+            payload={"artifact_title": "C", "stage": "critique"},
+            artifact_id=clean_id,
+        )
+        # Analyst (un-reviewed) and Pricing both author wiki edits
+        wiki.propose_edit("policy/x", "P", "B", "Analyst")
+        wiki.propose_edit("policy/y", "P2", "B2", "Pricing & Promo")
+
+        _wiki_auto_publish_clean_drafts(turn_start, llm=None)
+        # Pricing's wiki edit publishes (its draft was reviewed clean).
+        self.assertEqual(wiki.get_page("policy/y").status, "published")
+        # Analyst's wiki edit stays a draft (no Analyst draft was
+        # critiqued this turn).
+        self.assertEqual(wiki.get_page("policy/x").status, "draft")
 
     def test_curator_drafts_only_auto_publish_via_first_pass(self):
         """Auto-publish must run exactly ONCE per turn — before the
