@@ -154,6 +154,166 @@ class IntegrationLayerTest(unittest.TestCase):
         self.assertEqual(len(out), 4)
         self.assertFalse(truncated)
 
+    def test_mautic_apply_campaign_launch_creates_draft(self):
+        """`campaign_launch` apply path POSTs /api/campaigns/new and writes
+        the returned id back to outbox_actions as draft_created.
+        """
+        from app.integrations.systems import MauticAdapter
+        from app.integrations import store
+
+        os.environ["MAUTIC_BASE_URL"] = "http://stub"
+        os.environ["MAUTIC_USERNAME"] = "admin"
+        os.environ["MAUTIC_PASSWORD"] = "pw"
+
+        adapter = MauticAdapter()
+        self.assertTrue(adapter.configured())
+
+        row = store.create_outbox_action(
+            system_id="mautic",
+            action_queue_id=None,
+            agent="Marketing",
+            action_type="campaign_launch",
+            title="Summer Apparel Push",
+            external_domain="Campaign",
+            payload={
+                "campaign_id": "cmp-test1",
+                "category": "summer_apparel",
+                "segment_id": "seg-vacation",
+                "channel": "paid social",
+                "offer": "25% off",
+                "budget": 12000,
+                "projected_lift": 0.2,
+                "projected_roi": 1.8,
+            },
+            configured=True,
+        )
+        action_id = row["id"]
+
+        captured: dict = {}
+
+        class _StubClient:
+            def request(self, path: str, method: str = "GET", payload: dict | None = None):
+                captured["path"] = path
+                captured["method"] = method
+                captured["payload"] = payload
+                return {"campaign": {"id": 4242, "name": "Summer Apparel Push"}}
+
+        adapter._client = lambda: _StubClient()  # type: ignore[method-assign]
+        result = adapter.apply_outbound(action_id)
+        self.assertEqual(result["status"], "draft_created")
+        self.assertEqual(str(result["external_id"]), "4242")
+        self.assertEqual(captured["method"], "POST")
+        self.assertIn("/api/campaigns/new", captured["path"])
+        self.assertEqual(captured["payload"]["isPublished"], False)
+        self.assertIn("[retail-os:cmp-test1]", captured["payload"]["description"])
+
+    def test_mautic_apply_campaign_brief_reuses_existing_segment(self):
+        """`campaign_brief` apply path is idempotent — if a segment with the
+        derived alias exists, return its id rather than POSTing /new.
+        """
+        from app.integrations.systems import MauticAdapter
+        from app.integrations import store
+
+        os.environ["MAUTIC_BASE_URL"] = "http://stub"
+        os.environ["MAUTIC_USERNAME"] = "admin"
+        os.environ["MAUTIC_PASSWORD"] = "pw"
+
+        adapter = MauticAdapter()
+        row = store.create_outbox_action(
+            system_id="mautic",
+            action_queue_id=None,
+            agent="Marketing",
+            action_type="campaign_brief",
+            title="Summer Apparel Brief",
+            external_domain="Segment Email",
+            payload={
+                "segment_id": "seg-vacation",
+                "segment_name": "Vacation planners",
+                "category": "summer_apparel",
+                "channel": "paid social",
+                "offer": "25% off",
+            },
+            configured=True,
+        )
+        action_id = row["id"]
+
+        calls: list[tuple[str, str]] = []
+
+        class _ExistingClient:
+            def request(self, path: str, method: str = "GET", payload: dict | None = None):
+                calls.append((method, path))
+                # Return an existing list on the alias-eq lookup.
+                if "where" in path and "alias" in path:
+                    return {"lists": {"7": {"id": 7, "alias": "seg_vacation"}}}
+                # If we ever POST, the test will catch it via the assertion.
+                return {}
+
+        adapter._client = lambda: _ExistingClient()  # type: ignore[method-assign]
+        result = adapter.apply_outbound(action_id)
+        self.assertEqual(result["status"], "draft_created")
+        self.assertEqual(str(result["external_id"]), "7")
+        # No POST should have been issued — segment already existed.
+        self.assertTrue(all(method == "GET" for method, _ in calls))
+
+    def test_mautic_apply_unsupported_action_falls_back_to_mock(self):
+        """Action types not in LIVE_ACTION_TYPES should fall through to the
+        base mock-apply behaviour even when the adapter is configured.
+        """
+        from app.integrations.systems import MauticAdapter
+        from app.integrations import store
+
+        os.environ["MAUTIC_BASE_URL"] = "http://stub"
+        os.environ["MAUTIC_USERNAME"] = "admin"
+        os.environ["MAUTIC_PASSWORD"] = "pw"
+
+        adapter = MauticAdapter()
+        row = store.create_outbox_action(
+            system_id="mautic",
+            action_queue_id=None,
+            agent="Marketing",
+            action_type="campaign_measurement",
+            title="Measure cmp-x",
+            external_domain="Campaign Report",
+            payload={"campaign_id": "cmp-x"},
+            configured=True,
+        )
+        action_id = row["id"]
+        # No _client stub; if dispatch tried to talk to the network, this
+        # would raise. The fallback should never reach _dispatch_outbound.
+        # Base adapter returns draft_created for configured / applied_mock
+        # for unconfigured — in both cases the unsupported type was a no-op.
+        result = adapter.apply_outbound(action_id)
+        self.assertEqual(result["status"], "draft_created")
+
+    def test_mautic_apply_missing_payload_lands_in_error(self):
+        """campaign_launch with no campaign_id has nothing to write — the
+        outcome carries no external_id, so the row must land in `error`,
+        not `draft_created`.
+        """
+        from app.integrations.systems import MauticAdapter
+        from app.integrations import store
+
+        os.environ["MAUTIC_BASE_URL"] = "http://stub"
+        os.environ["MAUTIC_USERNAME"] = "admin"
+        os.environ["MAUTIC_PASSWORD"] = "pw"
+
+        adapter = MauticAdapter()
+        row = store.create_outbox_action(
+            system_id="mautic",
+            action_queue_id=None,
+            agent="Marketing",
+            action_type="campaign_launch",
+            title="Bad payload",
+            external_domain="Campaign",
+            payload={},  # no campaign_id
+            configured=True,
+        )
+        action_id = row["id"]
+        # No client stub — the helper should bail before calling _client().
+        result = adapter.apply_outbound(action_id)
+        self.assertEqual(result["status"], "error")
+        self.assertIn("campaign_id", result["result"]["error"])
+
     def test_mautic_list_flags_truncation_when_max_rows_hit(self):
         """If a caller does pass an explicit max_rows and the API has more
         rows than that, the helper must return truncated=True. The default
