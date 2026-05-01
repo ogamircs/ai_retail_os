@@ -21,6 +21,27 @@ export type ArtifactMeta = {
   kind: string;
   title: string;
   refs?: string[];
+  /**
+   * Track 2 A2-A4 lifecycle stage. One of:
+   *   draft, critique, peer_review, revision, final.
+   * Optional — older artifacts predating the mesh upgrade carry no
+   * stage; the UI treats absence as `final` so legacy reports remain
+   * actionable.
+   */
+  stage?: string;
+};
+
+export type MeshStatus = {
+  enabled: boolean;
+  config: {
+    max_revision_rounds: number;
+    max_critic_per_draft: number;
+    turn_token_budget: number;
+    turn_wallclock_seconds: number;
+  };
+  recent_downgrade: { ts: string; payload: Record<string, unknown> } | null;
+  downgrade_count_window: number;
+  window_seconds: number;
 };
 
 export type ConfigInfo = {
@@ -265,6 +286,11 @@ export async function listSyncRuns(): Promise<SyncRun[]> {
   const r = await fetch("/api/integrations/sync-runs?limit=12");
   const j = await r.json();
   return j.sync_runs;
+}
+
+export async function getMeshStatus(windowSeconds = 300): Promise<MeshStatus> {
+  const r = await fetch(`/api/mesh/status?window_seconds=${windowSeconds}`);
+  return await r.json();
 }
 
 export async function syncIntegration(systemId: string): Promise<{

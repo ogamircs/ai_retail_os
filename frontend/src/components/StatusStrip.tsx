@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ConfigInfo, getConfig, setProvider, Kpi } from "../lib/api";
+import { ConfigInfo, getConfig, getMeshStatus, MeshStatus, setProvider, Kpi } from "../lib/api";
 import { useDashboardData } from "../lib/data";
 import { useDrawer } from "../lib/drawerContext";
 import "./StatusStrip.css";
@@ -66,6 +66,7 @@ export default function StatusStrip() {
   const { open } = useDrawer();
   const [cfg, setCfg] = useState<ConfigInfo | null>(null);
   const [now, setNow] = useState<string>(utcClock());
+  const [mesh, setMesh] = useState<MeshStatus | null>(null);
 
   useEffect(() => {
     getConfig().then(setCfg).catch(() => {});
@@ -74,6 +75,27 @@ export default function StatusStrip() {
   useEffect(() => {
     const id = setInterval(() => setNow(utcClock()), 1000);
     return () => clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const tick = () => {
+      // Track 2 A6: poll every 5s for recent mesh_downgrade events. The
+      // chip surfaces when the orchestrator hit a token/wall-clock cap
+      // in the last 5 minutes, so the operator knows the latest reply
+      // skipped review-loop convergence.
+      getMeshStatus(300)
+        .then((s) => {
+          if (!cancelled) setMesh(s);
+        })
+        .catch(() => {});
+    };
+    tick();
+    const id = setInterval(tick, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
   }, []);
 
   const change = async (p: string) => {
@@ -112,6 +134,19 @@ export default function StatusStrip() {
         </span>
       ))}
       {error && <span className="link-err">data link · err</span>}
+      {mesh?.recent_downgrade && (
+        <span
+          className="mesh-down"
+          data-testid="mesh-downgrade-chip"
+          title={
+            `mesh downgraded to single-pass — ` +
+            `${(mesh.recent_downgrade.payload as { reason?: string })?.reason ?? "guardrail hit"}` +
+            ` (${mesh.downgrade_count_window} downgrade${mesh.downgrade_count_window === 1 ? "" : "s"} in last ${Math.round(mesh.window_seconds / 60)}m)`
+          }
+        >
+          MESH ↓
+        </span>
+      )}
       <span className="spacer" />
       <button
         className={`approve ${approveN > 0 ? "approve-on" : ""}`}

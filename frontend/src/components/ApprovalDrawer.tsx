@@ -131,20 +131,43 @@ function ApprovalContent() {
       )}
 
       <footer className="drawer-actions">
-        {phase === "idle" && (
-          <>
-            <button
-              className="primary"
-              onClick={apply}
-              disabled={!external}
-              data-testid="drawer-apply"
-              title={!external ? "no external action linked" : "apply via integration adapter"}
-            >
-              apply → external
-            </button>
-            <button onClick={reject} data-testid="drawer-reject">reject</button>
-          </>
-        )}
+        {phase === "idle" && (() => {
+          // Track 2 A4: refuse to fire on a non-`final` artifact. Drafts /
+          // revisions in flight aren't operator-actionable yet; the Critic
+          // round may still flag risks. Stage absence (legacy artifacts)
+          // is treated as `final`.
+          const stage = artifact?.stage ?? "final";
+          const stageBlocked = !!action?.artifact_id && stage !== "final";
+          return (
+            <>
+              <button
+                className="primary"
+                onClick={apply}
+                disabled={!external || stageBlocked}
+                data-testid="drawer-apply"
+                title={
+                  stageBlocked
+                    ? `artifact stage='${stage}' — wait for the mesh to converge to 'final'`
+                    : !external
+                      ? "no external action linked"
+                      : "apply via integration adapter"
+                }
+              >
+                apply → external
+              </button>
+              <button onClick={reject} data-testid="drawer-reject">reject</button>
+              {stageBlocked && (
+                <span
+                  className="chip stage-draft"
+                  data-testid="drawer-stage-block"
+                  title="apply is gated until the artifact reaches stage='final'"
+                >
+                  stage · {stage.replace("_", " ")}
+                </span>
+              )}
+            </>
+          );
+        })()}
         {phase === "applying" && <span className="dim">applying…</span>}
         {phase === "applied" && (
           <span className="chip chip-good" data-testid="drawer-applied">

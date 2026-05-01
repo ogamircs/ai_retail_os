@@ -143,6 +143,7 @@ def _tool_write_artifact(args: dict) -> dict:
         title=args.get("title", "Critique"),
         body_md=args.get("body_md", ""),
         refs=refs,
+        stage="critique",
     )
     eid = append_event(
         agent=NAME,
