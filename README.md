@@ -314,6 +314,8 @@ curl -s -X POST -H 'Content-Type: application/json' \
 
 In the cockpit's Integrations tab the `medusa` row will show a green `connected` chip. Click `sync` to pull live Sales Channels, Stock Locations, Products, and Orders into `record_cache` + `external_refs`. Approve a `Merchandiser → store_transfer` or `Fulfillment → fulfillment_routing` via the drawer's `apply → external` button — the adapter records the action as auditable metadata on the seeded entity (Medusa v2 has no inter-location transfer primitive, so we stash the audit trail directly on the from-store stock location or the Retail Demo sales channel).
 
+A walkthrough with CLI-equivalent verification steps lives in [`docs/uat/2026-04-30-medusa-p5-store-transfer-demo.md`](docs/uat/2026-04-30-medusa-p5-store-transfer-demo.md).
+
 ### What lands in Medusa per action type
 
 | `action_type` | Medusa target | What gets written |
