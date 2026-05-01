@@ -121,6 +121,58 @@ class TracingProviderEnabledNoMlflowTest(unittest.TestCase):
         finally:
             mesh_tracing._try_import_mlflow = original_loader  # type: ignore
 
+    def test_loader_does_not_clobber_caller_set_experiment(self):
+        """The lazy mlflow loader must not override an experiment the
+        caller (e.g. run_eval.py) already set. Otherwise the first
+        traced chat() during eval runs would reset the experiment back
+        to the cockpit default and eval runs would land in the wrong
+        namespace.
+        """
+        # Stub the mlflow module surface — we only need set_tracking_uri
+        # and set_experiment to assert they were/weren't called.
+        os.environ.pop("MLFLOW_TRACKING_URI", None)
+        os.environ.pop("MLFLOW_EXPERIMENT_NAME", None)
+
+        called: dict[str, list] = {"uri": [], "exp": []}
+
+        class _StubMlflow:
+            @staticmethod
+            def set_tracking_uri(u):
+                called["uri"].append(u)
+
+            @staticmethod
+            def set_experiment(e):
+                called["exp"].append(e)
+
+        # Inject the stub by patching the import surface. Easiest way
+        # without a real mlflow install: monkey-patch sys.modules.
+        import sys as _sys
+
+        old_mod = _sys.modules.get("mlflow")
+        _sys.modules["mlflow"] = _StubMlflow  # type: ignore
+        try:
+            mesh_tracing._mlflow_module = None
+            mesh_tracing._mlflow_load_attempted = False
+            mod = mesh_tracing._try_import_mlflow()
+            self.assertIs(mod, _StubMlflow)
+            # No env vars set → loader must not touch globals.
+            self.assertEqual(called["uri"], [])
+            self.assertEqual(called["exp"], [])
+
+            # With MLFLOW_TRACKING_URI set, only the URI should be set.
+            mesh_tracing._mlflow_module = None
+            mesh_tracing._mlflow_load_attempted = False
+            os.environ["MLFLOW_TRACKING_URI"] = "http://localhost:5500"
+            mesh_tracing._try_import_mlflow()
+            self.assertEqual(called["uri"], ["http://localhost:5500"])
+            self.assertEqual(called["exp"], [])
+        finally:
+            if old_mod is not None:
+                _sys.modules["mlflow"] = old_mod
+            else:
+                _sys.modules.pop("mlflow", None)
+            os.environ.pop("MLFLOW_TRACKING_URI", None)
+
 
 class PromptRegistryTest(unittest.TestCase):
     """Track 4 M4 — alias resolution chain. Uses a tempdir-scoped

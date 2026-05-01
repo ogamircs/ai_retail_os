@@ -23,6 +23,8 @@ MLFLOW_TRACE_ENABLED=1
 
 When `MLFLOW_TRACE_ENABLED=1` is set, the backend's agent run-loop (Track 2 chief_of_staff) opens one MLflow run per operator turn with nested runs per specialist delegate + critic round. Without the env var, the trace logger no-ops so the cockpit demo path works unchanged when MLflow isn't running.
 
+By default, runs land in MLflow's `Default` experiment. Pin the cockpit's runs into a dedicated experiment by also setting `MLFLOW_EXPERIMENT_NAME=ai-retail-os/cockpit` (or any name you like) in `backend/.env`. The trace logger only reads the env var — it never overrides an experiment the caller has already set, so the eval harness's per-scenario experiments (`eval/<scenario>/<sha>`) stay intact.
+
 ## Lifecycle
 
 | Target | What it does |

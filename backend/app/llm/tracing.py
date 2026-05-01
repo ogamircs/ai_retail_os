@@ -61,14 +61,21 @@ def _try_import_mlflow() -> Any | None:
     try:
         import mlflow  # type: ignore
 
+        # Only honour env-var-driven config so we never clobber state
+        # the *caller* has already set (e.g. run_eval.py calls
+        # `mlflow.set_experiment(f"eval/{scenario}/{sha}")` before any
+        # turn fires; if we then unconditionally set the experiment
+        # back to a default, eval runs land in the wrong namespace).
+        # URI: set only when MLFLOW_TRACKING_URI is in env. Experiment:
+        # set only when MLFLOW_EXPERIMENT_NAME is in env. Without
+        # either, we fall through to whatever mlflow's globals already
+        # carry (the caller's choice, or MLflow's "Default" experiment).
         uri = os.getenv("MLFLOW_TRACKING_URI")
         if uri:
             mlflow.set_tracking_uri(uri)
-        # The default experiment exists in every MLflow install — fall
-        # back to it when the operator hasn't pinned one. Eval runs
-        # (Track 4 M3) override per scenario.
-        exp = os.getenv("MLFLOW_EXPERIMENT_NAME", "ai-retail-os/cockpit")
-        mlflow.set_experiment(exp)
+        exp = os.getenv("MLFLOW_EXPERIMENT_NAME")
+        if exp:
+            mlflow.set_experiment(exp)
         _mlflow_module = mlflow
     except Exception:
         _mlflow_module = None
