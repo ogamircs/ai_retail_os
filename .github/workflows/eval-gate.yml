@@ -10,7 +10,9 @@
 # 0.20 → 2.4 points; 0.30 → 3.6 points; etc).
 #
 # Required repo secrets:
-#   ANTHROPIC_API_KEY | OPENAI_API_KEY | GOOGLE_API_KEY (any one is enough)
+#   ANTHROPIC_API_KEY | OPENAI_API_KEY | GOOGLE_API_KEY | GEMINI_API_KEY
+#   (any one is enough; GOOGLE_API_KEY and GEMINI_API_KEY are aliased
+#   for the Google provider, mirroring backend/app/config.py)
 #
 # Optional secrets / env:
 #   MLFLOW_TRACKING_URI       — push run scores into the team's MLflow
@@ -68,6 +70,11 @@ jobs:
 
       - name: Detect provider key
         id: keycheck
+        # Mirror backend/app/config.py + tests/agents/eval/test_eval.py:
+        # the Google provider accepts EITHER GOOGLE_API_KEY or
+        # GEMINI_API_KEY in env. Repos that only set GEMINI_API_KEY
+        # would otherwise silently skip the eval gate even though the
+        # runtime would have happily used it.
         run: |
           if [ -n "${{ secrets.ANTHROPIC_API_KEY }}" ]; then
             echo "provider=anthropic" >> "$GITHUB_OUTPUT"
@@ -78,6 +85,9 @@ jobs:
           elif [ -n "${{ secrets.GOOGLE_API_KEY }}" ]; then
             echo "provider=google" >> "$GITHUB_OUTPUT"
             echo "GOOGLE_API_KEY=${{ secrets.GOOGLE_API_KEY }}" >> "$GITHUB_ENV"
+          elif [ -n "${{ secrets.GEMINI_API_KEY }}" ]; then
+            echo "provider=google" >> "$GITHUB_OUTPUT"
+            echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}" >> "$GITHUB_ENV"
           else
             echo "provider=" >> "$GITHUB_OUTPUT"
           fi
@@ -107,4 +117,4 @@ jobs:
       - name: Skip notice (no provider key in repo secrets)
         if: steps.keycheck.outputs.provider == ''
         run: |
-          echo "::warning ::eval-gate: no LLM provider secret configured (ANTHROPIC_API_KEY / OPENAI_API_KEY / GOOGLE_API_KEY). Skipping eval harness."
+          echo "::warning ::eval-gate: no LLM provider secret configured (ANTHROPIC_API_KEY / OPENAI_API_KEY / GOOGLE_API_KEY / GEMINI_API_KEY). Skipping eval harness."
