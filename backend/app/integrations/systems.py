@@ -1954,14 +1954,31 @@ class AkeneoAdapter(IntegrationAdapter):
             records_written += 1
             records_read += 1
 
-        # Products: local_id is the SKU. Akeneo's `identifier` is the
-        # legacy product code; CE 7+ also exposes UUID-only products
-        # (no identifier). Try in order: identifier → uuid → the
-        # [retail-os:<sku>] marker the seed embeds in description.
-        # Dropping rows that lack `identifier` would silently omit
-        # UUID-only products from record_cache / external_refs even
-        # though we have a perfectly usable id elsewhere.
-        for prod in self._api_list("products"):
+        # Products: Akeneo CE 7+ split the surface into two endpoints —
+        # `/api/rest/v1/products` (identifier-based, legacy; *omits*
+        # products without an identifier) and `/api/rest/v1/products-uuid`
+        # (UUID-keyed, returns every product). Querying only the legacy
+        # endpoint silently truncates UUID-only catalogs. We pull both
+        # and dedupe on the resolved external_id, falling back to a
+        # single endpoint only when the other 404s on older minors.
+        seen_ids: set[str] = set()
+        product_pages: list[list[dict[str, Any]]] = []
+        try:
+            product_pages.append(self._api_list("products-uuid"))
+        except HTTPError as e:
+            if e.code != 404:
+                raise
+            # Older Akeneo CE — only the identifier endpoint exists.
+        try:
+            product_pages.append(self._api_list("products"))
+        except HTTPError as e:
+            if e.code != 404:
+                raise
+            # Modern Akeneo can theoretically retire `products` later;
+            # if it's gone, the products-uuid pull above already covers
+            # the catalog.
+
+        for prod in (p for page in product_pages for p in page):
             description = ""
             desc_values = ((prod.get("values") or {}).get("description") or [])
             if isinstance(desc_values, list) and desc_values:
@@ -1976,6 +1993,9 @@ class AkeneoAdapter(IntegrationAdapter):
             )
             if external_id is None:
                 continue
+            if external_id in seen_ids:
+                continue
+            seen_ids.add(external_id)
             local_id = prod.get("identifier") or marker_id
             self._cache("Product", external_id, prod, local_id)
             domains["Product"] = domains.get("Product", 0) + 1

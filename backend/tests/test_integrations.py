@@ -821,6 +821,91 @@ class IntegrationLayerTest(unittest.TestCase):
             ["/api/rest/v1/products?limit=100", "/api/rest/v1/products?page=2"],
         )
 
+    def test_akeneo_live_sync_pulls_uuid_endpoint_for_identifier_less_products(self):
+        """Akeneo CE 7+ identifier-based /api/rest/v1/products doesn't
+        return products without an identifier — those only show up under
+        /api/rest/v1/products-uuid. Sync must query both and dedupe so
+        UUID-only products land in record_cache.
+        """
+        from app.integrations.systems import AkeneoAdapter
+        from app.integrations import store
+
+        os.environ["AKENEO_BASE_URL"] = "http://stub"
+        os.environ["AKENEO_CLIENT_ID"] = "cid"
+        os.environ["AKENEO_SECRET"] = "sec"
+        os.environ["AKENEO_USERNAME"] = "admin"
+        os.environ["AKENEO_PASSWORD"] = "pw"
+
+        adapter = AkeneoAdapter()
+        adapter._admin_token = "tok"
+        adapter._login = lambda: "tok"  # type: ignore[method-assign]
+
+        # uuid endpoint returns ALL products (with + without identifier)
+        # legacy /products endpoint returns only ones with identifiers.
+        # Dedup must collapse the overlap.
+        uuid_endpoint = [
+            {"identifier": "SKU-A", "uuid": "uuid-a"},
+            {"identifier": None, "uuid": "uuid-b"},
+        ]
+        legacy_endpoint = [
+            {"identifier": "SKU-A", "uuid": "uuid-a"},  # duplicate of uuid endpoint
+        ]
+
+        class _Stub:
+            def request(self, path, method="GET", payload=None):
+                if path.startswith("/api/rest/v1/categories"):
+                    return {"_embedded": {"items": []}}
+                if path.startswith("/api/rest/v1/products-uuid"):
+                    return {"_embedded": {"items": uuid_endpoint}}
+                if path.startswith("/api/rest/v1/products"):
+                    return {"_embedded": {"items": legacy_endpoint}}
+                return {}
+
+        adapter._client = lambda: _Stub()  # type: ignore[method-assign]
+        result = adapter.sync_inbound()
+        self.assertEqual(result.status, "success")
+        # Two unique products (SKU-A from either endpoint, uuid-b from
+        # uuid endpoint only). The duplicate must NOT inflate the count.
+        self.assertEqual(result.summary["domains"].get("Product"), 2)
+        bundle = store.list_records(system_id="akeneo", domain="Product", limit=10)
+        self.assertEqual(
+            {r.get("external_id") for r in bundle["records"]},
+            {"SKU-A", "uuid-b"},
+        )
+
+    def test_akeneo_live_sync_tolerates_missing_uuid_endpoint(self):
+        """Older Akeneo minors don't expose /products-uuid (404). The
+        sync must keep going against /products instead of failing the
+        whole run.
+        """
+        from urllib.error import HTTPError
+        from app.integrations.systems import AkeneoAdapter
+
+        os.environ["AKENEO_BASE_URL"] = "http://stub"
+        os.environ["AKENEO_CLIENT_ID"] = "cid"
+        os.environ["AKENEO_SECRET"] = "sec"
+        os.environ["AKENEO_USERNAME"] = "admin"
+        os.environ["AKENEO_PASSWORD"] = "pw"
+
+        adapter = AkeneoAdapter()
+        adapter._admin_token = "tok"
+        adapter._login = lambda: "tok"  # type: ignore[method-assign]
+
+        class _Stub:
+            def request(self, path, method="GET", payload=None):
+                if path.startswith("/api/rest/v1/categories"):
+                    return {"_embedded": {"items": []}}
+                if path.startswith("/api/rest/v1/products-uuid"):
+                    raise HTTPError(url=path, code=404, msg="Not Found", hdrs=None, fp=None)
+                if path.startswith("/api/rest/v1/products"):
+                    return {"_embedded": {"items": [{"identifier": "SKU-X"}]}}
+                return {}
+
+        adapter._client = lambda: _Stub()  # type: ignore[method-assign]
+        result = adapter.sync_inbound()
+        self.assertEqual(result.status, "success")
+        self.assertEqual(result.summary["domains"].get("Product"), 1)
+
     def test_akeneo_live_sync_falls_back_to_uuid_then_marker(self):
         """Akeneo CE 7+ allows products without `identifier` (UUID-only).
         The sync must keep them — fall back to `uuid`, then to the
