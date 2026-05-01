@@ -6,9 +6,13 @@ ERPNEXT_COMPOSE := docker compose -p ai-retail-erpnext -f $(ERPNEXT_DIR)/docker-
 MAUTIC_DIR := infra/mautic
 MAUTIC_COMPOSE := docker compose -p ai-retail-mautic -f $(MAUTIC_DIR)/docker-compose.yml
 
+MEDUSA_DIR := infra/medusa
+MEDUSA_COMPOSE := docker compose -p ai-retail-medusa -f $(MEDUSA_DIR)/docker-compose.yml
+
 .PHONY: help \
         erpnext-up erpnext-down erpnext-bootstrap erpnext-seed erpnext-logs erpnext-status erpnext-nuke \
-        mautic-up mautic-down mautic-bootstrap mautic-seed mautic-logs mautic-status mautic-nuke
+        mautic-up mautic-down mautic-bootstrap mautic-seed mautic-logs mautic-status mautic-nuke \
+        medusa-up medusa-down medusa-bootstrap medusa-logs medusa-status medusa-nuke
 
 help:
 	@echo "ERPNext:"
@@ -28,6 +32,14 @@ help:
 	@echo "  mautic-logs        tail logs from the stack"
 	@echo "  mautic-down        stop the stack (volumes preserved)"
 	@echo "  mautic-nuke        stop and wipe volumes (full reset)"
+	@echo ""
+	@echo "Medusa:"
+	@echo "  medusa-up          build + start Medusa stack (postgres + redis + medusa on :9000)"
+	@echo "  medusa-bootstrap   db:migrate + create admin user (idempotent)"
+	@echo "  medusa-status      show running containers"
+	@echo "  medusa-logs        tail logs from the stack"
+	@echo "  medusa-down        stop the stack (volumes preserved)"
+	@echo "  medusa-nuke        stop and wipe volumes (full reset)"
 
 erpnext-up:
 	$(ERPNEXT_COMPOSE) up -d
@@ -70,3 +82,21 @@ mautic-bootstrap:
 
 mautic-seed:
 	python3 $(MAUTIC_DIR)/seed.py
+
+medusa-up:
+	$(MEDUSA_COMPOSE) up -d --build
+
+medusa-down:
+	$(MEDUSA_COMPOSE) down
+
+medusa-nuke:
+	$(MEDUSA_COMPOSE) down -v
+
+medusa-status:
+	$(MEDUSA_COMPOSE) ps
+
+medusa-logs:
+	$(MEDUSA_COMPOSE) logs -f --tail=50
+
+medusa-bootstrap:
+	bash $(MEDUSA_DIR)/bootstrap.sh

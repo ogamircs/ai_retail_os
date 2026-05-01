@@ -120,7 +120,14 @@ For every system, the per-system phases are the same:
   - [x] Live-path tests already env-gated (covered in P3 + P4); README now points at them so CI stays mock-only by design.
 
 ## Medusa
-- [ ] P1 · Local instance
+
+- [x] **P1 · Local instance** _(branch: `feature/medusa-p1-instance` — open PR pending)_
+  - [x] `infra/medusa/Dockerfile` — minimal `node:22-alpine` image that clones `medusajs/medusa-starter-default` shallowly + `yarn install --frozen-lockfile`. Build args (`MEDUSA_STARTER_REPO`, `MEDUSA_STARTER_REF`) for tracking a fork. Medusa doesn't ship an official Docker image, so this is the upstream-recommended pattern.
+  - [x] `infra/medusa/docker-compose.yml` — postgres:15-alpine + redis:7-alpine + the custom medusa service on :9000. Compose builds the image inline; volumes for db data, redis data, and `/app/uploads` so operator-uploaded media survives restarts.
+  - [x] `infra/medusa/bootstrap.sh` — runs `npx medusa db:migrate` (idempotent) and `npx medusa user --email --password` (tolerates "already exists" exit). Same `compose exec -e` pattern as Mautic so admin password apostrophes don't break the inner shell. Prints API base + admin creds + `MEDUSA_BASE_URL` / `MEDUSA_ADMIN_EMAIL` / `MEDUSA_ADMIN_PASSWORD` env block.
+  - [x] `infra/medusa/README.md` — quick-start, image build rationale, lifecycle table, the `/admin/*` endpoints the cockpit will hit in P3+, troubleshooting cheat sheet, reset path.
+  - [x] Root `Makefile` targets: `medusa-up`, `medusa-down`, `medusa-bootstrap`, `medusa-logs`, `medusa-status`, `medusa-nuke` (mirrors the erpnext/mautic patterns; `medusa-up` does `up -d --build` since the image is local).
+
 - [ ] P2 · Demo seed
 - [ ] P3 · Inbound sync
 - [ ] P4 · Live outbound apply
