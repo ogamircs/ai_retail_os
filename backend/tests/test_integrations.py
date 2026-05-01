@@ -314,6 +314,79 @@ class IntegrationLayerTest(unittest.TestCase):
         self.assertEqual(result["status"], "error")
         self.assertIn("campaign_id", result["result"]["error"])
 
+    def test_medusa_admin_list_paginates_until_count_consumed(self):
+        """`MedusaAdapter._admin_list` walks offset until `count` is met.
+        A single Medusa instance with more rows than `limit` would otherwise
+        be truncated at page 1.
+        """
+        from app.integrations.systems import MedusaAdapter
+
+        os.environ["MEDUSA_BASE_URL"] = "http://stub"
+        os.environ["MEDUSA_ADMIN_EMAIL"] = "admin@retail.local"
+        os.environ["MEDUSA_ADMIN_PASSWORD"] = "pw"
+
+        adapter = MedusaAdapter()
+        all_rows = [{"id": f"prd_{i}"} for i in range(1, 8)]  # 7 rows
+
+        class _StubClient:
+            def request(self, path: str, method: str = "GET", payload: dict | None = None):
+                qs = path.split("?", 1)[1]
+                params = dict(p.split("=", 1) for p in qs.split("&"))
+                offset = int(params["offset"])
+                limit = int(params["limit"])
+                page = all_rows[offset : offset + limit]
+                return {"products": page, "count": len(all_rows)}
+
+        adapter._admin_token = "stub-token"
+        adapter._client = lambda: _StubClient()  # type: ignore[method-assign]
+        out, truncated = adapter._admin_list("products", "products", limit=3)
+        self.assertEqual(len(out), 7)
+        self.assertFalse(truncated)
+        self.assertEqual({r["id"] for r in out}, {f"prd_{i}" for i in range(1, 8)})
+
+    def test_medusa_admin_list_flags_truncation_when_max_rows_hit(self):
+        from app.integrations.systems import MedusaAdapter
+
+        os.environ["MEDUSA_BASE_URL"] = "http://stub"
+        os.environ["MEDUSA_ADMIN_EMAIL"] = "admin@retail.local"
+        os.environ["MEDUSA_ADMIN_PASSWORD"] = "pw"
+
+        adapter = MedusaAdapter()
+        all_rows = [{"id": str(i)} for i in range(1, 11)]
+
+        class _BigClient:
+            def request(self, path: str, method: str = "GET", payload: dict | None = None):
+                qs = path.split("?", 1)[1]
+                params = dict(p.split("=", 1) for p in qs.split("&"))
+                offset = int(params["offset"])
+                limit = int(params["limit"])
+                page = all_rows[offset : offset + limit]
+                return {"products": page, "count": len(all_rows)}
+
+        adapter._admin_token = "stub-token"
+        adapter._client = lambda: _BigClient()  # type: ignore[method-assign]
+        out, truncated = adapter._admin_list("products", "products", limit=3, max_rows=5)
+        self.assertEqual(len(out), 5)
+        self.assertTrue(truncated)
+
+    def test_medusa_configured_requires_admin_creds(self):
+        """env_keys only checks MEDUSA_BASE_URL; the override must also
+        require admin email + password — without them there's nothing to
+        log in with.
+        """
+        from app.integrations.systems import MedusaAdapter
+
+        os.environ["MEDUSA_BASE_URL"] = "http://stub"
+        os.environ.pop("MEDUSA_ADMIN_EMAIL", None)
+        os.environ.pop("MEDUSA_ADMIN_PASSWORD", None)
+        self.assertFalse(MedusaAdapter().configured())
+
+        os.environ["MEDUSA_ADMIN_EMAIL"] = "admin@retail.local"
+        self.assertFalse(MedusaAdapter().configured())  # still missing pw
+
+        os.environ["MEDUSA_ADMIN_PASSWORD"] = "pw"
+        self.assertTrue(MedusaAdapter().configured())
+
     def test_mautic_list_flags_truncation_when_max_rows_hit(self):
         """If a caller does pass an explicit max_rows and the API has more
         rows than that, the helper must return truncated=True. The default

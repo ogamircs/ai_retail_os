@@ -128,15 +128,23 @@ For every system, the per-system phases are the same:
   - [x] `infra/medusa/README.md` — quick-start, image build rationale, lifecycle table, the `/admin/*` endpoints the cockpit will hit in P3+, troubleshooting cheat sheet, reset path.
   - [x] Root `Makefile` targets: `medusa-up`, `medusa-down`, `medusa-bootstrap`, `medusa-logs`, `medusa-status`, `medusa-nuke` (mirrors the erpnext/mautic patterns; `medusa-up` does `up -d --build` since the image is local).
 
-- [x] **P2 · Demo seed** _(branch: `feature/medusa-p2-seed` — open PR pending)_
+- [x] **P2 · Demo seed** _(merged: `feature/medusa-p2-seed` → main)_
   - [x] `infra/medusa/seed.py` — REST-based, idempotent. Stdlib-only (urllib + sqlite3) so it runs against the system python with no `pip install`.
   - [x] Auth: `POST /auth/user/emailpass` for the v2 admin token, then `Authorization: Bearer <token>` for `/admin/*`.
   - [x] Creates: 1 Sales Channel ("Retail Demo"), 5 Stock Locations (one per `substrate_stores` row, store_id stashed in metadata for round-trip), 30 Products (one per `substrate_skus` × `substrate_inventory` row, single Default variant, USD pricing in cents, `manage_inventory=true` so inventory levels can be linked in P3).
   - [x] Idempotency: sales channel by `name`, stock locations by `name`, products by `handle` (slug of SKU). Re-runs print zero `++` lines.
   - [x] Walks the v2 paginated list endpoints (offset/limit, stops on `count` exhaustion or short page) so the seed never silently truncates against a large store.
   - [x] Out of scope (deferred to P3): inventory levels per (variant × stock_location), orders / customers / regions, multi-currency.
-- [ ] P3 · Inbound sync
-- [ ] P3 · Inbound sync
+
+- [x] **P3 · Inbound sync** _(branch: `feature/medusa-p3-sync` — open PR pending)_
+  - [x] `MedusaAdapter.configured()` overridden to require `MEDUSA_BASE_URL` *plus* `MEDUSA_ADMIN_EMAIL` + `MEDUSA_ADMIN_PASSWORD` — no auth means there's nothing to log into.
+  - [x] `MedusaAdapter._login()` lazy-fetches a v2 admin token via `POST /auth/user/emailpass` and caches it on the instance; `_client()` builds a `JsonHttpClient` with the `Bearer <token>` header.
+  - [x] `MedusaAdapter._admin_list(endpoint, key, limit, max_rows)` walks `offset` / `limit` until `count` is consumed (uncapped by default; explicit `max_rows` cap surfaces `truncated=True`). Mirrors the Mautic pagination shape so the cockpit's downstream `summary["truncated_domains"]` + `status="partial"` plumbing is uniform across adapters.
+  - [x] `MedusaAdapter._live_sync()` pulls Sales Channels, Stock Locations, Products, Orders. Each row caches into `record_cache`; where the seed left a recoverable spine-side id (`metadata.retail_os_store_id`, variant `sku`) we also write an `external_refs` row.
+  - [x] `external_url` deep-links per domain: `app/settings/sales-channels`, `app/settings/locations`, `app/products`, `app/orders`.
+  - [x] `sync_inbound()` dispatches: configured → `_live_sync`, else → `_mock_sync` (the prior substrate-only behaviour, unchanged).
+  - [x] Three new unit tests in `tests/test_integrations.py`: `_admin_list` paginates until `count` consumed, truncation flag fires when `max_rows` hit, `configured()` requires admin creds.
+  - [x] `backend/tests/test_integrations_medusa_live.py` — env-gated, three live tests: live sync round-trip, seeded `retail_os_store_id` external_ref round-trip, registry reports `mode=connected`. Skipped automatically when creds aren't set so CI stays mock-only.
 - [ ] P4 · Live outbound apply
 - [ ] P5 · Agent-loop UAT
 - [ ] P6 · Docs + tests
