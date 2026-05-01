@@ -145,9 +145,16 @@ For every system, the per-system phases are the same:
   - [x] `sync_inbound()` dispatches: configured → `_live_sync`, else → `_mock_sync` (the prior substrate-only behaviour, unchanged).
   - [x] Three new unit tests in `tests/test_integrations.py`: `_admin_list` paginates until `count` consumed, truncation flag fires when `max_rows` hit, `configured()` requires admin creds.
   - [x] `backend/tests/test_integrations_medusa_live.py` — env-gated, three live tests: live sync round-trip, seeded `retail_os_store_id` external_ref round-trip, registry reports `mode=connected`. Skipped automatically when creds aren't set so CI stays mock-only.
-- [ ] P4 · Live outbound apply
-- [ ] P5 · Agent-loop UAT
-- [ ] P6 · Docs + tests
+
+- [ ] P4 · Live outbound apply _(in flight on `feature/medusa-p4-apply` — see PR #23)_
+
+- [ ] **P5 · Agent-loop UAT** _(operator-driven — needs live Medusa + cockpit + screenshots)_
+  - Suggested demo: cockpit chat "rebalance summer apparel from Chicago to Miami" → Merchandiser proposes `store_transfer` → drawer apply → Medusa admin UI shows the transfer entry on Chicago's stock location under `metadata.retail_os_pending_transfers`. Second apply on the same row is a no-op (`details.reused=true`).
+  - Output should land at `docs/uat/<date>-medusa-p5-store-transfer-demo.md` with screenshots of: Merchandiser draft, drawer apply, Medusa admin UI showing the metadata stash, second cockpit sync surfacing the Medusa stock_location id back as the substrate `local_id`.
+
+- [x] **P6 · Docs + tests** _(branch: `feature/medusa-p6-docs` — open PR pending)_
+  - [x] README "Running with real Medusa" section: full quick-start (compose / bootstrap / env / seed / sanity curl), per-action-type mapping table (`store_transfer` → metadata stash on from-store stock location, `fulfillment_routing` → metadata stash on Retail Demo sales channel, anything else → base mock-apply), why metadata stashes vs orders/fulfillments/reservations, troubleshooting cheat sheet (slow first build, restart-loop on missing build output, 401 mid-session re-login, partial-sync truncation, Apple Silicon glibc fallback), live-test instructions, and reset path.
+  - [x] Live-path tests already env-gated (covered in P3 + P4); README now points at them so CI stays mock-only by design.
 
 ## OpenBoxes
 - [ ] P1 · Local instance
