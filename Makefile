@@ -15,12 +15,16 @@ OPENBOXES_COMPOSE := docker compose -p ai-retail-openboxes -f $(OPENBOXES_DIR)/d
 AKENEO_DIR := infra/akeneo
 AKENEO_COMPOSE := docker compose -p ai-retail-akeneo -f $(AKENEO_DIR)/docker-compose.yml
 
+SUPERSET_DIR := infra/superset
+SUPERSET_COMPOSE := docker compose -p ai-retail-superset -f $(SUPERSET_DIR)/docker-compose.yml
+
 .PHONY: help \
         erpnext-up erpnext-down erpnext-bootstrap erpnext-seed erpnext-logs erpnext-status erpnext-nuke \
         mautic-up mautic-down mautic-bootstrap mautic-seed mautic-logs mautic-status mautic-nuke \
         medusa-up medusa-down medusa-bootstrap medusa-seed medusa-logs medusa-status medusa-nuke \
         openboxes-up openboxes-down openboxes-bootstrap openboxes-seed openboxes-logs openboxes-status openboxes-nuke openboxes-config \
-        akeneo-up akeneo-down akeneo-bootstrap akeneo-seed akeneo-logs akeneo-status akeneo-nuke
+        akeneo-up akeneo-down akeneo-bootstrap akeneo-seed akeneo-logs akeneo-status akeneo-nuke \
+        superset-up superset-down superset-bootstrap superset-seed superset-logs superset-status superset-nuke
 
 help:
 	@echo "ERPNext:"
@@ -67,6 +71,15 @@ help:
 	@echo "  akeneo-logs           tail logs from the stack"
 	@echo "  akeneo-down           stop the stack (volumes preserved)"
 	@echo "  akeneo-nuke           stop and wipe volumes (full reset)"
+	@echo ""
+	@echo "Superset:"
+	@echo "  superset-up           start Superset stack (postgres + redis + superset on :8088)"
+	@echo "  superset-bootstrap    db upgrade + admin user + roles (idempotent)"
+	@echo "  superset-seed         register spine.db + create datasets + build demo dashboard"
+	@echo "  superset-status       show running containers"
+	@echo "  superset-logs         tail logs from the stack"
+	@echo "  superset-down         stop the stack (volumes preserved)"
+	@echo "  superset-nuke         stop and wipe volumes (full reset)"
 
 erpnext-up:
 	$(ERPNEXT_COMPOSE) up -d
@@ -175,3 +188,24 @@ akeneo-bootstrap:
 
 akeneo-seed:
 	python3 $(AKENEO_DIR)/seed.py
+
+superset-up:
+	$(SUPERSET_COMPOSE) up -d
+
+superset-down:
+	$(SUPERSET_COMPOSE) down
+
+superset-nuke:
+	$(SUPERSET_COMPOSE) down -v
+
+superset-status:
+	$(SUPERSET_COMPOSE) ps
+
+superset-logs:
+	$(SUPERSET_COMPOSE) logs -f --tail=50
+
+superset-bootstrap:
+	bash $(SUPERSET_DIR)/bootstrap.sh
+
+superset-seed:
+	python3 $(SUPERSET_DIR)/seed.py

@@ -120,5 +120,67 @@ class MedusaLiveSyncTest(unittest.TestCase):
         self.assertEqual(medusa["mode"], "connected")
 
 
+@unittest.skipIf(SKIP_REASON, SKIP_REASON)
+class MedusaLiveApplyTest(unittest.TestCase):
+    """Live-path tests for the P4 outbound apply.
+
+    Each test creates a real outbox row, calls `apply_outbound`, and
+    verifies the resulting metadata stash on the seeded entity. Idempotent
+    by payload-hash marker — re-running each test is a no-op on the
+    second pass.
+    """
+
+    def setUp(self) -> None:
+        from app.spine import db as spine_db
+        from app.substrate import seed
+
+        spine_db.init_db()
+        seed.seed()
+
+    def test_store_transfer_records_on_seeded_stock_location(self) -> None:
+        from app.integrations import registry, store
+
+        row = store.create_outbox_action(
+            system_id="medusa",
+            action_queue_id=None,
+            agent="Merchandiser",
+            action_type="store_transfer",
+            title="Live UAT transfer",
+            external_domain="Reservation",
+            payload={
+                "category": "summer_apparel",
+                "from_store": "sto-chi",
+                "to_store": "sto-mia",
+                "qty": 24,
+                "reason": "uat",
+            },
+            configured=True,
+        )
+        result = registry.apply_outbound("medusa", row["id"])
+        self.assertEqual(result["status"], "draft_created", msg=result)
+        self.assertTrue(result.get("external_id"))
+
+    def test_fulfillment_routing_records_on_retail_demo_channel(self) -> None:
+        from app.integrations import registry, store
+
+        row = store.create_outbox_action(
+            system_id="medusa",
+            action_queue_id=None,
+            agent="Fulfillment",
+            action_type="fulfillment_routing",
+            title="Live UAT routing",
+            external_domain="Fulfillment",
+            payload={
+                "category": "summer_apparel",
+                "recommended_strategy": "favor BOPIS in Miami",
+                "guardrail": "uat",
+            },
+            configured=True,
+        )
+        result = registry.apply_outbound("medusa", row["id"])
+        self.assertEqual(result["status"], "draft_created", msg=result)
+        self.assertTrue(result.get("external_id"))
+
+
 if __name__ == "__main__":
     unittest.main()

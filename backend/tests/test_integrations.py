@@ -314,6 +314,234 @@ class IntegrationLayerTest(unittest.TestCase):
         self.assertEqual(result["status"], "error")
         self.assertIn("campaign_id", result["result"]["error"])
 
+    def test_medusa_apply_store_transfer_records_metadata(self):
+        """`store_transfer` apply → appends to the from-store stock_location's
+        `metadata.retail_os_pending_transfers` and writes draft_created.
+        """
+        from app.integrations.systems import MedusaAdapter
+        from app.integrations import store
+
+        os.environ["MEDUSA_BASE_URL"] = "http://stub"
+        os.environ["MEDUSA_ADMIN_EMAIL"] = "admin@retail.local"
+        os.environ["MEDUSA_ADMIN_PASSWORD"] = "pw"
+
+        adapter = MedusaAdapter()
+        adapter._admin_token = "stub"
+        adapter._login = lambda: "stub"  # type: ignore[method-assign]
+
+        row = store.create_outbox_action(
+            system_id="medusa",
+            action_queue_id=None,
+            agent="Merchandiser",
+            action_type="store_transfer",
+            title="Rebalance summer apparel",
+            external_domain="Reservation",
+            payload={
+                "category": "summer_apparel",
+                "from_store": "sto-chi",
+                "to_store": "sto-mia",
+                "qty": 24,
+                "reason": "demand spike",
+            },
+            configured=True,
+        )
+        action_id = row["id"]
+
+        captured: dict = {"posts": []}
+
+        class _Stub:
+            def request(self, path: str, method: str = "GET", payload: dict | None = None):
+                if path.startswith("/admin/stock-locations") and method == "GET":
+                    return {
+                        "stock_locations": [
+                            {"id": "loc_chi", "name": "Chicago", "metadata": {"retail_os_store_id": "sto-chi"}},
+                            {"id": "loc_mia", "name": "Miami", "metadata": {"retail_os_store_id": "sto-mia"}},
+                        ],
+                        "count": 2,
+                    }
+                if path.startswith("/admin/stock-locations/loc_chi") and method == "POST":
+                    captured["posts"].append({"path": path, "payload": payload})
+                    return {"stock_location": {"id": "loc_chi", "metadata": payload.get("metadata", {})}}
+                return {}
+
+        adapter._client = lambda: _Stub()  # type: ignore[method-assign]
+        result = adapter.apply_outbound(action_id)
+        self.assertEqual(result["status"], "draft_created", msg=result)
+        self.assertEqual(result["external_id"], "loc_chi")
+        self.assertEqual(len(captured["posts"]), 1)
+        log = captured["posts"][0]["payload"]["metadata"]["retail_os_pending_transfers"]
+        self.assertEqual(len(log), 1)
+        self.assertEqual(log[0]["category"], "summer_apparel")
+        self.assertEqual(log[0]["to_store"], "sto-mia")
+
+    def test_medusa_apply_store_transfer_is_idempotent(self):
+        """Re-applying the same payload (same marker) should not duplicate
+        the log entry. The second call returns reused=True.
+        """
+        from app.integrations.systems import MedusaAdapter
+        from app.integrations import store
+
+        os.environ["MEDUSA_BASE_URL"] = "http://stub"
+        os.environ["MEDUSA_ADMIN_EMAIL"] = "admin@retail.local"
+        os.environ["MEDUSA_ADMIN_PASSWORD"] = "pw"
+
+        adapter = MedusaAdapter()
+        adapter._admin_token = "stub"
+        adapter._login = lambda: "stub"  # type: ignore[method-assign]
+
+        payload = {
+            "category": "tech_accessories",
+            "from_store": "sto-nyc",
+            "to_store": "sto-sea",
+            "qty": 12,
+            "reason": "test",
+        }
+        marker = MedusaAdapter._payload_marker(payload)
+        existing_log = [{"marker": marker, "to_store": "sto-sea"}]
+
+        row = store.create_outbox_action(
+            system_id="medusa",
+            action_queue_id=None,
+            agent="Merchandiser",
+            action_type="store_transfer",
+            title="Re-apply same transfer",
+            external_domain="Reservation",
+            payload=payload,
+            configured=True,
+        )
+
+        posts: list[dict] = []
+
+        class _Stub:
+            def request(self, path: str, method: str = "GET", payload: dict | None = None):
+                if path.startswith("/admin/stock-locations") and method == "GET":
+                    return {
+                        "stock_locations": [
+                            {
+                                "id": "loc_nyc",
+                                "metadata": {
+                                    "retail_os_store_id": "sto-nyc",
+                                    "retail_os_pending_transfers": existing_log,
+                                },
+                            }
+                        ],
+                        "count": 1,
+                    }
+                posts.append({"path": path, "payload": payload})
+                return {}
+
+        adapter._client = lambda: _Stub()  # type: ignore[method-assign]
+        result = adapter.apply_outbound(row["id"])
+        self.assertEqual(result["status"], "draft_created")
+        self.assertEqual(result["external_id"], "loc_nyc")
+        details = result.get("result", {}).get("details") or {}
+        self.assertTrue(details.get("reused"))
+        # No POST should fire — log already had the marker.
+        self.assertEqual(posts, [])
+
+    def test_medusa_apply_fulfillment_routing_records_on_sales_channel(self):
+        from app.integrations.systems import MedusaAdapter
+        from app.integrations import store
+
+        os.environ["MEDUSA_BASE_URL"] = "http://stub"
+        os.environ["MEDUSA_ADMIN_EMAIL"] = "admin@retail.local"
+        os.environ["MEDUSA_ADMIN_PASSWORD"] = "pw"
+
+        adapter = MedusaAdapter()
+        adapter._admin_token = "stub"
+        adapter._login = lambda: "stub"  # type: ignore[method-assign]
+
+        row = store.create_outbox_action(
+            system_id="medusa",
+            action_queue_id=None,
+            agent="Fulfillment",
+            action_type="fulfillment_routing",
+            title="Route summer demand",
+            external_domain="Fulfillment",
+            payload={
+                "category": "summer_apparel",
+                "recommended_strategy": "favor BOPIS",
+                "guardrail": "skip high-labor stores",
+            },
+            configured=True,
+        )
+
+        posts: list[dict] = []
+
+        class _Stub:
+            def request(self, path: str, method: str = "GET", payload: dict | None = None):
+                if path.startswith("/admin/sales-channels") and method == "GET":
+                    return {
+                        "sales_channels": [
+                            {"id": "sc_demo", "name": "Retail Demo", "metadata": {}},
+                            {"id": "sc_other", "name": "Other", "metadata": {}},
+                        ],
+                        "count": 2,
+                    }
+                if path.startswith("/admin/sales-channels/sc_demo") and method == "POST":
+                    posts.append({"path": path, "payload": payload})
+                    return {}
+                return {}
+
+        adapter._client = lambda: _Stub()  # type: ignore[method-assign]
+        result = adapter.apply_outbound(row["id"])
+        self.assertEqual(result["status"], "draft_created", msg=result)
+        self.assertEqual(result["external_id"], "sc_demo")
+        self.assertEqual(len(posts), 1)
+        log = posts[0]["payload"]["metadata"]["retail_os_routing_log"]
+        self.assertEqual(log[0]["strategy"], "favor BOPIS")
+
+    def test_medusa_apply_missing_from_store_lands_in_error(self):
+        from app.integrations.systems import MedusaAdapter
+        from app.integrations import store
+
+        os.environ["MEDUSA_BASE_URL"] = "http://stub"
+        os.environ["MEDUSA_ADMIN_EMAIL"] = "admin@retail.local"
+        os.environ["MEDUSA_ADMIN_PASSWORD"] = "pw"
+
+        adapter = MedusaAdapter()
+        adapter._admin_token = "stub"
+        adapter._login = lambda: "stub"  # type: ignore[method-assign]
+        # No client stub: dispatch must bail before any HTTP call.
+
+        row = store.create_outbox_action(
+            system_id="medusa",
+            action_queue_id=None,
+            agent="Merchandiser",
+            action_type="store_transfer",
+            title="Bad payload",
+            external_domain="Reservation",
+            payload={"category": "summer_apparel"},  # no from_store
+            configured=True,
+        )
+        result = adapter.apply_outbound(row["id"])
+        self.assertEqual(result["status"], "error")
+        self.assertIn("from_store", result["result"]["error"])
+
+    def test_medusa_apply_unsupported_action_falls_back_to_mock(self):
+        """Action types not in LIVE_ACTION_TYPES fall through to base mock-apply."""
+        from app.integrations.systems import MedusaAdapter
+        from app.integrations import store
+
+        os.environ["MEDUSA_BASE_URL"] = "http://stub"
+        os.environ["MEDUSA_ADMIN_EMAIL"] = "admin@retail.local"
+        os.environ["MEDUSA_ADMIN_PASSWORD"] = "pw"
+
+        adapter = MedusaAdapter()
+        row = store.create_outbox_action(
+            system_id="medusa",
+            action_queue_id=None,
+            agent="Marketing",
+            action_type="campaign_brief",
+            title="Bogus type",
+            external_domain="Campaign Report",
+            payload={"category": "x"},
+            configured=True,
+        )
+        # No _client stub — base must never reach _dispatch_outbound.
+        result = adapter.apply_outbound(row["id"])
+        self.assertEqual(result["status"], "draft_created")
+
     def test_medusa_admin_list_paginates_until_count_consumed(self):
         """`MedusaAdapter._admin_list` walks offset until `count` is met.
         A single Medusa instance with more rows than `limit` would otherwise
@@ -1100,6 +1328,174 @@ class IntegrationLayerTest(unittest.TestCase):
         self.assertEqual(_coerce_id(42), "42")
         self.assertEqual(_coerce_id("42"), "42")
         self.assertEqual(_coerce_id("  abc  "), "abc")
+
+    def test_superset_configured_requires_username_password(self):
+        from app.integrations.systems import SupersetAdapter
+
+        os.environ["SUPERSET_BASE_URL"] = "http://stub"
+        for k in ("SUPERSET_USERNAME", "SUPERSET_PASSWORD"):
+            os.environ.pop(k, None)
+        self.assertFalse(SupersetAdapter().configured())
+
+        os.environ["SUPERSET_USERNAME"] = "admin"
+        self.assertFalse(SupersetAdapter().configured())  # missing password
+
+        os.environ["SUPERSET_PASSWORD"] = "pw"
+        self.assertTrue(SupersetAdapter().configured())
+
+    def test_superset_api_list_walks_until_count_consumed(self):
+        """Superset paginates via `?q=(page:N,page_size:M)`. Walker must
+        stop when accumulated len reaches `count`.
+        """
+        from app.integrations.systems import SupersetAdapter
+
+        os.environ["SUPERSET_BASE_URL"] = "http://stub"
+        os.environ["SUPERSET_USERNAME"] = "admin"
+        os.environ["SUPERSET_PASSWORD"] = "pw"
+
+        adapter = SupersetAdapter()
+        adapter._admin_token = "tok"
+        adapter._login = lambda: "tok"  # type: ignore[method-assign]
+
+        pages = {
+            "/api/v1/dashboard/?q=(page:0,page_size:100)": {
+                "result": [{"id": 1}, {"id": 2}],
+                "count": 3,
+            },
+            "/api/v1/dashboard/?q=(page:1,page_size:100)": {
+                "result": [{"id": 3}],
+                "count": 3,
+            },
+        }
+        seen: list[str] = []
+
+        class _Stub:
+            def request(self, path, method="GET", payload=None):
+                seen.append(path)
+                return pages.get(path, {})
+
+        adapter._client = lambda: _Stub()  # type: ignore[method-assign]
+        out = adapter._api_list("/api/v1/dashboard/")
+        self.assertEqual([r["id"] for r in out], [1, 2, 3])
+        self.assertEqual(len(seen), 2)
+
+    def test_superset_admin_request_relogins_on_401(self):
+        """If the cached JWT expired mid-session, a 401 must clear the
+        token, re-login, and retry once. Mirror of Akeneo / Medusa /
+        OpenBoxes shared behaviour.
+        """
+        from app.integrations.systems import SupersetAdapter
+        from urllib.error import HTTPError
+
+        os.environ["SUPERSET_BASE_URL"] = "http://stub"
+        os.environ["SUPERSET_USERNAME"] = "admin"
+        os.environ["SUPERSET_PASSWORD"] = "pw"
+
+        adapter = SupersetAdapter()
+        adapter._admin_token = "stale-token"
+
+        login_calls: list[int] = []
+        request_calls: list[str] = []
+
+        def _fake_login() -> str:
+            login_calls.append(1)
+            adapter._admin_token = f"fresh-{len(login_calls)}"
+            return adapter._admin_token
+
+        adapter._login = _fake_login  # type: ignore[method-assign]
+
+        class _FlakyClient:
+            def __init__(self, token: str):
+                self.token = token
+
+            def request(self, path, method="GET", payload=None):
+                request_calls.append(self.token)
+                if self.token == "stale-token":
+                    raise HTTPError(
+                        url=path, code=401, msg="Unauthorized", hdrs=None, fp=None
+                    )
+                return {"ok": True}
+
+        # Mirror the real _client behaviour: re-login first, then build
+        # the http client with the current token (akin to Medusa's pattern).
+        def _stubbed_client():
+            if not adapter._admin_token:
+                adapter._login()
+            return _FlakyClient(adapter._admin_token)
+
+        adapter._client = _stubbed_client  # type: ignore[method-assign]
+        out = adapter._admin_request("/api/v1/dashboard/?q=(page:0,page_size:1)")
+        self.assertEqual(out, {"ok": True})
+        self.assertEqual(request_calls, ["stale-token", "fresh-1"])
+        self.assertEqual(len(login_calls), 1)
+
+    def test_superset_live_sync_caches_dashboard_with_slug_local_id(self):
+        """Dashboards round-trip with slug as local_id (preferred over title)."""
+        from app.integrations.systems import SupersetAdapter
+        from app.integrations import store
+
+        os.environ["SUPERSET_BASE_URL"] = "http://stub"
+        os.environ["SUPERSET_USERNAME"] = "admin"
+        os.environ["SUPERSET_PASSWORD"] = "pw"
+
+        adapter = SupersetAdapter()
+        adapter._admin_token = "tok"
+        adapter._login = lambda: "tok"  # type: ignore[method-assign]
+
+        empty_page = {"result": [], "count": 0}
+        responses = {
+            "/api/v1/database/?q=(page:0,page_size:100)": empty_page,
+            "/api/v1/dataset/?q=(page:0,page_size:100)": empty_page,
+            "/api/v1/chart/?q=(page:0,page_size:100)": empty_page,
+            "/api/v1/dashboard/?q=(page:0,page_size:100)": {
+                "result": [{
+                    "id": 7,
+                    "dashboard_title": "AI Retail OS — Demo",
+                    "slug": "ai-retail-os-demo",
+                }],
+                "count": 1,
+            },
+        }
+
+        class _Stub:
+            def request(self, path, method="GET", payload=None):
+                return responses.get(path, {})
+
+        adapter._client = lambda: _Stub()  # type: ignore[method-assign]
+        result = adapter._live_sync()
+        self.assertEqual(result.summary["mode"], "connected")
+        self.assertEqual(result.summary["domains"]["Dashboard"], 1)
+
+        bundle = store.list_records(system_id="superset", domain="Dashboard", limit=10)
+        local_ids = {r.get("local_id") for r in bundle["external_refs"]}
+        self.assertIn("ai-retail-os-demo", local_ids)
+
+    def test_superset_apply_outbound_falls_back_to_base(self):
+        """Superset is read-only: any action_type must hit the base
+        adapter (LIVE_ACTION_TYPES is empty by design).
+        """
+        from app.integrations.systems import SupersetAdapter
+        from app.integrations import store
+
+        os.environ["SUPERSET_BASE_URL"] = "http://stub"
+        os.environ["SUPERSET_USERNAME"] = "admin"
+        os.environ["SUPERSET_PASSWORD"] = "pw"
+
+        adapter = SupersetAdapter()
+        row = store.create_outbox_action(
+            system_id="superset",
+            action_queue_id=None,
+            agent="Analyst",
+            action_type="report_publish",  # arbitrary; nothing should override
+            title="Anything",
+            external_domain="Dashboard",
+            payload={},
+            configured=True,
+        )
+        result = adapter.apply_outbound(row["id"])
+        # Base class: configured + creds → draft_created (no HTTP call).
+        self.assertEqual(result["status"], "draft_created")
+        self.assertEqual(adapter.LIVE_ACTION_TYPES, set())
 
     def test_mautic_webhook_is_recorded_as_measurement(self):
         payload = {"campaign_id": "cmp-weekend-heat", "event": "email.open", "count": 12}

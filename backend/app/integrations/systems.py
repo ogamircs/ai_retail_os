@@ -1416,6 +1416,215 @@ class MedusaAdapter(IntegrationAdapter):
             action_type, super().outbound_domain(action_type)
         )
 
+    # ----- live outbound apply --------------------------------------------
+
+    # Cockpit actions that map onto real Medusa objects. Everything else
+    # falls back to the base mock-apply behaviour.
+    #
+    # Medusa v2 doesn't have a built-in inter-location transfer concept,
+    # and our outbox payloads don't carry concrete order ids — so for both
+    # supported types we record the action as auditable metadata on an
+    # existing Medusa entity rather than inventing fake orders / inventory
+    # items just to look impressive. Operator can read the audit trail
+    # directly from the Medusa admin UI.
+    LIVE_ACTION_TYPES = {"store_transfer", "fulfillment_routing"}
+
+    def apply_outbound(self, action_id: int) -> dict[str, Any]:
+        from app.integrations import store
+
+        action = store.get_outbox_action(action_id, system_id=self.definition.system_id)
+        if not action:
+            return {"error": f"unknown outbox action: {action_id}"}
+        if action["status"] in {"applied", "applied_mock", "draft_created"}:
+            return action
+
+        if not self.configured() or action["action_type"] not in self.LIVE_ACTION_TYPES:
+            return super().apply_outbound(action_id)
+
+        try:
+            outcome = self._dispatch_outbound(action)
+        except Exception as exc:  # pragma: no cover - exercised only with live Medusa
+            return store.update_outbox_action(
+                action_id,
+                status="error",
+                result={
+                    "error": str(exc),
+                    "system_id": self.definition.system_id,
+                    "external_domain": action["external_domain"],
+                    "message": (
+                        "Medusa rejected the apply. The outbox action is left "
+                        "in error state — fix the upstream payload and retry."
+                    ),
+                },
+            )
+
+        if not outcome.get("external_id"):
+            return store.update_outbox_action(
+                action_id,
+                status="error",
+                result={
+                    "error": outcome.get("message", "Medusa apply produced no external_id"),
+                    "system_id": self.definition.system_id,
+                    "external_domain": action["external_domain"],
+                    "message": outcome.get(
+                        "message",
+                        "Medusa returned no external_id — nothing was written. Check the outbox payload and retry.",
+                    ),
+                    "details": outcome.get("details", {}),
+                },
+            )
+
+        return store.update_outbox_action(
+            action_id,
+            status="draft_created",
+            external_id=outcome["external_id"],
+            result={
+                "message": outcome.get("message", "Recorded action in Medusa."),
+                "system_id": self.definition.system_id,
+                "external_domain": action["external_domain"],
+                "external_id": outcome["external_id"],
+                "details": outcome.get("details", {}),
+            },
+        )
+
+    def _dispatch_outbound(self, action: dict[str, Any]) -> dict[str, Any]:
+        action_type = action["action_type"]
+        payload = action.get("payload") or {}
+        title = action.get("title") or "AI Retail OS action"
+        if action_type == "store_transfer":
+            return self._medusa_record_transfer(title, payload)
+        if action_type == "fulfillment_routing":
+            return self._medusa_record_routing(title, payload)
+        raise RuntimeError(f"unsupported action_type {action_type!r} for live Medusa apply")
+
+    @staticmethod
+    def _payload_marker(payload: dict[str, Any]) -> str:
+        """Stable per-payload marker for idempotent metadata appends.
+
+        Re-applying the same outbox row should land at the existing log
+        entry instead of duplicating. Sorted-keys sha256 means same
+        payload → same marker, even across processes.
+        """
+        import hashlib
+
+        digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+        return f"p{digest[:12]}"
+
+    def _medusa_record_transfer(self, title: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """`store_transfer` → append the transfer to the from-store stock
+        location's `metadata.retail_os_pending_transfers` array.
+
+        Medusa v2 has no inter-location transfer primitive; metadata
+        stash is the cleanest auditable signal. We look up the location
+        by `metadata.retail_os_store_id` (the seed stashed it in P2),
+        fail clearly if it isn't there, and dedupe by payload-hash
+        marker so re-runs are idempotent.
+        """
+        from_store = (payload.get("from_store") or "").strip()
+        if not from_store:
+            return {
+                "external_id": None,
+                "message": "store_transfer payload has no from_store; nothing to apply.",
+            }
+        target = self._find_location_by_store_id(from_store)
+        if target is None:
+            return {
+                "external_id": None,
+                "message": (
+                    f"no Medusa stock_location found for retail_os_store_id="
+                    f"{from_store}; run `make medusa-seed`."
+                ),
+            }
+        location_id = str(target["id"])
+        meta = dict(target.get("metadata") or {})
+        log = list(meta.get("retail_os_pending_transfers") or [])
+        marker = self._payload_marker(payload)
+        if any((isinstance(e, dict) and e.get("marker") == marker) for e in log):
+            return {
+                "external_id": location_id,
+                "message": f"transfer already recorded on stock_location {location_id}.",
+                "details": {"marker": marker, "reused": True},
+            }
+        log.append(
+            {
+                "marker": marker,
+                "title": title,
+                "to_store": payload.get("to_store"),
+                "category": payload.get("category"),
+                "qty": payload.get("qty"),
+                "reason": payload.get("reason"),
+            }
+        )
+        meta["retail_os_pending_transfers"] = log
+        self._admin_request(
+            f"/admin/stock-locations/{quote(location_id)}",
+            method="POST",
+            payload={"metadata": meta},
+        )
+        return {
+            "external_id": location_id,
+            "message": f"Recorded transfer on stock_location {location_id}.",
+            "details": {"marker": marker, "from_store": from_store},
+        }
+
+    def _medusa_record_routing(self, title: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """`fulfillment_routing` → append to the Retail Demo sales channel's
+        `metadata.retail_os_routing_log`. Same marker-dedupe pattern.
+        """
+        target = self._find_sales_channel_by_name("Retail Demo")
+        if target is None:
+            return {
+                "external_id": None,
+                "message": (
+                    "no 'Retail Demo' sales channel found; run `make medusa-seed`."
+                ),
+            }
+        channel_id = str(target["id"])
+        meta = dict(target.get("metadata") or {})
+        log = list(meta.get("retail_os_routing_log") or [])
+        marker = self._payload_marker(payload)
+        if any((isinstance(e, dict) and e.get("marker") == marker) for e in log):
+            return {
+                "external_id": channel_id,
+                "message": f"routing already recorded on sales_channel {channel_id}.",
+                "details": {"marker": marker, "reused": True},
+            }
+        log.append(
+            {
+                "marker": marker,
+                "title": title,
+                "category": payload.get("category"),
+                "strategy": payload.get("recommended_strategy"),
+                "guardrail": payload.get("guardrail"),
+            }
+        )
+        meta["retail_os_routing_log"] = log
+        self._admin_request(
+            f"/admin/sales-channels/{quote(channel_id)}",
+            method="POST",
+            payload={"metadata": meta},
+        )
+        return {
+            "external_id": channel_id,
+            "message": f"Recorded routing on sales_channel {channel_id}.",
+            "details": {"marker": marker},
+        }
+
+    def _find_location_by_store_id(self, store_id: str) -> dict[str, Any] | None:
+        rows, _ = self._admin_list("stock-locations", "stock_locations")
+        for row in rows:
+            meta = row.get("metadata") or {}
+            if meta.get("retail_os_store_id") == store_id:
+                return row
+        return None
+
+    def _find_sales_channel_by_name(self, name: str) -> dict[str, Any] | None:
+        rows, _ = self._admin_list("sales-channels", "sales_channels")
+        for row in rows:
+            if row.get("name") == name:
+                return row
+        return None
+
 
 _OPENBOXES_MARKER_RE = re.compile(r"\[retail-os:([a-zA-Z0-9_\-]+)\]")
 
@@ -2159,34 +2368,238 @@ class SupersetAdapter(IntegrationAdapter):
         notes="External BI dashboards over the retail spine; SQLite now, optional Postgres later.",
     )
 
+    _admin_token: str | None = None
+
+    def configured(self) -> bool:
+        if not super().configured():
+            return False
+        return all(os.getenv(k, "").strip() for k in ("SUPERSET_USERNAME", "SUPERSET_PASSWORD"))
+
+    def _login(self) -> str:
+        """`POST /api/v1/security/login` — Flask-AppBuilder JWT.
+
+        Superset's API uses a short-lived JWT minted by the FAB security
+        layer. We cache the bearer for the adapter's lifetime; `_admin_request`
+        re-logins on 401 (mirror of Akeneo / Medusa / OpenBoxes).
+        """
+        if self._admin_token:
+            return self._admin_token
+        client = JsonHttpClient(os.environ["SUPERSET_BASE_URL"])
+        data = client.request(
+            "/api/v1/security/login",
+            method="POST",
+            payload={
+                "username": os.environ["SUPERSET_USERNAME"],
+                "password": os.environ["SUPERSET_PASSWORD"],
+                "provider": "db",
+                "refresh": True,
+            },
+        )
+        token = (data or {}).get("access_token")
+        if not token:
+            raise RuntimeError(f"superset login returned no access_token: {data}")
+        self._admin_token = token
+        return token
+
+    def _client(self) -> JsonHttpClient:
+        token = self._login()
+        return JsonHttpClient(
+            os.environ["SUPERSET_BASE_URL"],
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    def _admin_request(
+        self,
+        path: str,
+        method: str = "GET",
+        payload: dict[str, Any] | None = None,
+    ) -> Any:
+        try:
+            return self._client().request(path, method=method, payload=payload)
+        except HTTPError as e:
+            if e.code != 401:
+                raise
+            self._admin_token = None
+            return self._client().request(path, method=method, payload=payload)
+
+    def healthcheck(self) -> IntegrationResult:
+        if not self.configured():
+            return super().healthcheck()
+        try:  # pragma: no cover - live-system path
+            data = self._admin_request("/api/v1/dashboard/?q=(page_size:1)")
+            return IntegrationResult(
+                status="connected",
+                summary={"dashboards_seen": int((data or {}).get("count", 0) or 0)},
+            )
+        except Exception as exc:
+            return IntegrationResult(status="error", error=str(exc))
+
     def sync_inbound(self) -> IntegrationResult:
+        if not self.configured():
+            return self._mock_sync()
+        try:
+            return self._live_sync()
+        except Exception as exc:
+            return IntegrationResult(status="error", error=str(exc))
+
+    # ----- live ------------------------------------------------------------
+
+    def _api_list(self, endpoint: str, *, page_size: int = 100) -> list[dict[str, Any]]:
+        """GET /api/v1/<endpoint>?q=(page:N,page_size:M) — Superset's
+        v1 list endpoints paginate via `page` / `page_size`. We walk
+        until `count` is consumed.
+        """
+        out: list[dict[str, Any]] = []
+        page = 0
+        while True:
+            qs = f"q=(page:{page},page_size:{page_size})"
+            data = self._admin_request(f"{endpoint}?{qs}") or {}
+            items = data.get("result") or []
+            if not isinstance(items, list):
+                break
+            out.extend(items)
+            count = int(data.get("count", 0) or 0)
+            if not items or len(out) >= count:
+                break
+            page += 1
+            if page > 200:  # absolute belt-and-suspenders cap
+                break
+        return out
+
+    def _live_sync(self) -> IntegrationResult:
+        domains: dict[str, int] = {}
+        records_read = 0
+        records_written = 0
+
+        # Databases — the operator-registered SQLAlchemy connections.
+        # `AI Retail OS spine` (the seed leaves this name) round-trips
+        # cleanly so the cockpit can drill from a dashboard back to a
+        # known spine.db source.
+        for db in self._api_list("/api/v1/database/"):
+            external_id = _coerce_id(db.get("id"))
+            if external_id is None:
+                continue
+            local_id = db.get("database_name")
+            self._cache("Database", external_id, db, local_id)
+            domains["Database"] = domains.get("Database", 0) + 1
+            records_written += 1
+            records_read += 1
+
+        # Datasets — Superset's term for a registered table/view.
+        for ds in self._api_list("/api/v1/dataset/"):
+            external_id = _coerce_id(ds.get("id"))
+            if external_id is None:
+                continue
+            # local_id := the underlying table_name (the seed registers
+            # `substrate_*` tables, which aligns with substrate names).
+            local_id = ds.get("table_name")
+            self._cache("Dataset", external_id, ds, local_id)
+            domains["Dataset"] = domains.get("Dataset", 0) + 1
+            records_written += 1
+            records_read += 1
+
+        # Charts ("slices") — keyed by `slice_name` so the seed's
+        # stable names round-trip into the spine.
+        for chart in self._api_list("/api/v1/chart/"):
+            external_id = _coerce_id(chart.get("id"))
+            if external_id is None:
+                continue
+            local_id = chart.get("slice_name")
+            self._cache("Chart", external_id, chart, local_id)
+            domains["Chart"] = domains.get("Chart", 0) + 1
+            records_written += 1
+            records_read += 1
+
+        # Dashboards — the operator-facing surface. local_id prefers
+        # the slug (stable) over the title.
+        for dash in self._api_list("/api/v1/dashboard/"):
+            external_id = _coerce_id(dash.get("id"))
+            if external_id is None:
+                continue
+            local_id = dash.get("slug") or dash.get("dashboard_title")
+            self._cache("Dashboard", external_id, dash, local_id)
+            domains["Dashboard"] = domains.get("Dashboard", 0) + 1
+            records_written += 1
+            records_read += 1
+
+        return IntegrationResult(
+            status="success",
+            records_read=records_read,
+            records_written=records_written,
+            summary={"mode": "connected", "domains": domains},
+        )
+
+    # ----- mock ------------------------------------------------------------
+
+    def _mock_sync(self) -> IntegrationResult:
+        base = os.getenv("SUPERSET_BASE_URL", "").rstrip("/")
         dashboards = [
             {
                 "id": "retail-inventory-health",
                 "title": "Inventory Health",
                 "source": "AI Retail OS spine",
-                "url": f"{os.getenv('SUPERSET_BASE_URL', '').rstrip('/')}/superset/dashboard/retail-inventory-health"
-                if os.getenv("SUPERSET_BASE_URL")
-                else None,
+                "url": f"{base}/superset/dashboard/retail-inventory-health" if base else None,
             },
             {
                 "id": "campaign-roi",
                 "title": "Campaign ROI",
                 "source": "AI Retail OS spine",
-                "url": f"{os.getenv('SUPERSET_BASE_URL', '').rstrip('/')}/superset/dashboard/campaign-roi"
-                if os.getenv("SUPERSET_BASE_URL")
-                else None,
+                "url": f"{base}/superset/dashboard/campaign-roi" if base else None,
             },
         ]
         for dashboard in dashboards:
             store.cache_record("superset", "Dashboard", dashboard["id"], dashboard, dashboard["id"])
-            store.record_external_ref("superset", "Dashboard", dashboard["id"], dashboard["id"], dashboard.get("url"))
+            store.record_external_ref(
+                "superset",
+                "Dashboard",
+                dashboard["id"],
+                dashboard["id"],
+                dashboard.get("url"),
+            )
         return IntegrationResult(
             status="success",
             records_read=len(dashboards),
             records_written=len(dashboards),
-            summary={"mode": "mock" if not self.configured() else "connected_stub", "domains": {"Dashboard": len(dashboards)}},
+            summary={"mode": "mock", "domains": {"Dashboard": len(dashboards)}},
         )
+
+    def _cache(self, domain: str, external_id: str, payload: dict[str, Any], local_id: Any) -> None:
+        local = _coerce_id(local_id) if local_id is not None else None
+        store.cache_record(self.definition.system_id, domain, str(external_id), payload, local_id=local)
+        if local:
+            store.record_external_ref(
+                self.definition.system_id,
+                domain,
+                local,
+                str(external_id),
+                external_url=self._external_url(domain, str(external_id)),
+                props={"source": "Superset"},
+            )
+
+    def _external_url(self, domain: str, external_id: str) -> str | None:
+        base = os.getenv("SUPERSET_BASE_URL")
+        if not base:
+            return None
+        path = {
+            "Dashboard": "superset/dashboard",
+            "Chart": "explore/?slice_id",
+            "Dataset": "tablemodelview/edit",
+            "Database": "databaseview/edit",
+        }.get(domain)
+        if not path:
+            return None
+        if domain == "Chart":
+            return f"{base.rstrip('/')}/{path}={quote(external_id)}"
+        return f"{base.rstrip('/')}/{path}/{quote(external_id)}"
+
+    # ----- live outbound apply --------------------------------------------
+    #
+    # Superset is read-only in our architecture: no agent emits an
+    # action_type that mutates Superset state. We rely on the
+    # IntegrationAdapter base class — `apply_outbound` returns
+    # `applied_mock` (no creds) or `draft_created` (creds present)
+    # without making any HTTP call. Override is intentionally absent.
+    LIVE_ACTION_TYPES: set[str] = set()
 
 
 ADAPTERS: list[IntegrationAdapter] = [

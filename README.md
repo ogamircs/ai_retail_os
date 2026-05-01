@@ -503,6 +503,66 @@ A walkthrough lives in [`docs/uat/2026-04-30-akeneo-p5-pim-enrich-demo.md`](docs
 
 `backend/tests/test_integrations_akeneo_live.py` exercises sync + apply against a real Akeneo. Skipped automatically when `AKENEO_*` creds aren't set or the OAuth2 round-trip fails, so CI stays mock-only.
 
+## Running with real Superset
+
+The `superset` adapter has its own local-stack rollout. See `infra/superset/README.md` for the full setup; quick path:
+
+```bash
+# 1. Stack: postgres 15 + redis 7 + apache/superset:3.1.1
+make superset-up
+
+# 2. db upgrade + admin user + roles (idempotent)
+make superset-bootstrap
+# → prints SUPERSET_BASE_URL / SUPERSET_USERNAME / SUPERSET_PASSWORD
+
+# 3. Wire backend/.env with the printed creds.
+
+# 4. Register spine.db + 3 datasets + 3 charts + 1 dashboard:
+make superset-seed
+
+# 5. (Re)start the backend so it picks up the new env:
+cd backend && uvicorn app.main:app --reload
+```
+
+Sanity-check auth (Flask-AppBuilder JWT):
+
+```bash
+curl -s -X POST "$SUPERSET_BASE_URL/api/v1/security/login" \
+  -H 'Content-Type: application/json' \
+  -d "{\"username\":\"$SUPERSET_USERNAME\",\"password\":\"$SUPERSET_PASSWORD\",\"provider\":\"db\",\"refresh\":true}" \
+  | jq -r '.access_token' | head -c 20; echo
+# → eyJ0eXAi...
+```
+
+In the cockpit's Integrations tab the `superset` row will show a green `connected` chip. Click `sync` to pull live Databases / Datasets / Charts / Dashboards into `record_cache` + `external_refs`. The seed registers the cockpit's `spine.db` (mounted read-only at `/spine/spine.db` inside the Superset container), so the demo dashboard's numbers track the same SQLite file the cockpit reads.
+
+A walkthrough lives in [`docs/uat/2026-05-01-superset-p5-dashboard-demo.md`](docs/uat/2026-05-01-superset-p5-dashboard-demo.md).
+
+### What lands in Superset per action type
+
+Superset is **read-only** in our architecture. The cockpit's Analyst deep-links into existing dashboards rather than synthesising new ones. `apply_outbound` therefore falls back to the `IntegrationAdapter` base class for every action type:
+
+| `action_type` | Superset target | What happens |
+|---|---|---|
+| anything | (none) | configured → `draft_created` (marker only, no HTTP call); unconfigured → `applied_mock`. No mutation in Superset. |
+
+If a future Analyst agent ever needs to auto-create dashboards (e.g. one-shot incident reports), the extension point is `SupersetAdapter.LIVE_ACTION_TYPES`, currently empty by design.
+
+### Troubleshooting
+
+| Symptom | What to check |
+|---|---|
+| `superset db upgrade` hangs | postgres healthcheck races the connection pool. `make superset-down && make superset-up` re-binds. |
+| Admin login returns 401 | `SUPERSET_SECRET_KEY` was changed after init — fix: `make superset-nuke && make superset-up && make superset-bootstrap`. |
+| `/api/v1/*` returns 401 mid-session | Cached JWT expired. Adapter clears the token and re-logins on 401, retries once. |
+| Dashboard shows zero rows | Bind-mount path drift. Check `infra/superset/docker-compose.yml` mounts `../../backend/data:/spine:ro` and the seed registered `sqlite:////spine/spine.db` (four slashes — it's an absolute path). |
+| Apple Silicon | `apache/superset:3.1.1` is multi-arch — no platform pin needed. |
+| Want a clean slate | `make superset-nuke && make superset-up && make superset-bootstrap && make superset-seed` |
+
+### Live-path tests
+
+`backend/tests/test_integrations_superset_live.py` exercises live sync against a real Superset. Skipped automatically when `SUPERSET_*` creds aren't set or the login round-trip fails, so CI stays mock-only.
+
 ## Provider swap
 
 In the header, change the provider dropdown (Anthropic / OpenAI / Google). Identical behavior, different model. Requires the corresponding API key in `.env`.

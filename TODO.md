@@ -111,9 +111,9 @@ For every system, the per-system phases are the same:
   - [x] Four new unit tests in `tests/test_integrations.py` (stub `_client`): campaign-launch happy path, brief-segment reuse, unsupported-type fallback, missing-payload → error landing.
   - [x] Two new env-gated live tests in `tests/test_integrations_mautic_live.py` (`MauticLiveApplyTest`): real campaign_launch creates a Mautic draft; campaign_brief reuses the seeded segment instead of duplicating.
 
-- [ ] **P5 · Agent-loop UAT** _(operator-driven — needs live Mautic + cockpit + screenshots)_
-  - Suggested demo: cockpit chat "draft a heatwave campaign for summer apparel" → Marketing agent proposes `campaign_brief` + `campaign_launch` → drawer apply → real Mautic Segment (already seeded as `seg_vacation`) reused + new draft Campaign with `[retail-os:<id>]` marker visible at `/s/campaigns`.
-  - Output should land alongside the ERPNext walkthrough at `docs/uat/<date>-mautic-p5-campaign-demo.md` with screenshots of: Marketing draft, drawer apply, Mautic UI showing the new Campaign + reused Segment, second cockpit sync surfacing the Mautic id back as the substrate `local_id`.
+- [x] **P5 · Agent-loop UAT** _(bundled in `feature/track1-finale`)_
+  - [x] `docs/uat/2026-05-01-mautic-p5-campaign-demo.md` — full walkthrough: setup, Marketing proposal of `campaign_brief` + `campaign_launch`, drawer apply (brief reuses seeded `seg_vacation`, launch creates new draft Campaign with `[retail-os:<id>]` marker), inbound sync round-trips the Mautic campaign id back, idempotency notes, acceptance checklist.
+  - [x] Screenshot placeholders for operator follow-up.
 
 - [x] **P6 · Docs + tests** _(branch: `feature/mautic-p6-docs` — open PR pending)_
   - [x] README "Running with real Mautic" section: full quick-start (compose / bootstrap / env / seed / sanity curl), per-action-type mapping table (`campaign_launch` → draft Campaign, `campaign_brief` → idempotent Segment, `campaign_measurement` → mock-apply), troubleshooting cheat sheet (auth drift, partial-sync truncation, alias round-trip mismatch, Apple Silicon digest pin), live-test instructions, and reset path.
@@ -146,7 +146,14 @@ For every system, the per-system phases are the same:
   - [x] Three new unit tests in `tests/test_integrations.py`: `_admin_list` paginates until `count` consumed, truncation flag fires when `max_rows` hit, `configured()` requires admin creds.
   - [x] `backend/tests/test_integrations_medusa_live.py` — env-gated, three live tests: live sync round-trip, seeded `retail_os_store_id` external_ref round-trip, registry reports `mode=connected`. Skipped automatically when creds aren't set so CI stays mock-only.
 
-- [ ] P4 · Live outbound apply _(in flight on `feature/medusa-p4-apply` — see PR #23)_
+- [x] **P4 · Live outbound apply** _(bundled in `feature/track1-finale`)_
+  - [x] `MedusaAdapter.LIVE_ACTION_TYPES = {"store_transfer", "fulfillment_routing"}` — every other action_type falls back to base mock-apply, same shape as ERPNext / Mautic.
+  - [x] `apply_outbound` mirrors the Mautic dispatcher: configured + supported → `_dispatch_outbound`; adapter rejection lands in `error` (not `draft_created`); outbox `external_id` mirrors the Medusa entity id.
+  - [x] `_medusa_record_transfer` (store_transfer) → looks up the from-store stock_location by `metadata.retail_os_store_id`, appends a transfer row to `metadata.retail_os_pending_transfers`, then POSTs the merged metadata back. Medusa v2 has no inter-location transfer primitive; metadata stash is the cleanest auditable signal and the operator can read it directly from the admin UI.
+  - [x] `_medusa_record_routing` (fulfillment_routing) → finds the "Retail Demo" sales channel by name and appends to `metadata.retail_os_routing_log`. Same shape.
+  - [x] `_payload_marker` — sha256 over sorted-keys JSON of the payload. Re-applying the same outbox row recognises the existing log entry and returns `details.reused=True` instead of duplicating.
+  - [x] Five new unit tests in `tests/test_integrations.py` (stubbed `_client`): transfer happy path, transfer idempotency, routing happy path, missing-from_store → error landing, unsupported-type fallback.
+  - [x] Two new env-gated live tests in `tests/test_integrations_medusa_live.py` (`MedusaLiveApplyTest`): real `store_transfer` records on the seeded stock location; `fulfillment_routing` records on the seeded sales channel.
 
 - [x] **P5 · Agent-loop UAT** _(branch: `feature/medusa-p6-docs` — bundled with P6, open PR pending)_
   - [x] `docs/uat/2026-04-30-medusa-p5-store-transfer-demo.md` — full walkthrough with two demos (`store_transfer` lands metadata on the from-store stock_location; `fulfillment_routing` lands on the Retail Demo sales channel), CLI-equivalent verification at every step, idempotency check (re-apply → `details.reused=true`), and an acceptance checklist the operator runs before promoting the UAT.
@@ -229,13 +236,38 @@ For every system, the per-system phases are the same:
   - [x] README "Running with real Akeneo PIM" section: full quick-start (compose / bootstrap / OAuth client mint / env wiring / seed / restart), per-action-type table (`pim_enrich` → PATCH product, anything else → base mock-apply), troubleshooting cheat sheet (slow first build, OpenSearch wait, OAuth2 400, 401 mid-session re-login, Apple Silicon caveats, reset path).
   - [x] `backend/tests/test_integrations_akeneo_live.py` — env-gated, three live tests (live sync round-trip with `mode=connected`, seeded category code round-trip, registry reports `mode=connected`). Skipped automatically when `AKENEO_*` creds aren't set or the OAuth2 token round-trip fails so CI stays mock-only by design.
 
-## Superset
-- [ ] P1 · Local instance
-- [ ] P2 · Demo seed (point at our spine.db / mirror)
-- [ ] P3 · Inbound sync
-- [ ] P4 · Live outbound apply (mostly N/A — Superset is read-only)
-- [ ] P5 · Agent-loop UAT
-- [ ] P6 · Docs + tests
+## Superset _(branch: `feature/track1-finale` — bundled in the Track 1 finale PR)_
+
+- [x] **P1 · Local instance**
+  - [x] `infra/superset/docker-compose.yml` — `postgres:15-alpine` (metadata) + `redis:7-alpine` (cache + celery broker) + `apache/superset:3.1.1` (web). Multi-arch image — no platform pin.
+  - [x] Bind-mounts `backend/data/` into the container at `/spine/` read-only so Superset can register the cockpit's `spine.db` SQLite as a SQLAlchemy connection without copying data.
+  - [x] `infra/superset/bootstrap.sh` — waits for postgres + redis, runs `superset db upgrade` (idempotent), `superset fab create-admin` (idempotent), `superset init`. Pattern-matches benign "already exists" output; non-OK rc aborts.
+  - [x] `infra/superset/README.md` — quick-start, REST surface, troubleshooting, reset path.
+  - [x] Root `Makefile` targets: `superset-up`, `superset-down`, `superset-bootstrap`, `superset-seed`, `superset-logs`, `superset-status`, `superset-nuke`.
+
+- [x] **P2 · Demo seed**
+  - [x] `infra/superset/seed.py` — REST-based, idempotent, stdlib-only. Auth via `POST /api/v1/security/login` (JWT bearer). Creates: 1 Database connection (`AI Retail OS spine`, URI `sqlite:////spine/spine.db`), 3 Datasets (`substrate_skus`, `substrate_orders`, `substrate_inventory`), 3 Charts (`Retail · Top SKUs`, `Retail · Orders by channel`, `Retail · Inventory by store`), 1 Dashboard (`AI Retail OS — Demo`, slug `ai-retail-os-demo`).
+  - [x] Idempotency: lookup by stable name (`database_name`, `table_name`, `slice_name`, `dashboard_title`) before POST. Re-runs print zero `++` lines.
+
+- [x] **P3 · Inbound sync**
+  - [x] `SupersetAdapter.configured()` overridden to require `SUPERSET_BASE_URL` + `SUPERSET_USERNAME` + `SUPERSET_PASSWORD`.
+  - [x] `SupersetAdapter._login()` — Flask-AppBuilder JWT via `/api/v1/security/login`. Cached on instance; `_admin_request` 401 → drop + re-login + retry once (mirror of Mautic / Medusa / OpenBoxes / Akeneo).
+  - [x] `SupersetAdapter._api_list(endpoint)` — walks Superset's `?q=(page:N,page_size:M)` pagination until `count` is consumed.
+  - [x] `SupersetAdapter._live_sync()` pulls Databases + Datasets + Charts + Dashboards. Each row caches into `record_cache`; local_id round-trips by `database_name` / `table_name` / `slice_name` / `slug` so the seed's stable names align back into the substrate.
+  - [x] `external_url` deep-links: `superset/dashboard/<id>`, `explore/?slice_id=<id>`, `tablemodelview/edit/<id>`, `databaseview/edit/<id>`.
+  - [x] `sync_inbound()` dispatches: configured → `_live_sync`, else → `_mock_sync` (the prior 2-dashboard stub, unchanged).
+
+- [x] **P4 · Live outbound apply** _(intentionally N/A — Superset is read-only)_
+  - [x] `SupersetAdapter.LIVE_ACTION_TYPES = set()` — explicit empty set documents the read-only stance. `apply_outbound` falls back to the base `IntegrationAdapter` for every action type: configured → `draft_created` (marker only, no HTTP call), unconfigured → `applied_mock`. No agent currently emits a Superset-mutating action, so no dispatcher is needed.
+  - [x] Extension point: future Analyst auto-dashboard agent can populate `LIVE_ACTION_TYPES` and add a `_dispatch_outbound`.
+
+- [x] **P5 · Agent-loop UAT**
+  - [x] `docs/uat/2026-05-01-superset-p5-dashboard-demo.md` — full walkthrough: Analyst delegation → report quotes seeded dashboard URL → operator opens dashboard backed by same spine.db → inbound sync round-trips Database/Dataset/Chart/Dashboard rows. Acceptance checklist + screenshot placeholders for operator follow-up.
+
+- [x] **P6 · Docs + tests**
+  - [x] README "Running with real Superset" section: full quick-start (compose / bootstrap / env / seed / sanity curl), explicit "read-only by design" framing, troubleshooting cheat sheet (db-upgrade race, secret-key drift, mid-session 401 recovery, bind-mount path drift, Apple Silicon multi-arch note, reset path).
+  - [x] Five new unit tests in `tests/test_integrations.py`: `configured()` requires user/password; `_api_list` walks paginated `q=(page:N,page_size:M)` until count consumed; `_admin_request` re-logins on 401 (mirrors Medusa pattern); `_live_sync` round-trips the seeded dashboard slug as local_id; `apply_outbound` falls back to base (LIVE_ACTION_TYPES empty by design).
+  - [x] `backend/tests/test_integrations_superset_live.py` — env-gated, three live tests (live sync round-trip with `mode=connected`, seeded dashboard slug round-trip, registry reports `mode=connected`). Skipped automatically when `SUPERSET_*` creds aren't set or the login round-trip fails so CI stays mock-only by design.
 
 ---
 
