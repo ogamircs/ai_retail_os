@@ -293,6 +293,40 @@ export async function getMeshStatus(windowSeconds = 300): Promise<MeshStatus> {
   return await r.json();
 }
 
+export type MlflowExperiment = {
+  id: string;
+  name: string;
+  lifecycle_stage?: string;
+  last_update_time?: number;
+};
+
+export type MlflowRun = {
+  run_id: string;
+  experiment_id: string;
+  experiment_name?: string | null;
+  run_name?: string | null;
+  status?: string;
+  start_time?: number;
+  end_time?: number;
+  phase?: string;
+  agent?: string;
+  metrics?: Record<string, number>;
+};
+
+export type MlflowStatus = {
+  enabled: boolean;
+  ui_url: string | null;
+  reachable: boolean;
+  experiments: MlflowExperiment[];
+  recent_runs: MlflowRun[];
+  error: string | null;
+};
+
+export async function getMlflowStatus(limitRuns = 10): Promise<MlflowStatus> {
+  const r = await fetch(`/api/mlflow/status?limit_runs=${limitRuns}`);
+  return await r.json();
+}
+
 export async function syncIntegration(systemId: string): Promise<{
   sync_run: SyncRun;
   result: Record<string, any>;

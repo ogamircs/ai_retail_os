@@ -309,6 +309,46 @@ class TelemetryAggregatorTest(unittest.TestCase):
         self.assertGreaterEqual(data["syncs"]["akeneo"].get("failure", 0), 1)
 
 
+class MlflowStatusEndpointTest(unittest.TestCase):
+    """The cockpit's /api/mlflow/status route. When MLFLOW_TRACKING_URI
+    isn't set, it returns `enabled=False` without any HTTP traffic.
+    When it IS set but the server is unreachable (no MLflow running in
+    the test process), it returns `reachable=False` with a clear
+    error message — never an exception."""
+
+    def setUp(self):
+        from fastapi.testclient import TestClient
+        from app.main import app
+
+        self.client = TestClient(app)
+
+    def tearDown(self):
+        os.environ.pop("MLFLOW_TRACKING_URI", None)
+
+    def test_disabled_when_uri_unset(self):
+        os.environ.pop("MLFLOW_TRACKING_URI", None)
+        r = self.client.get("/api/mlflow/status")
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertFalse(body["enabled"])
+        self.assertFalse(body["reachable"])
+        self.assertEqual(body["experiments"], [])
+        self.assertEqual(body["recent_runs"], [])
+        self.assertIsNone(body["ui_url"])
+
+    def test_unreachable_when_uri_set_but_no_server(self):
+        # Point at a port nothing listens on. urlopen raises URLError;
+        # endpoint must catch it and return reachable=False.
+        os.environ["MLFLOW_TRACKING_URI"] = "http://127.0.0.1:1"
+        r = self.client.get("/api/mlflow/status")
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertTrue(body["enabled"])
+        self.assertFalse(body["reachable"])
+        self.assertEqual(body["ui_url"], "http://127.0.0.1:1")
+        self.assertIsNotNone(body["error"])
+
+
 class PromptRegistryRealRepoTest(unittest.TestCase):
     """Sanity-check that the repo-shipped prompts/analyst/v1.md is
     valid + the alias resolution doesn't accidentally break in CI."""
