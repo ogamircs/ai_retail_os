@@ -725,6 +725,130 @@ class IntegrationLayerTest(unittest.TestCase):
         self.assertIn("direction=INBOUND", get_paths[0])
         self.assertFalse(any(m == "POST" for m, _ in calls))
 
+    def test_akeneo_configured_requires_oauth_credentials(self):
+        from app.integrations.systems import AkeneoAdapter
+
+        os.environ["AKENEO_BASE_URL"] = "http://stub"
+        for k in ("AKENEO_CLIENT_ID", "AKENEO_SECRET", "AKENEO_USERNAME", "AKENEO_PASSWORD"):
+            os.environ.pop(k, None)
+        self.assertFalse(AkeneoAdapter().configured())
+
+        os.environ["AKENEO_CLIENT_ID"] = "cid"
+        os.environ["AKENEO_SECRET"] = "sec"
+        self.assertFalse(AkeneoAdapter().configured())  # missing user/pw
+
+        os.environ["AKENEO_USERNAME"] = "admin"
+        os.environ["AKENEO_PASSWORD"] = "pw"
+        self.assertTrue(AkeneoAdapter().configured())
+
+    def test_akeneo_api_list_walks_paginated_links(self):
+        """Akeneo paginates via _links.next; helper must follow until exhausted."""
+        from app.integrations.systems import AkeneoAdapter
+
+        os.environ["AKENEO_BASE_URL"] = "http://stub"
+        os.environ["AKENEO_CLIENT_ID"] = "cid"
+        os.environ["AKENEO_SECRET"] = "sec"
+        os.environ["AKENEO_USERNAME"] = "admin"
+        os.environ["AKENEO_PASSWORD"] = "pw"
+
+        adapter = AkeneoAdapter()
+        adapter._admin_token = "tok"
+        adapter._login = lambda: "tok"  # type: ignore[method-assign]
+
+        pages = {
+            "/api/rest/v1/products?limit=100": {
+                "_embedded": {"items": [{"identifier": "A"}, {"identifier": "B"}]},
+                "_links": {"next": {"href": "http://stub/api/rest/v1/products?page=2"}},
+            },
+            "/api/rest/v1/products?page=2": {
+                "_embedded": {"items": [{"identifier": "C"}]},
+                # no _links.next → stop
+            },
+        }
+
+        class _Stub:
+            def request(self, path, method="GET", payload=None):
+                return pages.get(path, {})
+
+        adapter._client = lambda: _Stub()  # type: ignore[method-assign]
+        out = adapter._api_list("products")
+        self.assertEqual([r["identifier"] for r in out], ["A", "B", "C"])
+
+    def test_akeneo_apply_pim_enrich_patches_product(self):
+        from app.integrations.systems import AkeneoAdapter
+        from app.integrations import store
+
+        os.environ["AKENEO_BASE_URL"] = "http://stub"
+        os.environ["AKENEO_CLIENT_ID"] = "cid"
+        os.environ["AKENEO_SECRET"] = "sec"
+        os.environ["AKENEO_USERNAME"] = "admin"
+        os.environ["AKENEO_PASSWORD"] = "pw"
+
+        adapter = AkeneoAdapter()
+        adapter._admin_token = "tok"
+        adapter._login = lambda: "tok"  # type: ignore[method-assign]
+
+        row = store.create_outbox_action(
+            system_id="akeneo",
+            action_queue_id=None,
+            agent="Merchandiser",
+            action_type="pim_enrich",
+            title="Enrich SKU-001",
+            external_domain="Product",
+            payload={
+                "sku": "SKU-001",
+                "values": {
+                    "name": [{"locale": "en_US", "scope": None, "data": "Updated name"}],
+                },
+            },
+            configured=True,
+        )
+
+        captured: dict = {}
+
+        class _Stub:
+            def request(self, path, method="GET", payload=None):
+                captured["path"] = path
+                captured["method"] = method
+                captured["payload"] = payload
+                return {}
+
+        adapter._client = lambda: _Stub()  # type: ignore[method-assign]
+        result = adapter.apply_outbound(row["id"])
+        self.assertEqual(result["status"], "draft_created", msg=result)
+        self.assertEqual(result["external_id"], "SKU-001")
+        self.assertEqual(captured["method"], "PATCH")
+        self.assertIn("/api/rest/v1/products/SKU-001", captured["path"])
+        self.assertEqual(captured["payload"]["identifier"], "SKU-001")
+
+    def test_akeneo_apply_missing_sku_lands_in_error(self):
+        from app.integrations.systems import AkeneoAdapter
+        from app.integrations import store
+
+        os.environ["AKENEO_BASE_URL"] = "http://stub"
+        os.environ["AKENEO_CLIENT_ID"] = "cid"
+        os.environ["AKENEO_SECRET"] = "sec"
+        os.environ["AKENEO_USERNAME"] = "admin"
+        os.environ["AKENEO_PASSWORD"] = "pw"
+
+        adapter = AkeneoAdapter()
+        adapter._admin_token = "tok"
+        adapter._login = lambda: "tok"  # type: ignore[method-assign]
+
+        row = store.create_outbox_action(
+            system_id="akeneo",
+            action_queue_id=None,
+            agent="Merchandiser",
+            action_type="pim_enrich",
+            title="Bad payload",
+            external_domain="Product",
+            payload={"values": {"name": []}},  # no sku
+            configured=True,
+        )
+        result = adapter.apply_outbound(row["id"])
+        self.assertEqual(result["status"], "error")
+        self.assertIn("sku", result["result"]["error"].lower())
+
     def test_openboxes_apply_unsupported_falls_back(self):
         """`store_transfer` (declared in outbound_domain but NOT in
         LIVE_ACTION_TYPES for OpenBoxes) falls back to base mock-apply.
