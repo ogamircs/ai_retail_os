@@ -1,0 +1,5 @@
+# Rendered config — bootstrap.sh substitutes the @@…@@ placeholders in
+# openboxes-config.properties.template using the OPENBOXES_DB_* env
+# values that the compose stack starts MySQL with. Don't commit it;
+# it carries the operator's password verbatim.
+openboxes-config.properties
