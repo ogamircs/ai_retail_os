@@ -4,8 +4,10 @@
 # LLM provider abstraction, prompts, or the eval harness itself).
 # Runs the four-scenario eval harness in single-pass + multi-pass mode
 # against the configured LLM provider, then posts a delta comment back
-# to the PR. Blocks merge when any rubric dimension regresses by more
-# than the configured threshold.
+# to the PR. Blocks merge when any scenario's multi-pass total
+# regresses below single-pass by more than `EVAL_REGRESSION_THRESHOLD`
+# (default 0.05 = 5% of the per-scenario 12-point max = 0.6 points;
+# 0.20 → 2.4 points; 0.30 → 3.6 points; etc).
 #
 # Required repo secrets:
 #   ANTHROPIC_API_KEY | OPENAI_API_KEY | GOOGLE_API_KEY (any one is enough)

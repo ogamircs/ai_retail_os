@@ -70,25 +70,60 @@ def _format_table(summary: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _detect_regressions(summary: dict[str, Any], threshold: float) -> list[str]:
-    """A regression = a per-dimension multi-pass score lower than
-    single-pass by more than `threshold` * 3 (since each dim is 0-3).
+# Per-scenario score is the sum of 4 dimensions × 3 points each = 12.
+# Regression detection scales the threshold against this max so the
+# `EVAL_REGRESSION_THRESHOLD` env knob actually has meaningful
+# resolution — see _detect_regressions.
+_MAX_DIMS = 4
+_MAX_PER_DIM = 3
+_MAX_PER_SCENARIO = _MAX_DIMS * _MAX_PER_DIM
 
-    Conservative — we don't compare to a historical baseline because
-    we don't always have one in CI; instead we treat single-pass as
-    the floor (multi-pass should NEVER be worse than single-pass).
+
+def _detect_regressions(summary: dict[str, Any], threshold: float) -> list[str]:
+    """A regression = a per-scenario multi-pass *total* lower than the
+    single-pass total by more than `threshold * _MAX_PER_SCENARIO`
+    points.
+
+    Why per-scenario totals (0-12) and not per-dimension (0-3)? Each
+    dimension is an integer judged 0..3, so the *minimum* possible
+    drop is 1 point. Scaling against the per-dimension max made every
+    threshold below 33% behave identically — a 1-point dim drop
+    flagged at 5%, 10%, AND 20% — defeating the documented knob.
+    Comparing totals gives the threshold real resolution:
+      threshold=0.05 → margin 0.6 pts  (any 1-pt total drop flags)
+      threshold=0.10 → margin 1.2 pts  (drops of 2+ flag)
+      threshold=0.20 → margin 2.4 pts  (drops of 3+ flag)
+      threshold=0.30 → margin 3.6 pts  (drops of 4+ flag)
+
+    A 1-point total drop on one scenario is rarely worth blocking the
+    merge — that's stochastic LLM noise. But a 3+ point drop is a
+    real regression, and now operators can dial the gate accordingly.
+
+    Conservative across the board — we don't compare to a historical
+    baseline because we don't always have one in CI; instead we treat
+    single-pass as the floor (multi-pass mesh must never be worse).
     """
     flagged: list[str] = []
-    margin = threshold * 3.0
+    margin_pts = threshold * float(_MAX_PER_SCENARIO)
     for s, payload in summary["scenarios"].items():
-        per_dim = payload.get("per_dimension", {})
-        for dim, vals in per_dim.items():
-            multi = vals.get("multi_pass", 0)
-            single = vals.get("single_pass", 0)
-            if multi < single - margin:
-                flagged.append(
-                    f"`{s}::{dim}`: multi={multi}, single={single} (Δ={multi - single:.2f})"
-                )
+        multi_total = float(payload.get("multi_pass_total", 0))
+        single_total = float(payload.get("single_pass_total", 0))
+        if multi_total < single_total - margin_pts:
+            # Surface the worst per-dim contributor so the operator
+            # can jump straight to it instead of re-reading the body.
+            per_dim = payload.get("per_dimension", {})
+            worst_dim = ""
+            worst_drop = 0
+            for dim, vals in per_dim.items():
+                drop = vals.get("single_pass", 0) - vals.get("multi_pass", 0)
+                if drop > worst_drop:
+                    worst_drop = drop
+                    worst_dim = dim
+            flagged.append(
+                f"`{s}`: multi={multi_total:.0f}/12 single={single_total:.0f}/12 "
+                f"(Δ={multi_total - single_total:+.1f}; worst dim: "
+                f"`{worst_dim}` -{worst_drop})"
+            )
     return flagged
 
 
@@ -131,12 +166,13 @@ def main() -> int:
             body_lines.append(f"- {r}")
         body_lines.append("")
         body_lines.append(
-            f"_Threshold: any per-dimension multi-pass score below "
-            f"single-pass by more than {threshold * 100:.0f}% × 3 ="
-            f" {threshold * 3:.2f} points blocks the merge._"
+            f"_Threshold: any scenario whose multi-pass total drops below "
+            f"single-pass by more than {threshold * 100:.0f}% × {_MAX_PER_SCENARIO} = "
+            f"{threshold * _MAX_PER_SCENARIO:.2f} points blocks the merge. "
+            f"Set `EVAL_REGRESSION_THRESHOLD` to tune sensitivity (default 0.05)._"
         )
     else:
-        body_lines.append("### ✅ No per-dimension regressions beyond threshold")
+        body_lines.append("### ✅ No per-scenario regressions beyond threshold")
     body = "\n".join(body_lines)
     _post_comment(body)
     if regressions:
