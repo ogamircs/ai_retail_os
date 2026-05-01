@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { marked } from "marked";
 import {
   applyIntegrationAction,
@@ -49,6 +49,14 @@ function ApprovalContent() {
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState<string>("");
   const [artifact, setArtifact] = useState<(ArtifactMeta & { body: string }) | null>(null);
+  // Synchronous lock to dedupe rapid double-clicks on the apply
+  // button. React state updates are async — between the first click
+  // setting phase="applying" and React re-rendering (which removes the
+  // button), a second click could still fire `apply()` with a stale
+  // closure where phase==="idle". The ref flips synchronously so the
+  // second call returns immediately, even if both clicks land in the
+  // same render frame.
+  const applyInflightRef = useRef(false);
 
   const action = drawer?.kind === "approval" ? drawer.action : null;
   const external = drawer?.kind === "approval" ? drawer.external : undefined;
@@ -73,19 +81,29 @@ function ApprovalContent() {
 
   const apply = async () => {
     if (!external) return;
-    // Track 3 B4: gate the apply behind biometric (Tauri shell) or
-    // confirm() (browser fallback). `unsupported` means neither was
-    // available in this runtime — proceed so headless / CI flows still
-    // work, but the operator's test environment reflects the gap.
-    const outcome = await requireBiometric({
-      reason: `Apply ${action.action_type} to ${external.system_id}? This will mutate the external system.`,
-      title: "Operator confirmation",
-    });
-    if (outcome === "cancelled") {
-      return;
-    }
+    // Synchronous lock — beat the React state update so concurrent
+    // clicks (double-tap, slow operator clicking through the prompt)
+    // can't both pass into applyIntegrationAction and produce a
+    // duplicate mutation on the external system.
+    if (applyInflightRef.current) return;
+    applyInflightRef.current = true;
     setPhase("applying");
     try {
+      // Track 3 B4: gate the apply behind biometric (Tauri shell) or
+      // confirm() (browser fallback). `unsupported` means neither was
+      // available in this runtime — proceed so headless / CI flows
+      // still work, but the operator's test environment reflects the
+      // gap.
+      const outcome = await requireBiometric({
+        reason: `Apply ${action.action_type} to ${external.system_id}? This will mutate the external system.`,
+        title: "Operator confirmation",
+      });
+      if (outcome === "cancelled") {
+        // Operator backed out — return the drawer to its idle state
+        // and release the lock so they can retry without reopening it.
+        setPhase("idle");
+        return;
+      }
       const r = await applyIntegrationAction(external.system_id, external.id);
       setResult(r);
       setPhase("applied");
@@ -93,6 +111,8 @@ function ApprovalContent() {
     } catch (e: any) {
       setError(e?.message ?? "apply failed");
       setPhase("error");
+    } finally {
+      applyInflightRef.current = false;
     }
   };
 

@@ -126,8 +126,18 @@ export async function requestApprovalPushPermission(): Promise<NotificationPermi
 export async function notifyPendingApprovals(actions: ActionItem[]): Promise<number> {
   if (typeof window === "undefined") return 0;
   // Skip silently when we know permission is denied — avoid recomputing
-  // the queue on every refresh.
-  if (!isTauri() && Notification?.permission === "denied") return 0;
+  // the queue on every refresh. Guard against runtimes where
+  // `Notification` itself is undeclared (some embedded WebViews,
+  // headless test environments) — `Notification?.permission` would
+  // raise ReferenceError on the bare identifier rather than yielding
+  // undefined, turning a routine poll into an unhandled rejection.
+  if (
+    !isTauri() &&
+    typeof Notification !== "undefined" &&
+    Notification.permission === "denied"
+  ) {
+    return 0;
+  }
 
   let fired = 0;
   for (const a of actions) {
