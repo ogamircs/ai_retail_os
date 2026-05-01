@@ -188,7 +188,7 @@ Operator must verify each before promoting this UAT:
 
 - [ ] `make medusa-bootstrap` succeeds; admin login works at `/app`.
 - [ ] `make medusa-seed` completes with zero `++` lines on the second run.
-- [ ] `POST /api/integrations/medusa/sync` reports `mode=connected`, all four domains (`Sales Channel`, `Stock Location`, `Product`, `Order`) > 0.
+- [ ] `POST /api/integrations/medusa/sync` reports `mode=connected`. Catalogue domains (`Sales Channel`, `Stock Location`, `Product`) must each be > 0; the `Order` domain is allowed to be 0 on a fresh demo (the seed creates channels / locations / products, not orders) — the gate is "domain key is present in the summary", not "count > 0".
 - [ ] cockpit Pending rail surfaces a `Rebalance category inventory` row when `recommend_store_transfer` runs.
 - [ ] drawer apply lands a metadata entry under `retail_os_pending_transfers` on the from-store stock_location, visible in the Medusa admin UI.
 - [ ] second apply on the same row returns `details.reused=true`; metadata array length unchanged.
