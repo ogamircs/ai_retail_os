@@ -248,6 +248,46 @@ class WikiAutoPublishTest(unittest.TestCase):
         # Stayed a draft — operator must approve manually.
         self.assertEqual(page.status, "draft")
 
+    def test_mixed_critiques_one_dirty_blocks_publish(self):
+        """Multi-specialist turn: one critique clean, one dirty.
+        Auto-publish must hold the wiki draft — a single dirty
+        critique anywhere in the turn signals an unvetted draft.
+        """
+        from app.agents.chief_of_staff import _wiki_auto_publish_clean_drafts
+        from app.spine.events import append_event
+        from datetime import datetime, timezone
+
+        turn_start = datetime.now(timezone.utc).isoformat()
+        wiki.propose_edit("x/y", "T", "BODY", "Wiki Curator")
+
+        clean_id = write_artifact(
+            agent="Critic", kind="critique", title="C1",
+            body_md=(
+                "## Verified\nok\n## Gaps\n*No material findings.*\n"
+                "## Risks\n*No material findings.*\n## Counter-recommendation\nhold\n"
+            ),
+            refs=["x"], stage="critique",
+        )
+        dirty_id = write_artifact(
+            agent="Critic", kind="critique", title="C2",
+            body_md=(
+                "## Verified\nok\n## Gaps\nMissed weather forecast.\n"
+                "## Risks\n*No material findings.*\n## Counter-recommendation\nrevisit\n"
+            ),
+            refs=["x"], stage="critique",
+        )
+        for cid in (clean_id, dirty_id):
+            append_event(
+                agent="Critic", kind="observation",
+                payload={"artifact_title": "C", "stage": "critique"},
+                artifact_id=cid,
+            )
+
+        _wiki_auto_publish_clean_drafts(turn_start, llm=None)
+        page = wiki.get_page("x/y")
+        # ALL critiques must be clean → mixed turn keeps draft.
+        self.assertEqual(page.status, "draft")
+
     def test_no_critique_leaves_draft_untouched(self):
         """A turn without any Critic involvement (e.g. plain Analyst
         question, no review loop) must not auto-publish wiki drafts.

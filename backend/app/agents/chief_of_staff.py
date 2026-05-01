@@ -549,21 +549,23 @@ def _wiki_auto_publish_clean_drafts(turn_start_iso: str, llm: LLMProvider) -> No
         and e.get("agent") == "Critic"
         and e.get("artifact_id")
     ]
-    # If at least one critique fired this turn AND came back clean
-    # (no Gaps + no Risks), treat the turn's wiki drafts as
-    # endorsed. The Critic doesn't review wiki drafts directly today —
-    # but if its audit of the agent's draft found no material gaps,
-    # the lessons distilled from that draft are likewise low-risk.
-    # This is conservative: an operator-flagged turn (Critic surfacing
-    # ANY gap or risk on the agent's draft) leaves wiki drafts in
-    # `draft` for explicit operator approval.
-    any_critique_clean = False
-    for ev in critique_artifacts:
-        from app.agents.chief_of_staff import _critique_is_clean as _clean
-        if _clean(ev["artifact_id"]):
-            any_critique_clean = True
-            break
-    if not any_critique_clean:
+    # Two-part gate (PR review #31 fix):
+    #   1. At least one Critic critique must have fired this turn — a
+    #      turn with NO review must not auto-publish. Without this gate,
+    #      a quick Analyst-only "what happened" turn could promote
+    #      every Curator draft without anyone reviewing the agent
+    #      draft they came from.
+    #   2. EVERY critique must be clean. The original "any clean"
+    #      check was too permissive — in a multi-specialist turn,
+    #      Pricing's clean review of its own markdown plan should not
+    #      auto-publish a separate Replenishment-flagged wiki draft
+    #      whose source draft DID have gaps. Be conservative: one
+    #      dirty critique anywhere in the turn keeps every wiki draft
+    #      held for operator approval.
+    if not critique_artifacts:
+        return
+    all_clean = all(_critique_is_clean(ev["artifact_id"]) for ev in critique_artifacts)
+    if not all_clean:
         return
     for edit in edits:
         slug = (edit.get("payload") or {}).get("slug")

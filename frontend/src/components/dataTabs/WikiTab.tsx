@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from "react";
-import { marked } from "marked";
 import {
   WikiPage,
   deprecateWikiPage,
@@ -9,6 +8,7 @@ import {
   searchWikiPages,
 } from "../../lib/api";
 import { agentInkStyle } from "../../lib/agentInk";
+import { renderSafeMarkdown } from "../../lib/safeMarkdown";
 import "./WikiTab.css";
 
 /**
@@ -160,7 +160,7 @@ export default function WikiTab() {
               <div
                 className="wiki-detail-body md"
                 data-testid="wiki-detail-body"
-                dangerouslySetInnerHTML={{ __html: marked.parse(selected.body_md) as string }}
+                dangerouslySetInnerHTML={{ __html: renderSafeMarkdown(selected.body_md) }}
               />
               {selected.refs.length > 0 && (
                 <footer className="wiki-detail-refs">
