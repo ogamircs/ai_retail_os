@@ -55,9 +55,17 @@ def _read_aliases(agent: str) -> dict[str, str]:
     if not p.exists():
         return {}
     try:
-        return json.loads(p.read_text())
+        parsed = json.loads(p.read_text())
     except Exception:
         return {}
+    # Defence in depth — an operator who commits a syntactically valid
+    # but non-object aliases.json (e.g. accidentally a list or a bare
+    # string) would otherwise crash agent construction at first turn
+    # via .get(...). Treat anything that isn't a string-keyed dict as
+    # an empty registry so the in-code SYSTEM fallback fires cleanly.
+    if not isinstance(parsed, dict):
+        return {}
+    return {str(k): str(v) for k, v in parsed.items() if isinstance(v, (str, int, float))}
 
 
 def _read_version(agent: str, version: str) -> Optional[str]:

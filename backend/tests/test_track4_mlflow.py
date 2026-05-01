@@ -121,6 +121,110 @@ class TracingProviderEnabledNoMlflowTest(unittest.TestCase):
         finally:
             mesh_tracing._try_import_mlflow = original_loader  # type: ignore
 
+    def test_loader_does_not_cache_disabled_state(self):
+        """A long-lived process that calls _try_import_mlflow before
+        MLFLOW_TRACE_ENABLED is set must NOT cache None forever. The
+        next call (after the operator flips the flag) should retry
+        the import and succeed — otherwise turn_run / delegate_run
+        silently stay no-ops for the rest of the process lifetime.
+        """
+        # First call: tracing disabled, expect None and no caching.
+        os.environ.pop("MLFLOW_TRACE_ENABLED", None)
+        mesh_tracing._mlflow_module = None
+        mesh_tracing._mlflow_load_attempted = False
+
+        self.assertIsNone(mesh_tracing._try_import_mlflow())
+        self.assertFalse(
+            mesh_tracing._mlflow_load_attempted,
+            "disabled state must not poison the cache",
+        )
+
+        # Now enable tracing + stub the import so we don't need the
+        # real mlflow package. Second call must pick up the change.
+        os.environ["MLFLOW_TRACE_ENABLED"] = "1"
+
+        class _StubMlflow:
+            @staticmethod
+            def set_tracking_uri(_):
+                pass
+
+            @staticmethod
+            def set_experiment(_):
+                pass
+
+        import sys as _sys
+
+        old_mod = _sys.modules.get("mlflow")
+        _sys.modules["mlflow"] = _StubMlflow  # type: ignore
+        try:
+            mod = mesh_tracing._try_import_mlflow()
+            self.assertIs(mod, _StubMlflow)
+            self.assertTrue(mesh_tracing._mlflow_load_attempted)
+        finally:
+            if old_mod is not None:
+                _sys.modules["mlflow"] = old_mod
+            else:
+                _sys.modules.pop("mlflow", None)
+
+    def test_log_event_writes_running_total_metric(self):
+        """log_event called N times for the same kind must log N as
+        the metric value the Nth time, not 1.0 each call. Otherwise
+        operators see "1" on the run row no matter how many events
+        fired during the turn.
+        """
+        os.environ["MLFLOW_TRACE_ENABLED"] = "1"
+        mesh_tracing._mlflow_module = None
+        mesh_tracing._mlflow_load_attempted = False
+
+        logged: list[tuple[str, float, str]] = []
+        log_dicts: list[tuple[dict, str]] = []
+
+        class _StubMlflow:
+            @staticmethod
+            def set_tracking_uri(_):
+                pass
+
+            @staticmethod
+            def set_experiment(_):
+                pass
+
+            @staticmethod
+            def log_metric(key, value, run_id=None, **_):
+                logged.append((key, value, run_id or ""))
+
+            @staticmethod
+            def log_dict(d, path):
+                log_dicts.append((d, path))
+
+        import sys as _sys
+
+        old_mod = _sys.modules.get("mlflow")
+        _sys.modules["mlflow"] = _StubMlflow  # type: ignore
+        try:
+            # Push a fake frame onto the stack so log_event's "is there
+            # an active run" guard passes.
+            from app.llm.tracing import _RunFrame, _stack
+
+            frame = _RunFrame(run_id="fake-run-id", name="t", phase="turn", agent=None)
+            token = _stack.set((frame,))
+            try:
+                mesh_tracing.log_event("mesh_downgrade", {"reason": "a"})
+                mesh_tracing.log_event("mesh_downgrade", {"reason": "b"})
+                mesh_tracing.log_event("mesh_downgrade", {"reason": "c"})
+            finally:
+                _stack.reset(token)
+
+            metric_values = [v for k, v, _ in logged if k == "event.mesh_downgrade"]
+            # 1, 2, 3 — running total, not constant 1.
+            self.assertEqual(metric_values, [1.0, 2.0, 3.0])
+            # Each call also dropped a structured artifact.
+            self.assertEqual(len(log_dicts), 3)
+        finally:
+            if old_mod is not None:
+                _sys.modules["mlflow"] = old_mod
+            else:
+                _sys.modules.pop("mlflow", None)
+
     def test_loader_does_not_clobber_caller_set_experiment(self):
         """The lazy mlflow loader must not override an experiment the
         caller (e.g. run_eval.py) already set. Otherwise the first
@@ -250,6 +354,29 @@ class PromptRegistryTest(unittest.TestCase):
     def test_agent_name_with_punctuation_slugs_correctly(self):
         self._seed("pricing_promo", {"v1": "PRICING"}, {"prod": "v1"})
         self.assertEqual(resolve_prompt("Pricing & Promo", "FALLBACK"), "PRICING")
+
+    def test_aliases_json_with_non_dict_falls_back_safely(self):
+        """Operator commits a syntactically valid but non-object
+        aliases.json (e.g. a list). resolve_prompt must not raise
+        AttributeError — must return the in-code SYSTEM fallback so
+        the next operator turn still works."""
+        d = Path(self.tmp.name) / "testagent"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "v1.md").write_text("V1")
+        # JSON list — `.get(...)` would AttributeError without the guard.
+        (d / "aliases.json").write_text(json.dumps(["prod", "v1"]))
+        self.assertEqual(resolve_prompt("testagent", "FALLBACK"), "FALLBACK")
+        self.assertIsNone(active_version("testagent"))
+
+    def test_aliases_json_with_non_string_values_filters_them(self):
+        """Garbage values (a nested object, null) must not crash the
+        version resolver — non-stringable entries are dropped."""
+        d = Path(self.tmp.name) / "testagent"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "v1.md").write_text("V1")
+        (d / "aliases.json").write_text(json.dumps({"prod": "v1", "broken": {"nested": "x"}}))
+        # 'prod' still resolves; 'broken' is dropped silently.
+        self.assertEqual(resolve_prompt("testagent", "FALLBACK"), "V1")
 
 
 class TelemetryAggregatorTest(unittest.TestCase):

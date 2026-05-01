@@ -34,7 +34,7 @@ import contextvars
 import json
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Iterator
 
 from app.llm.base import AssistantTurn, LLMProvider, Message, Tool
@@ -49,14 +49,22 @@ _mlflow_load_attempted: bool = False
 
 
 def _try_import_mlflow() -> Any | None:
-    """Lazy-import. Caches the module (or None) after the first attempt
-    so a repeated import-failure doesn't re-pay the import cost on
-    every chat() call."""
+    """Lazy-import. Caches the module (or None) after the *first
+    successful* import attempt so the import cost is paid once.
+
+    Deliberately *does not* cache the disabled state. A long-lived
+    process (a worker, a test harness) can flip MLFLOW_TRACE_ENABLED
+    on at runtime — if we cached `None` the first time tracing was
+    off, every subsequent turn would silently stay un-traced even
+    after the operator turned it on. Cheap to re-check the env var on
+    every chat() call.
+    """
     global _mlflow_module, _mlflow_load_attempted
     if _mlflow_load_attempted:
         return _mlflow_module
-    _mlflow_load_attempted = True
     if not is_tracing_enabled():
+        # Don't poison the cache — when the operator flips the flag,
+        # the next call should retry the import.
         return None
     try:
         import mlflow  # type: ignore
@@ -77,8 +85,15 @@ def _try_import_mlflow() -> Any | None:
         if exp:
             mlflow.set_experiment(exp)
         _mlflow_module = mlflow
+        _mlflow_load_attempted = True
     except Exception:
+        # ImportError (mlflow extra not installed) or any setup error
+        # — cache the failure so we don't re-pay the import cost on
+        # every subsequent chat() call. Operators can recover by
+        # `pip install -e .[mlflow]` and restarting the process; the
+        # cache is per-process.
         _mlflow_module = None
+        _mlflow_load_attempted = True
     return _mlflow_module
 
 
@@ -97,6 +112,12 @@ class _RunFrame:
     name: str
     phase: str  # "turn" | "delegate" | "critic" | "revision" | "peer_review" | "leaf"
     agent: str | None
+    # Per-frame counters for `log_event` so the metric shows the
+    # *running total* across the run rather than a constant 1. Mlflow's
+    # log_metric tracks history, but the run summary takes the latest
+    # value — so writing the running total each time gives operators
+    # the count they expect on the run row.
+    event_counters: dict[str, int] = field(default_factory=dict)
 
 
 _stack: contextvars.ContextVar[tuple[_RunFrame, ...]] = contextvars.ContextVar(
@@ -192,13 +213,28 @@ def log_event(kind: str, payload: dict[str, Any]) -> None:
     MLflow so the metric "downgrades per session" is queryable from
     the tracking UI without a separate ETL."""
     mlflow = _try_import_mlflow()
-    if mlflow is None or not _stack.get():
+    if mlflow is None:
+        return
+    stack = _stack.get()
+    if not stack:
         return
     try:
         mlflow.log_dict({"kind": kind, **payload}, f"event_{kind}_{int(time.time() * 1000)}.json")
-        # Also bump a counter metric so the run shows the number of
-        # events of this kind without parsing the artifact list.
-        mlflow.log_metric(f"event.{kind}", 1.0)
+        # Walk every active frame and bump the running total — that way
+        # multiple events of the same kind in a single run accumulate
+        # into a usable counter (mlflow's run-summary value is the
+        # *latest* logged metric, so we have to write the cumulative
+        # total each time, not a constant 1). Updating every ancestor
+        # ensures parent runs (turn / delegate) also reflect events
+        # that fire inside their nested children.
+        metric_key = f"event.{kind}"
+        for frame in stack:
+            frame.event_counters[kind] = frame.event_counters.get(kind, 0) + 1
+            mlflow.log_metric(
+                metric_key,
+                float(frame.event_counters[kind]),
+                run_id=frame.run_id,
+            )
     except Exception:
         pass
 
