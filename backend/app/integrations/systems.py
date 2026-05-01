@@ -1416,6 +1416,215 @@ class MedusaAdapter(IntegrationAdapter):
             action_type, super().outbound_domain(action_type)
         )
 
+    # ----- live outbound apply --------------------------------------------
+
+    # Cockpit actions that map onto real Medusa objects. Everything else
+    # falls back to the base mock-apply behaviour.
+    #
+    # Medusa v2 doesn't have a built-in inter-location transfer concept,
+    # and our outbox payloads don't carry concrete order ids — so for both
+    # supported types we record the action as auditable metadata on an
+    # existing Medusa entity rather than inventing fake orders / inventory
+    # items just to look impressive. Operator can read the audit trail
+    # directly from the Medusa admin UI.
+    LIVE_ACTION_TYPES = {"store_transfer", "fulfillment_routing"}
+
+    def apply_outbound(self, action_id: int) -> dict[str, Any]:
+        from app.integrations import store
+
+        action = store.get_outbox_action(action_id, system_id=self.definition.system_id)
+        if not action:
+            return {"error": f"unknown outbox action: {action_id}"}
+        if action["status"] in {"applied", "applied_mock", "draft_created"}:
+            return action
+
+        if not self.configured() or action["action_type"] not in self.LIVE_ACTION_TYPES:
+            return super().apply_outbound(action_id)
+
+        try:
+            outcome = self._dispatch_outbound(action)
+        except Exception as exc:  # pragma: no cover - exercised only with live Medusa
+            return store.update_outbox_action(
+                action_id,
+                status="error",
+                result={
+                    "error": str(exc),
+                    "system_id": self.definition.system_id,
+                    "external_domain": action["external_domain"],
+                    "message": (
+                        "Medusa rejected the apply. The outbox action is left "
+                        "in error state — fix the upstream payload and retry."
+                    ),
+                },
+            )
+
+        if not outcome.get("external_id"):
+            return store.update_outbox_action(
+                action_id,
+                status="error",
+                result={
+                    "error": outcome.get("message", "Medusa apply produced no external_id"),
+                    "system_id": self.definition.system_id,
+                    "external_domain": action["external_domain"],
+                    "message": outcome.get(
+                        "message",
+                        "Medusa returned no external_id — nothing was written. Check the outbox payload and retry.",
+                    ),
+                    "details": outcome.get("details", {}),
+                },
+            )
+
+        return store.update_outbox_action(
+            action_id,
+            status="draft_created",
+            external_id=outcome["external_id"],
+            result={
+                "message": outcome.get("message", "Recorded action in Medusa."),
+                "system_id": self.definition.system_id,
+                "external_domain": action["external_domain"],
+                "external_id": outcome["external_id"],
+                "details": outcome.get("details", {}),
+            },
+        )
+
+    def _dispatch_outbound(self, action: dict[str, Any]) -> dict[str, Any]:
+        action_type = action["action_type"]
+        payload = action.get("payload") or {}
+        title = action.get("title") or "AI Retail OS action"
+        if action_type == "store_transfer":
+            return self._medusa_record_transfer(title, payload)
+        if action_type == "fulfillment_routing":
+            return self._medusa_record_routing(title, payload)
+        raise RuntimeError(f"unsupported action_type {action_type!r} for live Medusa apply")
+
+    @staticmethod
+    def _payload_marker(payload: dict[str, Any]) -> str:
+        """Stable per-payload marker for idempotent metadata appends.
+
+        Re-applying the same outbox row should land at the existing log
+        entry instead of duplicating. Sorted-keys sha256 means same
+        payload → same marker, even across processes.
+        """
+        import hashlib
+
+        digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+        return f"p{digest[:12]}"
+
+    def _medusa_record_transfer(self, title: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """`store_transfer` → append the transfer to the from-store stock
+        location's `metadata.retail_os_pending_transfers` array.
+
+        Medusa v2 has no inter-location transfer primitive; metadata
+        stash is the cleanest auditable signal. We look up the location
+        by `metadata.retail_os_store_id` (the seed stashed it in P2),
+        fail clearly if it isn't there, and dedupe by payload-hash
+        marker so re-runs are idempotent.
+        """
+        from_store = (payload.get("from_store") or "").strip()
+        if not from_store:
+            return {
+                "external_id": None,
+                "message": "store_transfer payload has no from_store; nothing to apply.",
+            }
+        target = self._find_location_by_store_id(from_store)
+        if target is None:
+            return {
+                "external_id": None,
+                "message": (
+                    f"no Medusa stock_location found for retail_os_store_id="
+                    f"{from_store}; run `make medusa-seed`."
+                ),
+            }
+        location_id = str(target["id"])
+        meta = dict(target.get("metadata") or {})
+        log = list(meta.get("retail_os_pending_transfers") or [])
+        marker = self._payload_marker(payload)
+        if any((isinstance(e, dict) and e.get("marker") == marker) for e in log):
+            return {
+                "external_id": location_id,
+                "message": f"transfer already recorded on stock_location {location_id}.",
+                "details": {"marker": marker, "reused": True},
+            }
+        log.append(
+            {
+                "marker": marker,
+                "title": title,
+                "to_store": payload.get("to_store"),
+                "category": payload.get("category"),
+                "qty": payload.get("qty"),
+                "reason": payload.get("reason"),
+            }
+        )
+        meta["retail_os_pending_transfers"] = log
+        self._admin_request(
+            f"/admin/stock-locations/{quote(location_id)}",
+            method="POST",
+            payload={"metadata": meta},
+        )
+        return {
+            "external_id": location_id,
+            "message": f"Recorded transfer on stock_location {location_id}.",
+            "details": {"marker": marker, "from_store": from_store},
+        }
+
+    def _medusa_record_routing(self, title: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """`fulfillment_routing` → append to the Retail Demo sales channel's
+        `metadata.retail_os_routing_log`. Same marker-dedupe pattern.
+        """
+        target = self._find_sales_channel_by_name("Retail Demo")
+        if target is None:
+            return {
+                "external_id": None,
+                "message": (
+                    "no 'Retail Demo' sales channel found; run `make medusa-seed`."
+                ),
+            }
+        channel_id = str(target["id"])
+        meta = dict(target.get("metadata") or {})
+        log = list(meta.get("retail_os_routing_log") or [])
+        marker = self._payload_marker(payload)
+        if any((isinstance(e, dict) and e.get("marker") == marker) for e in log):
+            return {
+                "external_id": channel_id,
+                "message": f"routing already recorded on sales_channel {channel_id}.",
+                "details": {"marker": marker, "reused": True},
+            }
+        log.append(
+            {
+                "marker": marker,
+                "title": title,
+                "category": payload.get("category"),
+                "strategy": payload.get("recommended_strategy"),
+                "guardrail": payload.get("guardrail"),
+            }
+        )
+        meta["retail_os_routing_log"] = log
+        self._admin_request(
+            f"/admin/sales-channels/{quote(channel_id)}",
+            method="POST",
+            payload={"metadata": meta},
+        )
+        return {
+            "external_id": channel_id,
+            "message": f"Recorded routing on sales_channel {channel_id}.",
+            "details": {"marker": marker},
+        }
+
+    def _find_location_by_store_id(self, store_id: str) -> dict[str, Any] | None:
+        rows, _ = self._admin_list("stock-locations", "stock_locations")
+        for row in rows:
+            meta = row.get("metadata") or {}
+            if meta.get("retail_os_store_id") == store_id:
+                return row
+        return None
+
+    def _find_sales_channel_by_name(self, name: str) -> dict[str, Any] | None:
+        rows, _ = self._admin_list("sales-channels", "sales_channels")
+        for row in rows:
+            if row.get("name") == name:
+                return row
+        return None
+
 
 _OPENBOXES_MARKER_RE = re.compile(r"\[retail-os:([a-zA-Z0-9_\-]+)\]")
 

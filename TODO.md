@@ -146,7 +146,14 @@ For every system, the per-system phases are the same:
   - [x] Three new unit tests in `tests/test_integrations.py`: `_admin_list` paginates until `count` consumed, truncation flag fires when `max_rows` hit, `configured()` requires admin creds.
   - [x] `backend/tests/test_integrations_medusa_live.py` — env-gated, three live tests: live sync round-trip, seeded `retail_os_store_id` external_ref round-trip, registry reports `mode=connected`. Skipped automatically when creds aren't set so CI stays mock-only.
 
-- [ ] P4 · Live outbound apply _(in flight on `feature/medusa-p4-apply` — see PR #23)_
+- [x] **P4 · Live outbound apply** _(bundled in `feature/track1-finale`)_
+  - [x] `MedusaAdapter.LIVE_ACTION_TYPES = {"store_transfer", "fulfillment_routing"}` — every other action_type falls back to base mock-apply, same shape as ERPNext / Mautic.
+  - [x] `apply_outbound` mirrors the Mautic dispatcher: configured + supported → `_dispatch_outbound`; adapter rejection lands in `error` (not `draft_created`); outbox `external_id` mirrors the Medusa entity id.
+  - [x] `_medusa_record_transfer` (store_transfer) → looks up the from-store stock_location by `metadata.retail_os_store_id`, appends a transfer row to `metadata.retail_os_pending_transfers`, then POSTs the merged metadata back. Medusa v2 has no inter-location transfer primitive; metadata stash is the cleanest auditable signal and the operator can read it directly from the admin UI.
+  - [x] `_medusa_record_routing` (fulfillment_routing) → finds the "Retail Demo" sales channel by name and appends to `metadata.retail_os_routing_log`. Same shape.
+  - [x] `_payload_marker` — sha256 over sorted-keys JSON of the payload. Re-applying the same outbox row recognises the existing log entry and returns `details.reused=True` instead of duplicating.
+  - [x] Five new unit tests in `tests/test_integrations.py` (stubbed `_client`): transfer happy path, transfer idempotency, routing happy path, missing-from_store → error landing, unsupported-type fallback.
+  - [x] Two new env-gated live tests in `tests/test_integrations_medusa_live.py` (`MedusaLiveApplyTest`): real `store_transfer` records on the seeded stock location; `fulfillment_routing` records on the seeded sales channel.
 
 - [x] **P5 · Agent-loop UAT** _(branch: `feature/medusa-p6-docs` — bundled with P6, open PR pending)_
   - [x] `docs/uat/2026-04-30-medusa-p5-store-transfer-demo.md` — full walkthrough with two demos (`store_transfer` lands metadata on the from-store stock_location; `fulfillment_routing` lands on the Retail Demo sales channel), CLI-equivalent verification at every step, idempotency check (re-apply → `details.reused=true`), and an acceptance checklist the operator runs before promoting the UAT.
