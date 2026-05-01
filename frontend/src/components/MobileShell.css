@@ -1,0 +1,74 @@
+.mobile-shell {
+  display: grid;
+  grid-template-rows: auto auto 1fr;
+  height: 100vh;
+  background: var(--bg);
+}
+
+.mobile-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.mobile-tabs button {
+  background: transparent;
+  border: none;
+  padding: var(--sp-2);
+  color: var(--ink-mute);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.04em;
+  cursor: pointer;
+}
+
+.mobile-tabs button + button {
+  border-left: 1px solid var(--line);
+}
+
+.mobile-tabs button.active {
+  color: var(--ink);
+  background: var(--panel);
+}
+
+.mobile-main {
+  position: relative;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--panel);
+}
+
+.mobile-main .panel {
+  display: none;
+  height: 100%;
+  overflow: auto;
+}
+
+.mobile-main .panel.active {
+  display: block;
+}
+
+/* The EventTape default style is a single-row marquee at the bottom of
+ * the desktop cockpit. On mobile we want it to flow as a scrollable
+ * column instead. */
+.mobile-main .mobile-tape-panel .event-tape {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--sp-1);
+  padding: var(--sp-2);
+  white-space: normal;
+  overflow-y: auto;
+}
+
+.mobile-main .mobile-tape-panel .event-tape .evt {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+  border-bottom: 1px solid var(--line);
+  padding-bottom: var(--sp-1);
+}
+
+.mobile-main .mobile-tape-panel .event-tape .sep {
+  display: none;
+}

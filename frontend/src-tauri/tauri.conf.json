@@ -1,0 +1,75 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "AI Retail OS",
+  "version": "0.1.0",
+  "identifier": "com.ai-retail-os.cockpit",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "AI Retail OS — HQ Console",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 720,
+        "minHeight": 600,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "createUpdaterArtifacts": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "Productivity",
+    "shortDescription": "Operator cockpit for the AI Retail OS",
+    "longDescription": "Single-pane HQ Console — KPIs, approval drawer, agent chat, audit tape — wrapped as a native desktop app with biometric apply gates and OS-level approval notifications.",
+    "macOS": {
+      "frameworks": [],
+      "minimumSystemVersion": "12.0",
+      "exceptionDomain": "",
+      "signingIdentity": null,
+      "providerShortName": null,
+      "entitlements": null
+    },
+    "windows": {
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": "http://timestamp.digicert.com",
+      "wix": {
+        "language": ["en-US"]
+      }
+    },
+    "linux": {
+      "deb": {
+        "depends": []
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "active": false,
+      "endpoints": [
+        "https://updates.ai-retail-os.example.com/{{target}}/{{current_version}}.json"
+      ],
+      "dialog": true,
+      "pubkey": ""
+    }
+  }
+}

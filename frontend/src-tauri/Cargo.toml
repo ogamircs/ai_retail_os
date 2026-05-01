@@ -1,0 +1,30 @@
+[package]
+name = "ai-retail-os-shell"
+version = "0.1.0"
+description = "AI Retail OS — native shell wrapper around the Vite cockpit"
+authors = ["AI Retail OS"]
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "ai_retail_os_shell_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-notification = "2"
+tauri-plugin-biometric = "2"
+tauri-plugin-updater = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+incremental = false
+opt-level = "s"
+strip = true
