@@ -25,11 +25,19 @@ RUN git clone --depth 1 --branch "${MEDUSA_STARTER_REF}" \
         "${MEDUSA_STARTER_REPO}" . \
     && rm -rf .git \
     && yarn install --frozen-lockfile \
+    # `medusa start` requires a prior `medusa build` to produce
+    # .medusa/server (the compiled server entrypoint and admin bundle).
+    # Without it, the container restart-loops on "Could not find
+    # index.html — run 'medusa build'" before bootstrap can land.
+    # `medusa build` doesn't need a database; it's a pure compile step
+    # over project files, so it's safe at image build time.
+    && npx medusa build \
     && yarn cache clean
 
 EXPOSE 9000
 
-# Default command. Bootstrap.sh runs db:migrate / user create *before*
-# this comes up so the server starts cleanly. For dev / demo only —
-# don't ship this with `medusa develop` in production.
+# Default command runs the prebuilt server. Bootstrap.sh runs
+# db:migrate + user create *before* this comes up so the server starts
+# cleanly. For dev / demo only — production deployments should use the
+# upstream-recommended Dockerfile with --production install.
 CMD ["yarn", "start"]

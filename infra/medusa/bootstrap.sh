@@ -50,19 +50,30 @@ echo ">> running db:migrate (idempotent)"
 $COMPOSE exec -T medusa npx medusa db:migrate
 
 # Medusa v2 user-creation: `npx medusa user --email X --password Y`.
-# It exits non-zero if the user already exists; we tolerate that so
-# re-runs are clean.
+# Exits non-zero when the email already exists — that case is fine to
+# swallow on re-runs. Any *other* non-zero (DB down, auth misconfig,
+# bad password policy) must abort the bootstrap so operators don't end
+# up with printed creds that don't actually work.
 echo ">> ensuring admin user (idempotent)"
-$COMPOSE exec -T \
-  -e BS_ADMIN_EMAIL="$ADMIN_EMAIL" \
-  -e BS_ADMIN_PASSWORD="$ADMIN_PASSWORD" \
-  medusa bash -c '
-    if npx medusa user --email "$BS_ADMIN_EMAIL" --password "$BS_ADMIN_PASSWORD"; then
-      echo "++ admin user created"
-    else
-      echo "   admin user already exists or creation reported non-zero (continuing)"
-    fi
-  ' || true
+set +e
+user_output=$(
+  $COMPOSE exec -T \
+    -e BS_ADMIN_EMAIL="$ADMIN_EMAIL" \
+    -e BS_ADMIN_PASSWORD="$ADMIN_PASSWORD" \
+    medusa bash -c 'npx medusa user --email "$BS_ADMIN_EMAIL" --password "$BS_ADMIN_PASSWORD"' 2>&1
+)
+user_rc=$?
+set -e
+if [ $user_rc -eq 0 ]; then
+  echo "++ admin user created"
+elif echo "$user_output" | grep -qiE "already exists|duplicate key|unique constraint|email is already"; then
+  echo "   admin user already exists (continuing)"
+else
+  echo "$user_output"
+  echo "!! medusa user creation failed (exit=$user_rc) — bootstrap aborted."
+  echo "   Fix the underlying error (DB / config / password policy) and re-run."
+  exit "$user_rc"
+fi
 
 cat <<BANNER
 
