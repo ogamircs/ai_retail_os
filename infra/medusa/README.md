@@ -33,6 +33,7 @@ Medusa doesn't ship an official Docker image — the upstream-recommended path i
 |---|---|
 | `make medusa-up` | builds the medusa image (first run is ~3–5 min) and `docker compose up -d` (postgres + redis + medusa) |
 | `make medusa-bootstrap` | `npx medusa db:migrate` + `npx medusa user` (both idempotent) — prints API + admin creds |
+| `make medusa-seed` | projects demo data from `backend/data/spine.db`: 1 Sales Channel, 5 Stock Locations (one per substrate store), 30 Products (one per SKU, single variant, USD pricing). Idempotent — re-runs print zero `++` lines |
 | `make medusa-status` | `docker compose ps` |
 | `make medusa-logs` | tails the three service logs |
 | `make medusa-down` | stops the stack, **keeps volumes** (db + uploaded media survives) |
@@ -70,7 +71,8 @@ That re-builds the image, recreates postgres, re-runs migrations, and re-creates
 
 ## Out of scope here
 
-- Demo data seed (Track 1 Medusa P2 — separate `seed.py` like ERPNext / Mautic)
-- Inbound sync (Track 1 Medusa P3)
-- Outbound apply (Track 1 Medusa P4)
+- Inbound sync (Track 1 Medusa P3 — flip the existing `MedusaAdapter` out of mock once `MEDUSA_*` env is set)
+- Outbound apply (Track 1 Medusa P4 — `fulfillment_routing` → `POST /admin/orders/{id}/fulfillments`; `store_transfer` → reservation)
+- Inventory levels per (variant × stock_location) — left for P3 once both sides exist
+- Orders / customers / regions seed — Medusa v2 makes these region+cart-bound, deferred to P3 too
 - TLS / multi-tenant / production hardening — never for this stack

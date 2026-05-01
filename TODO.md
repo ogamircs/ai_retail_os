@@ -121,14 +121,21 @@ For every system, the per-system phases are the same:
 
 ## Medusa
 
-- [x] **P1 · Local instance** _(branch: `feature/medusa-p1-instance` — open PR pending)_
-  - [x] `infra/medusa/Dockerfile` — minimal `node:22-alpine` image that clones `medusajs/medusa-starter-default` shallowly + `yarn install --frozen-lockfile`. Build args (`MEDUSA_STARTER_REPO`, `MEDUSA_STARTER_REF`) for tracking a fork. Medusa doesn't ship an official Docker image, so this is the upstream-recommended pattern.
+- [x] **P1 · Local instance** _(merged: `feature/medusa-p1-instance` → main)_
+  - [x] `infra/medusa/Dockerfile` — minimal `node:22-alpine` image that clones `medusajs/medusa-starter-default` shallowly + `yarn install --frozen-lockfile` + `npx medusa build` (so `medusa start` finds the prebuilt admin bundle and doesn't restart-loop). Build args (`MEDUSA_STARTER_REPO`, `MEDUSA_STARTER_REF`) for tracking a fork. Medusa doesn't ship an official Docker image, so this is the upstream-recommended pattern.
   - [x] `infra/medusa/docker-compose.yml` — postgres:15-alpine + redis:7-alpine + the custom medusa service on :9000. Compose builds the image inline; volumes for db data, redis data, and `/app/uploads` so operator-uploaded media survives restarts.
-  - [x] `infra/medusa/bootstrap.sh` — runs `npx medusa db:migrate` (idempotent) and `npx medusa user --email --password` (tolerates "already exists" exit). Same `compose exec -e` pattern as Mautic so admin password apostrophes don't break the inner shell. Prints API base + admin creds + `MEDUSA_BASE_URL` / `MEDUSA_ADMIN_EMAIL` / `MEDUSA_ADMIN_PASSWORD` env block.
+  - [x] `infra/medusa/bootstrap.sh` — runs `npx medusa db:migrate` (idempotent) and `npx medusa user --email --password`. Captures user-creation output + exit code so a real failure (DB down, auth misconfig, password policy) aborts the bootstrap rather than printing creds that don't work; only the explicit "already exists / duplicate key / unique constraint / email is already" patterns are swallowed. Same `compose exec -e` pattern as Mautic so admin password apostrophes don't break the inner shell.
   - [x] `infra/medusa/README.md` — quick-start, image build rationale, lifecycle table, the `/admin/*` endpoints the cockpit will hit in P3+, troubleshooting cheat sheet, reset path.
   - [x] Root `Makefile` targets: `medusa-up`, `medusa-down`, `medusa-bootstrap`, `medusa-logs`, `medusa-status`, `medusa-nuke` (mirrors the erpnext/mautic patterns; `medusa-up` does `up -d --build` since the image is local).
 
-- [ ] P2 · Demo seed
+- [x] **P2 · Demo seed** _(branch: `feature/medusa-p2-seed` — open PR pending)_
+  - [x] `infra/medusa/seed.py` — REST-based, idempotent. Stdlib-only (urllib + sqlite3) so it runs against the system python with no `pip install`.
+  - [x] Auth: `POST /auth/user/emailpass` for the v2 admin token, then `Authorization: Bearer <token>` for `/admin/*`.
+  - [x] Creates: 1 Sales Channel ("Retail Demo"), 5 Stock Locations (one per `substrate_stores` row, store_id stashed in metadata for round-trip), 30 Products (one per `substrate_skus` × `substrate_inventory` row, single Default variant, USD pricing in cents, `manage_inventory=true` so inventory levels can be linked in P3).
+  - [x] Idempotency: sales channel by `name`, stock locations by `name`, products by `handle` (slug of SKU). Re-runs print zero `++` lines.
+  - [x] Walks the v2 paginated list endpoints (offset/limit, stops on `count` exhaustion or short page) so the seed never silently truncates against a large store.
+  - [x] Out of scope (deferred to P3): inventory levels per (variant × stock_location), orders / customers / regions, multi-currency.
+- [ ] P3 · Inbound sync
 - [ ] P3 · Inbound sync
 - [ ] P4 · Live outbound apply
 - [ ] P5 · Agent-loop UAT
