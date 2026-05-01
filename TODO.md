@@ -92,14 +92,25 @@ For every system, the per-system phases are the same:
   - [x] Makefile target `make mautic-seed` (next to `mautic-bootstrap`).
   - [x] No-deps: stdlib only (urllib + base64 + sqlite3) so the script runs against the system python without needing `pip install` in the project venv.
 
-- [x] **P3 · Inbound sync** _(branch: `feature/mautic-p3-sync` — open PR pending)_
+- [x] **P3 · Inbound sync** _(merged: `feature/mautic-p3-sync` → main)_
   - [x] `MauticAdapter.configured()` overridden to require `MAUTIC_BASE_URL` *plus* either `MAUTIC_BASIC_TOKEN` or the `MAUTIC_USERNAME` / `MAUTIC_PASSWORD` pair — no auth means there's nothing real to talk to.
   - [x] `MauticAdapter._client()` factored out — single source of truth for basic-auth header resolution; `healthcheck` and the new live sync both go through it.
   - [x] `MauticAdapter._live_sync()` pulls Segments, Contacts, Campaigns from the real Mautic via `/api/segments`, `/api/contacts?limit=500`, `/api/campaigns`. Each row caches into `record_cache`, and where the seed left a recoverable spine-side id (segment alias `_` → `-`, contact email, campaign `[retail-os:<id>]` description marker) we also write an `external_refs` row so the cockpit's drawer can drill from the Mautic list id back to the substrate.
+  - [x] `_mautic_list` paginates uncapped by default (walks `start` until Mautic's `total` is consumed, with a short-page fallback when `total` isn't returned); a caller that does pass `max_rows` and hits the cap gets `truncated=True`, surfaced via `summary["truncated_domains"]` and a `status="partial"` so an incomplete cache is never silent.
+  - [x] `_coerce_id` validates Mautic row ids before stringifying — rejects None/blank/bool so malformed rows don't collide on `"None"` in `record_cache`.
   - [x] `external_url` deep-links: `s/segments/view/<id>`, `s/contacts/view/<id>`, `s/campaigns/view/<id>`.
   - [x] `sync_inbound()` dispatches: configured → `_live_sync`, else → `_mock_sync` (the prior behaviour, unchanged so substrate-only demos keep working).
   - [x] `backend/tests/test_integrations_mautic_live.py` — env-gated. Three tests: live sync round-trip, seeded-alias external_ref round-trip, registry reports `mode=connected`. Skipped automatically when creds aren't set so CI stays mock-only.
-- [ ] P4 · Live outbound apply
+
+- [x] **P4 · Live outbound apply** _(branch: `feature/mautic-p4-apply` — open PR pending)_
+  - [x] `MauticAdapter.LIVE_ACTION_TYPES = {"campaign_launch", "campaign_brief"}` — every other action_type falls back to the base mock-apply behaviour, same shape as ERPNext.
+  - [x] `apply_outbound` dispatches: configured + supported type → `_dispatch_outbound`; else → `super().apply_outbound`. Adapter rejection lands the row in `error` instead of `draft_created` so the cockpit's red chip surfaces it; outbox `external_id` mirrors the Mautic doc id.
+  - [x] `_mautic_create_campaign` (campaign_launch) → POST `/api/campaigns/new` with `name=title`, `isPublished=false`, and a description that embeds `[retail-os:<campaign_id>]` so the next sync round-trips back to the same substrate row via the existing P3 marker parser.
+  - [x] `_mautic_ensure_segment` (campaign_brief) → idempotent. Looks up by `alias` (eq-filter) first; only POSTs `/api/segments/new` if not present. Re-applying a brief twice does not duplicate the list.
+  - [x] Helpers: `_post(endpoint, body, key)` (factored POST + Mautic-shape unwrap) and `_mautic_find_one(endpoint, key, filters)` (mirrors the seed's column-scoped `where[]` lookup).
+  - [x] Four new unit tests in `tests/test_integrations.py` (stub `_client`): campaign-launch happy path, brief-segment reuse, unsupported-type fallback, missing-payload → error landing.
+  - [x] Two new env-gated live tests in `tests/test_integrations_mautic_live.py` (`MauticLiveApplyTest`): real campaign_launch creates a Mautic draft; campaign_brief reuses the seeded segment instead of duplicating.
+- [ ] P5 · Agent-loop UAT
 - [ ] P4 · Live outbound apply
 - [ ] P5 · Agent-loop UAT
 - [ ] P6 · Docs + tests

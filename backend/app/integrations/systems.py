@@ -924,6 +924,223 @@ class MauticAdapter(IntegrationAdapter):
             "campaign_measurement": "Campaign Report",
         }.get(action_type, super().outbound_domain(action_type))
 
+    # ----- live outbound apply --------------------------------------------
+
+    # Cockpit actions that map onto real Mautic objects. Everything else falls
+    # back to the base mock-apply behaviour. Same draft-only stance as ERPNext:
+    # the operator pressed "apply", so we record the intent in Mautic; we
+    # don't auto-publish.
+    LIVE_ACTION_TYPES = {"campaign_launch", "campaign_brief"}
+
+    def apply_outbound(self, action_id: int) -> dict[str, Any]:
+        from app.integrations import store
+
+        action = store.get_outbox_action(action_id, system_id=self.definition.system_id)
+        if not action:
+            return {"error": f"unknown outbox action: {action_id}"}
+        if action["status"] in {"applied", "applied_mock", "draft_created"}:
+            return action
+
+        # Mock-mode and unsupported action_types fall through to the base
+        # adapter, which records `applied_mock` / `draft_created` without I/O.
+        if not self.configured() or action["action_type"] not in self.LIVE_ACTION_TYPES:
+            return super().apply_outbound(action_id)
+
+        try:
+            outcome = self._dispatch_outbound(action)
+        except Exception as exc:  # pragma: no cover - exercised only with live Mautic
+            return store.update_outbox_action(
+                action_id,
+                status="error",
+                result={
+                    "error": str(exc),
+                    "system_id": self.definition.system_id,
+                    "external_domain": action["external_domain"],
+                    "message": (
+                        "Mautic rejected the apply. The outbox action is left "
+                        "in error state — fix the upstream payload and retry."
+                    ),
+                },
+            )
+
+        # No external_id == helper ran cleanly but couldn't actually write
+        # anything (e.g. campaign_launch with no campaign_id, or Mautic
+        # returned an empty body). Land in `error` instead of lying with
+        # `draft_created`.
+        if not outcome.get("external_id"):
+            return store.update_outbox_action(
+                action_id,
+                status="error",
+                result={
+                    "error": outcome.get("message", "Mautic apply produced no external_id"),
+                    "system_id": self.definition.system_id,
+                    "external_domain": action["external_domain"],
+                    "message": outcome.get(
+                        "message",
+                        "Mautic returned no external_id — nothing was written. Check the outbox payload and retry.",
+                    ),
+                    "details": outcome.get("details", {}),
+                },
+            )
+
+        return store.update_outbox_action(
+            action_id,
+            status="draft_created",
+            external_id=outcome["external_id"],
+            result={
+                "message": outcome.get("message", "Draft created in Mautic."),
+                "system_id": self.definition.system_id,
+                "external_domain": action["external_domain"],
+                "external_id": outcome["external_id"],
+                "details": outcome.get("details", {}),
+            },
+        )
+
+    def _dispatch_outbound(self, action: dict[str, Any]) -> dict[str, Any]:
+        action_type = action["action_type"]
+        payload = action.get("payload") or {}
+        title = action.get("title") or "AI Retail OS action"
+        if action_type == "campaign_launch":
+            return self._mautic_create_campaign(title, payload)
+        if action_type == "campaign_brief":
+            return self._mautic_ensure_segment(title, payload)
+        raise RuntimeError(f"unsupported action_type {action_type!r} for live Mautic apply")
+
+    def _post(self, endpoint: str, body: dict[str, Any], key: str) -> dict[str, Any]:
+        data = self._client().request(f"/api/{endpoint}/new", method="POST", payload=body)
+        # Mautic POST /new returns {"<key-singular>": {"id": …, …}}.
+        # The key passed in is whatever the dispatcher knows is correct
+        # ("campaign", "list" for segments — yes, segments-singular is `list`).
+        item = data.get(key) or {}
+        return item if isinstance(item, dict) else {}
+
+    def _mautic_create_campaign(self, title: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """`campaign_launch` → POST /api/campaigns/new (draft).
+
+        We embed the spine `campaign_id` as `[retail-os:<id>]` in the
+        description so a follow-up sync round-trips it back to the same
+        substrate row (P3 already parses that marker). Drafts only — Mautic
+        campaigns need events / triggers before they can run; the operator
+        wires those up in the UI.
+        """
+        campaign_id = payload.get("campaign_id") or ""
+        if not campaign_id:
+            return {
+                "external_id": None,
+                "message": "campaign_launch payload has no campaign_id; nothing to apply.",
+            }
+        marker = f"[retail-os:{campaign_id}]"
+        description = "\n".join(
+            [
+                marker,
+                f"Category: {payload.get('category', '')}",
+                f"Segment: {payload.get('segment_id', '')}",
+                f"Channel: {payload.get('channel', '')}",
+                f"Offer: {payload.get('offer', '')}",
+                f"Projected lift: {payload.get('projected_lift', 0)}",
+                f"Projected ROI: {payload.get('projected_roi', 0)}",
+                f"Budget: {payload.get('budget', 0)}",
+            ]
+        )
+        item = self._post(
+            "campaigns",
+            {
+                "name": title,
+                "description": description,
+                "isPublished": False,
+            },
+            "campaign",
+        )
+        external_id = _coerce_id(item.get("id"))
+        if external_id is None:
+            return {
+                "external_id": None,
+                "message": "Mautic campaign creation returned no id.",
+                "details": item,
+            }
+        return {
+            "external_id": external_id,
+            "message": f"Mautic campaign draft created (id={external_id}).",
+            "details": {"campaign_id": campaign_id, "marker": marker},
+        }
+
+    def _mautic_ensure_segment(self, title: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """`campaign_brief` → ensure a Mautic Segment exists for the brief.
+
+        Uses the same alias scheme as the seed (segment_id with `-` → `_`),
+        so re-applying the brief lands on the same Mautic list rather than
+        creating a duplicate. Looks up by alias first; only POSTs if not
+        present.
+        """
+        segment_id = payload.get("segment_id") or ""
+        if not segment_id:
+            return {
+                "external_id": None,
+                "message": "campaign_brief payload has no segment_id; nothing to apply.",
+            }
+        alias = segment_id.replace("-", "_")
+        existing = self._mautic_find_one(
+            "segments", "lists", [("alias", "eq", alias)]
+        )
+        if existing is not None:
+            external_id = _coerce_id(existing.get("id"))
+            if external_id is not None:
+                return {
+                    "external_id": external_id,
+                    "message": f"Mautic segment already exists (id={external_id}).",
+                    "details": {"segment_id": segment_id, "alias": alias, "reused": True},
+                }
+        item = self._post(
+            "segments",
+            {
+                "name": payload.get("segment_name") or title,
+                "alias": alias,
+                "publicName": payload.get("segment_name") or title,
+                "description": (
+                    f"[retail-os:{segment_id}] "
+                    f"Category: {payload.get('category', '')} · "
+                    f"Channel: {payload.get('channel', '')} · "
+                    f"Offer: {payload.get('offer', '')}"
+                ),
+                "isPublished": True,
+                "isGlobal": True,
+            },
+            "list",
+        )
+        external_id = _coerce_id(item.get("id"))
+        if external_id is None:
+            return {
+                "external_id": None,
+                "message": "Mautic segment creation returned no id.",
+                "details": item,
+            }
+        return {
+            "external_id": external_id,
+            "message": f"Mautic segment created (id={external_id}).",
+            "details": {"segment_id": segment_id, "alias": alias},
+        }
+
+    def _mautic_find_one(
+        self,
+        endpoint: str,
+        key: str,
+        filters: list[tuple[str, str, str]],
+    ) -> dict[str, Any] | None:
+        """Mautic column filter for idempotency lookups (mirrors seed.py)."""
+        params: list[tuple[str, str]] = [("limit", "1")]
+        for i, (col, expr, val) in enumerate(filters):
+            params.append((f"where[{i}][col]", col))
+            params.append((f"where[{i}][expr]", expr))
+            params.append((f"where[{i}][val]", val))
+        qs = urlencode(params)
+        data = self._client().request(f"/api/{endpoint}?{qs}")
+        rows = data.get(key) or {}
+        if isinstance(rows, dict) and rows:
+            return next(iter(rows.values()))
+        if isinstance(rows, list) and rows:
+            return rows[0]
+        return None
+
 
 class MedusaAdapter(IntegrationAdapter):
     definition = IntegrationDefinition(

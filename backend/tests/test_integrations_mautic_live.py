@@ -119,5 +119,78 @@ class MauticLiveSyncTest(unittest.TestCase):
         self.assertEqual(mautic["mode"], "connected")
 
 
+@unittest.skipIf(SKIP_REASON, SKIP_REASON)
+class MauticLiveApplyTest(unittest.TestCase):
+    """Live-path tests for the P4 outbound apply.
+
+    Each test creates a real outbox row, calls `apply_outbound`, and
+    verifies the resulting Mautic doc round-trips. Drafts only — Mautic
+    campaigns need events before publish, segments stay published-true
+    by default.
+    """
+
+    def setUp(self) -> None:
+        from app.spine import db as spine_db
+        from app.substrate import seed
+
+        spine_db.init_db()
+        seed.seed()
+
+    def test_campaign_launch_creates_draft_in_mautic(self) -> None:
+        from app.integrations import registry, store
+        from app.integrations.systems import MauticAdapter
+
+        adapter = MauticAdapter()
+        row = store.create_outbox_action(
+            system_id="mautic",
+            action_queue_id=None,
+            agent="Marketing",
+            action_type="campaign_launch",
+            title="Live UAT campaign",
+            external_domain="Campaign",
+            payload={
+                "campaign_id": "cmp-uat-live",
+                "category": "summer_apparel",
+                "segment_id": "seg-vacation",
+                "channel": "paid social",
+                "offer": "20% off",
+                "budget": 5000,
+                "projected_lift": 0.18,
+                "projected_roi": 1.7,
+            },
+            configured=True,
+        )
+        result = registry.apply_outbound("mautic", row["id"])
+        self.assertEqual(result["status"], "draft_created", msg=result)
+        self.assertTrue(result.get("external_id"))
+
+    def test_campaign_brief_reuses_seeded_segment(self) -> None:
+        """The seed already created seg_vacation; applying a brief should
+        find it via alias=eq lookup and not create a duplicate.
+        """
+        from app.integrations import registry, store
+
+        row = store.create_outbox_action(
+            system_id="mautic",
+            action_queue_id=None,
+            agent="Marketing",
+            action_type="campaign_brief",
+            title="Live UAT brief",
+            external_domain="Segment Email",
+            payload={
+                "segment_id": "seg-vacation",
+                "segment_name": "Vacation planners",
+                "category": "summer_apparel",
+                "channel": "paid social",
+                "offer": "20% off",
+            },
+            configured=True,
+        )
+        result = registry.apply_outbound("mautic", row["id"])
+        self.assertEqual(result["status"], "draft_created", msg=result)
+        details = result.get("result", {}).get("details") or {}
+        self.assertTrue(details.get("reused"), f"expected reused=True, got {details}")
+
+
 if __name__ == "__main__":
     unittest.main()
