@@ -111,3 +111,39 @@
 .reports-search .deep input { accent-color: var(--amber); }
 .reports-search .count { color: var(--ink-dim); font-variant-numeric: tabular-nums; }
 .reports-search .loading { color: var(--warn); }
+
+/* Track 7 D6 — DSPy compile panel sits above the reports search. */
+.dspy-panel {
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  font-size: var(--fs-xs);
+}
+.dspy-header {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+}
+.dspy-header .prompt { color: var(--amber); font-weight: 600; }
+.dspy-title { color: var(--ink-dim); }
+.dspy-error { color: var(--warn); margin-left: auto; }
+.dspy-table { width: 100%; border-collapse: collapse; }
+.dspy-table th,
+.dspy-table td {
+  padding: var(--sp-1) var(--sp-3);
+  text-align: left;
+  border-bottom: 1px dashed var(--line);
+}
+.dspy-table th { color: var(--ink-mute); font-weight: 500; }
+.dspy-table button {
+  background: transparent;
+  color: var(--ink);
+  border: 1px solid var(--line);
+  padding: 2px 8px;
+  margin-right: var(--sp-1);
+  cursor: pointer;
+  font: inherit;
+}
+.dspy-table button:hover:not(:disabled) { border-color: var(--amber); color: var(--amber); }
+.dspy-table button:disabled { color: var(--ink-mute); cursor: wait; }
+.dspy-job-none { color: var(--ink-mute); }

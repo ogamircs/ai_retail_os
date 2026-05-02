@@ -101,9 +101,29 @@ def _run_one(scenario_name: str, mode: str) -> tuple[str, str, list[dict]]:
     return "\n".join(transcript_lines), final, artifacts
 
 
-def run(scenarios: list[str] | None = None, modes: list[str] | None = None) -> dict:
+def run(
+    scenarios: list[str] | None = None,
+    modes: list[str] | None = None,
+    prompts_alias: dict[str, str] | None = None,
+) -> dict:
+    """Drive the eval harness.
+
+    `prompts_alias` (Track 7 D4): per-agent alias overrides applied
+    via `<AGENT>_PROMPT_ALIAS` env vars for the duration of the run.
+    The map is keyed by agent slug (matches the prompt registry, e.g.
+    'analyst', 'pricing_promo'). When None or empty, the default prod
+    alias resolves — same behaviour as before D4.
+    """
     scenarios = scenarios or [s.name for s in SCENARIOS]
     modes = modes or ["single_pass", "multi_pass"]
+    if prompts_alias:
+        # `<AGENT>_PROMPT_ALIAS` is what `app.llm.prompts.resolve_prompt`
+        # already reads; setting the env at run() entry point means
+        # every nested chief.run() call resolves the requested version
+        # without us threading the alias through the agent builders.
+        for slug, alias in prompts_alias.items():
+            env_name = f"{slug.upper()}_PROMPT_ALIAS"
+            os.environ[env_name] = alias
     runs: dict[str, dict[str, dict]] = {}
     mlflow = _try_mlflow()
     sha = _git_sha()
@@ -194,12 +214,32 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("scenario", nargs="?", help="Limit to one scenario (default: all)")
     p.add_argument("--mode", choices=["single_pass", "multi_pass"], help="Limit to one mode")
+    p.add_argument(
+        "--prompts-alias",
+        action="append",
+        default=[],
+        help="Per-agent prompt alias override, repeatable. Format: "
+        "'<agent_slug>=<alias>' (e.g. 'analyst=staging'). Sets the "
+        "`<AGENT>_PROMPT_ALIAS` env for the run so the prompt registry "
+        "resolves the requested version. Track 7 D4 — A/B test "
+        "compiled DSPy prompts against the current prod alias.",
+    )
     args = p.parse_args()
 
     scenarios = [args.scenario] if args.scenario else None
     modes = [args.mode] if args.mode else None
+    alias_map: dict[str, str] = {}
+    for entry in args.prompts_alias or []:
+        if "=" not in entry:
+            print(f"[run_eval] ignoring malformed --prompts-alias '{entry}' — expected slug=alias")
+            continue
+        slug, alias = entry.split("=", 1)
+        slug = slug.strip()
+        alias = alias.strip()
+        if slug and alias:
+            alias_map[slug] = alias
 
-    out = run(scenarios=scenarios, modes=modes)
+    out = run(scenarios=scenarios, modes=modes, prompts_alias=alias_map or None)
     print(json.dumps(out["summary"], indent=2))
     return 0
 

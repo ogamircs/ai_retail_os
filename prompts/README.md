@@ -74,3 +74,45 @@ PRICING_PROMO_PROMPT_ALIAS=staging python -c "..."
 - The registry is **read-only at runtime**. Agents never write here.
 - Older versions are kept for audit / rollback — `aliases.json` always names the canonical pointer.
 - The Track 4 CI gate (M6) runs the eval harness on any PR that touches `prompts/` or `backend/app/agents/` and posts a delta comment.
+
+## Compiled vs handwritten prompts (Track 7)
+
+Prompts in this registry come in two shapes:
+
+- **Handwritten** — the operator authors the full body. v1 of every agent starts here.
+- **Compiled** — produced by `scripts/dspy_optimize.py <agent>` (BootstrapFewShot today, MIPROv2 later). The handwritten policy block from v1 stays at the top, unchanged. The optimizer's bootstrap-selected demos land below a `## Few-shot demos` heading.
+
+Compiled file shape:
+
+```markdown
+You are the Analyst specialist agent in the AI Retail OS.
+…handwritten policy text, unchanged…
+
+## Few-shot demos
+
+### Demo 1
+**operator_question:** …
+**spine_snapshot:** …
+**findings_md:**
+` ` `
+- finding one
+- finding two
+` ` `
+**evidence_md:** …
+**open_questions_md:** …
+
+### Demo 2
+…
+```
+
+`## Few-shot demos` is the contract — the prompt registry does not parse it specially, it just feeds the whole markdown body to the LLM as the system prompt. Agents pick up the demos as inline examples.
+
+### Optimizer flow
+
+1. `python scripts/dspy_optimize.py analyst` — compiles, writes `prompts/analyst/v<n+1>.md`, bumps `aliases.json["staging"]`. **Does not touch prod.**
+2. Cockpit's `[REPORTS]` tab → DSPy panel → `compile + auto-promote` runs the same compile, then runs the eval-harness A/B gate (`prod` vs `staging` over the 4 seeded scenarios). The candidate flips `prod` only when it wins ≥3 of 4 dimensions on ≥3 of 4 scenarios AND does not regress `policy_adherence` on any scenario (hard floor — DSPy can drift on style; can't drift on rules).
+3. Manual promotion stays available — edit `aliases.json` directly and commit.
+
+### Training set
+
+`prompts/training/<agent>.jsonl` carries one example per line with keys matching the agent's Signature fields. Add rows by hand or via `app.agents.dspy_dataset.extract_examples_from_run`, which walks `last_run.json` and appends the highest-scored final reply per scenario.
