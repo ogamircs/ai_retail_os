@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import { marked } from "marked";
 import {
   applyIntegrationAction,
   ArtifactMeta,
@@ -10,6 +9,7 @@ import {
 import { useDrawer } from "../lib/drawerContext";
 import { agentInkStyle } from "../lib/agentInk";
 import { requireBiometric } from "../lib/biometric";
+import { renderSafeMarkdown } from "../lib/safeMarkdown";
 import "./ApprovalDrawer.css";
 
 export default function ApprovalDrawer() {
@@ -157,7 +157,7 @@ function ApprovalContent() {
           <div className="label">artifact · {artifact.title}</div>
           <div
             className="md"
-            dangerouslySetInnerHTML={{ __html: marked.parse(artifact.body) as string }}
+            dangerouslySetInnerHTML={{ __html: renderSafeMarkdown(artifact.body) }}
           />
         </section>
       )}
@@ -262,7 +262,7 @@ function ArtifactContent() {
       <section className="artifact-render">
         <div
           className="md"
-          dangerouslySetInnerHTML={{ __html: marked.parse(art.body) as string }}
+          dangerouslySetInnerHTML={{ __html: renderSafeMarkdown(art.body) }}
         />
       </section>
     </>

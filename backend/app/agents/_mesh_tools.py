@@ -28,6 +28,7 @@ from typing import Any, Callable
 from app.llm.base import Tool
 from app.spine.artifacts import read_artifact, write_artifact
 from app.spine.events import append_event
+from app.spine import wiki as wiki_store
 
 
 def build_read_artifact_tool() -> tuple[Tool, Callable[[dict], dict]]:
@@ -180,3 +181,169 @@ def peer_review_task_for(reviewer: str, target_id: str, scope: str) -> str:
         "## Add — at least one bullet under each. Cite numbers. Be terse.\n"
         "Do not propose new outbox actions. Do not write a second artifact."
     )
+
+
+# ---------------------------------------------------------------------------
+# Track 5 — agentic wiki tools shared by every specialist.
+#
+# All specialists get `wiki_search` + `wiki_read` so they can quote
+# durable lessons in their drafts. Action specialists also get
+# `wiki_propose_edit` so they can leave a learning behind for the next
+# turn — drafts surface in the approval rail (W3); the Critic-gated
+# auto-publish (W4) flips a clean draft to published without operator
+# intervention.
+# ---------------------------------------------------------------------------
+
+
+_AGENT_SEARCH_STATUSES = ("published", "draft", "deprecated", "all")
+
+
+def build_wiki_search_tool() -> tuple[Tool, Callable[[dict], dict]]:
+    def _impl(args: dict) -> dict:
+        q = (args.get("query") or "").strip()
+        limit = max(1, min(int(args.get("limit", 10)), 50))
+        # Default to published-only so unreviewed drafts + retired
+        # pages don't leak into agent context as evidence. Agents can
+        # opt into a wider view (e.g. "all" for an explicit audit
+        # task) but the safe default keeps the publish gate's intent
+        # intact: only signed-off lessons influence new decisions.
+        status_arg = (args.get("status") or "published").strip().lower()
+        if status_arg not in _AGENT_SEARCH_STATUSES:
+            status_arg = "published"
+        effective_status = None if status_arg == "all" else status_arg
+        pages = wiki_store.search_pages(q, limit=limit, status=effective_status)
+        return {
+            "query": q,
+            "status_filter": status_arg,
+            "results": [
+                {
+                    "slug": p.slug,
+                    "title": p.title,
+                    "owner_agent": p.owner_agent,
+                    "status": p.status,
+                    "version": p.version,
+                    "updated_ts": p.updated_ts,
+                    # Body excerpt only — keep token cost bounded; agents
+                    # can call wiki_read when they want the full text.
+                    "excerpt": p.body_md[:240],
+                }
+                for p in pages
+            ],
+        }
+
+    tool = Tool(
+        name="wiki_search",
+        description=(
+            "Search the agentic wiki for prior lessons. Defaults to "
+            "`status='published'` so only signed-off lessons surface "
+            "as evidence. Pass `status='draft'` / `'deprecated'` / "
+            "`'all'` only when you are explicitly auditing in-flight "
+            "or retired pages. Returns up to `limit` matching pages "
+            "with slug + title + 240-char excerpt; call wiki_read for "
+            "the full body."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "limit": {"type": "integer"},
+                "status": {
+                    "type": "string",
+                    "enum": list(_AGENT_SEARCH_STATUSES),
+                    "description": (
+                        "Optional stage filter. Default 'published' — "
+                        "agents must opt in to see drafts/deprecated."
+                    ),
+                },
+            },
+            "required": ["query"],
+        },
+    )
+    return tool, _impl
+
+
+def build_wiki_read_tool() -> tuple[Tool, Callable[[dict], dict]]:
+    def _impl(args: dict) -> dict:
+        slug = (args.get("slug") or "").strip()
+        if not slug:
+            return {"error": "wiki_read requires non-empty slug"}
+        page = wiki_store.get_page(slug)
+        if page is None:
+            return {"error": f"unknown wiki slug: {slug}"}
+        return page.to_dict()
+
+    tool = Tool(
+        name="wiki_read",
+        description=(
+            "Fetch the full body + metadata of one wiki page by slug. "
+            "Use after wiki_search when you need the full text to "
+            "quote, or when you already know the slug from a prior "
+            "turn / pinned chip."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {"slug": {"type": "string"}},
+            "required": ["slug"],
+        },
+    )
+    return tool, _impl
+
+
+def build_wiki_propose_edit_tool(
+    agent_name: str,
+) -> tuple[Tool, Callable[[dict], dict]]:
+    """W3 — write tool. Lands the page as `draft`. The Chief's review
+    loop (W4) decides whether to publish, or the operator approves it
+    via the cockpit's WikiTab.
+    """
+
+    def _impl(args: dict) -> dict:
+        slug = (args.get("slug") or "").strip()
+        title = (args.get("title") or "").strip()
+        body_md = args.get("body_md") or ""
+        refs = args.get("refs") or []
+        if not slug or not title or not body_md:
+            return {
+                "error": "wiki_propose_edit requires non-empty slug, title, body_md"
+            }
+        if not isinstance(refs, list):
+            refs = []
+        page = wiki_store.propose_edit(
+            slug=slug,
+            title=title,
+            body_md=body_md,
+            author_agent=agent_name,
+            refs=[str(r) for r in refs if isinstance(r, (str, int))],
+        )
+        return {
+            "slug": page.slug,
+            "version": page.version,
+            "status": page.status,
+            "title": page.title,
+        }
+
+    tool = Tool(
+        name="wiki_propose_edit",
+        description=(
+            "Persist a learning to the agentic wiki as a `draft`. "
+            "Slug shape is namespaced (e.g. "
+            "`category/summer_apparel/markdown_playbook`, "
+            "`vendor/breezeco/reliability_notes`, "
+            "`policy/margin_floors`). The draft surfaces in the "
+            "approval rail; the Critic-gated auto-publish promotes it "
+            "to `published` if no Risks/Gaps surface. `refs` should "
+            "include the spine event ids / artifact ids that prove "
+            "the lesson — the cockpit renders these as inline links."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "slug": {"type": "string"},
+                "title": {"type": "string"},
+                "body_md": {"type": "string"},
+                "refs": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["slug", "title", "body_md"],
+        },
+    )
+    return tool, _impl

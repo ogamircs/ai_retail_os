@@ -12,6 +12,7 @@ read the critique and revise.
 from __future__ import annotations
 
 from app.agents.base import Agent
+from app.agents._mesh_tools import build_wiki_read_tool, build_wiki_search_tool
 from app.llm.base import Tool
 from app.llm.prompts import resolve_prompt
 from app.spine.events import append_event, events_since_ts
@@ -267,6 +268,13 @@ TOOLS = [
     ),
 ]
 
+# Track 5 W2: Critic gets read-only access to the agentic wiki so it
+# can cite a published lesson when contradicting a draft. No
+# wiki_propose_edit — Critic doesn't author, it audits.
+_CRITIC_WIKI_SEARCH_TOOL, _critic_wiki_search_impl = build_wiki_search_tool()
+_CRITIC_WIKI_READ_TOOL, _critic_wiki_read_impl = build_wiki_read_tool()
+TOOLS.extend([_CRITIC_WIKI_SEARCH_TOOL, _CRITIC_WIKI_READ_TOOL])
+
 
 IMPLS = {
     "read_artifact": _tool_read_artifact,
@@ -280,6 +288,8 @@ IMPLS = {
     "inventory_health": _tool_inventory_health,
     "list_orders": _tool_list_orders,
     "write_artifact": _tool_write_artifact,
+    "wiki_search": _critic_wiki_search_impl,
+    "wiki_read": _critic_wiki_read_impl,
 }
 
 

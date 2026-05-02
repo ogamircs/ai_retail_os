@@ -196,6 +196,90 @@ def mesh_status(window_seconds: int = 300):
     }
 
 
+@app.get("/api/wiki/pages")
+def wiki_list_pages(status: str | None = "published", limit: int = 50, owner: str | None = None):
+    """Track 5 W5 — list wiki pages, filtered by status / owner.
+
+    Default `status='published'` so the cockpit's main view shows only
+    finalised lessons. Pass `status=""` (explicit empty string) to
+    bypass the filter and return drafts/deprecated alongside
+    published — the cockpit's "all stages" toggle uses this.
+    """
+    from app.spine import wiki as wiki_store
+
+    effective_status = status if (status not in (None, "")) else None
+    pages = wiki_store.list_pages(status=effective_status, owner_agent=owner, limit=limit)
+    return {"pages": [p.to_dict() for p in pages]}
+
+
+@app.get("/api/wiki/pages/{slug:path}")
+def wiki_get_page(slug: str):
+    from app.spine import wiki as wiki_store
+
+    page = wiki_store.get_page(slug)
+    if page is None:
+        raise HTTPException(404, "wiki page not found")
+    revisions = wiki_store.list_revisions(slug, limit=20)
+    return {"page": page.to_dict(), "revisions": revisions}
+
+
+@app.get("/api/wiki/search")
+def wiki_search(q: str = "", limit: int = 20, status: str | None = None):
+    """Mirror /api/wiki/pages: optional `status` filter so operators
+    can search within `draft` / `deprecated` / `published` instead of
+    seeing mixed-status results when they're triaging in-flight wiki
+    edits. Filter is applied at the SQL layer (before LIMIT) so a
+    broad query never gets its draft matches crowded out by
+    published rows."""
+    from app.spine import wiki as wiki_store
+
+    effective_status = status if (status not in (None, "")) else None
+    pages = wiki_store.search_pages(q, limit=limit, status=effective_status)
+    return {"pages": [p.to_dict() for p in pages]}
+
+
+@app.post("/api/wiki/pages/{slug:path}/publish")
+def wiki_publish(slug: str, body: dict | None = Body(default=None)):
+    from app.spine import wiki as wiki_store
+
+    by = (body or {}).get("by_agent", "Operator")
+    page = wiki_store.publish_page(slug, by_agent=by)
+    if page is None:
+        raise HTTPException(404, "wiki page not found")
+    return {"page": page.to_dict()}
+
+
+@app.post("/api/wiki/pages/{slug:path}/deprecate")
+def wiki_deprecate(slug: str, body: dict | None = Body(default=None)):
+    from app.spine import wiki as wiki_store
+
+    payload = body or {}
+    by = payload.get("by_agent", "Operator")
+    reason = payload.get("reason", "")
+    page = wiki_store.deprecate_page(slug, by_agent=by, reason=reason)
+    if page is None:
+        raise HTTPException(404, "wiki page not found")
+    return {"page": page.to_dict()}
+
+
+@app.post("/api/wiki/pages/{slug:path}/pin")
+def wiki_pin(slug: str, body: dict | None = Body(default=None)):
+    from app.spine import wiki as wiki_store
+
+    pinned = bool((body or {}).get("pinned", True))
+    page = wiki_store.set_pinned(slug, pinned=pinned)
+    if page is None:
+        raise HTTPException(404, "wiki page not found")
+    return {"page": page.to_dict()}
+
+
+@app.get("/api/wiki/pinned")
+def wiki_pinned():
+    from app.spine import wiki as wiki_store
+
+    return {"pages": [p.to_dict() for p in wiki_store.list_pinned()]}
+
+
 @app.get("/api/mlflow/status")
 def mlflow_status(limit_runs: int = 10):
     """Cockpit-side surface over the MLflow REST API (Track 4 follow-up).

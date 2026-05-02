@@ -20,15 +20,18 @@ from __future__ import annotations
 import json
 import re
 import time
+import uuid
 from collections.abc import Iterator
+from datetime import datetime, timezone
 
 from app.agents.base import Agent, AgentEvent
 from app.config import mesh as mesh_settings
 from app.llm.base import LLMProvider, Tool
 from app.llm.prompts import resolve_prompt
 from app.llm import tracing as mesh_tracing
-from app.spine.events import append_event
+from app.spine.events import append_event, events_for_turn, events_since_ts, current_turn_id
 from app.spine.artifacts import read_artifact, update_artifact_stage, write_artifact
+from app.spine import wiki as wiki_store
 from app.agents import (
     analyst,
     critic,
@@ -519,6 +522,167 @@ def build_orchestrator(llm: LLMProvider, event_sink: _EventBuffer) -> Agent:
     return Agent(name=NAME, system_prompt=resolve_prompt(NAME, SYSTEM), tools=tools, tool_impls=impls, max_iters=16)
 
 
+def _wiki_auto_publish_clean_drafts(
+    turn_start_iso: str,
+    llm: LLMProvider,
+    turn_id: str | None = None,
+) -> None:
+    """Track 5 W4 — Critic-gated auto-publish.
+
+    After every operator turn, walk wiki_edit events that landed during
+    the turn. For each, look at the most recent Critic critique that
+    references the same evidence chain (same author + slug); if the
+    Critic returned `*No material findings.*` for both Gaps and Risks,
+    promote the draft to `published`. Otherwise leave it as a draft so
+    the operator can decide via the cockpit's WikiTab.
+
+    The window is the *current turn* (events_since_ts(turn_start)) so
+    we never auto-publish a draft that was authored before the
+    Critic's audit ran. Operators can always force-publish or
+    deprecate from the WikiTab.
+    """
+    # Use the per-turn id when available (set by run_chief via the
+    # current_turn_id contextvar) so concurrent /api/chat requests
+    # don't see each other's events. Fall back to the wall-clock
+    # window only when no turn id was propagated — preserves backwards
+    # compatibility for callers (tests) that drive the helper without
+    # opening a turn.
+    if turn_id:
+        scoped = events_for_turn(turn_id, since_ts=turn_start_iso)
+    else:
+        scoped = events_since_ts(turn_start_iso)
+    edits = [e for e in scoped if e.get("kind") == "wiki_edit"]
+    if not edits:
+        return
+    critique_artifacts = [
+        e for e in scoped
+        if e.get("kind") == "observation"
+        and e.get("agent") == "Critic"
+        and e.get("artifact_id")
+    ]
+    # Two-part gate (PR review #31 fix):
+    #   1. At least one Critic critique must have fired this turn — a
+    #      turn with NO review must not auto-publish. Without this gate,
+    #      a quick Analyst-only "what happened" turn could promote
+    #      every Curator draft without anyone reviewing the agent
+    #      draft they came from.
+    #   2. EVERY critique must be clean. The original "any clean"
+    #      check was too permissive — in a multi-specialist turn,
+    #      Pricing's clean review of its own markdown plan should not
+    #      auto-publish a separate Replenishment-flagged wiki draft
+    #      whose source draft DID have gaps. Be conservative: one
+    #      dirty critique anywhere in the turn keeps every wiki draft
+    #      held for operator approval.
+    if not critique_artifacts:
+        return
+    all_clean = all(_critique_is_clean(ev["artifact_id"]) for ev in critique_artifacts)
+    if not all_clean:
+        return
+    # Per-draft gate (PR #31 follow-up fix). A clean turn-level
+    # critique is necessary but not sufficient — each individual
+    # wiki_edit must also be linked back to an artifact the Critic
+    # actually reviewed this turn. The previous "match by author"
+    # gate was too loose: one agent could land multiple wiki_edits
+    # off a single clean critique.
+    #
+    # The link is the wiki_edit's `refs` field. wiki_propose_edit
+    # encourages agents to cite the spine event ids / artifact ids
+    # that prove the lesson; here we use those as the per-draft proof
+    # of review. Build the set of reviewed artifact ids by walking
+    # each critique's refs (the artifacts it audited). A wiki_edit
+    # publishes only when its refs intersect that set — meaning the
+    # specific draft it summarises was the one the Critic signed off.
+    # No refs ⇒ hold for operator approval.
+    reviewed_artifact_ids: set[str] = set()
+    for c_ev in critique_artifacts:
+        critique = read_artifact(c_ev["artifact_id"])
+        if not critique:
+            continue
+        for ref in critique.get("refs") or []:
+            if isinstance(ref, str) and ref:
+                reviewed_artifact_ids.add(ref)
+    # Build a lookup of event_id → artifact_id from this turn's
+    # events so a wiki_edit citing an event id (a valid ref shape per
+    # wiki_propose_edit's documented contract) still resolves to the
+    # underlying artifact for the proof check. Without this, agents
+    # citing event ids cleanly were forced into manual approval even
+    # though the linked artifact had already been reviewed.
+    event_to_artifact: dict[str, str] = {}
+    for ev in scoped:
+        eid = ev.get("id")
+        aid = ev.get("artifact_id")
+        if eid is not None and aid:
+            # Stringify event id so str-based ref comparisons work
+            # regardless of how the agent emitted it.
+            event_to_artifact[str(eid)] = str(aid)
+
+    def _normalise(ref: str) -> str:
+        """Map a ref to the artifact id it ultimately points at —
+        identity for artifact ids, event-id-to-artifact-id resolution
+        for event refs."""
+        if ref in reviewed_artifact_ids:
+            return ref
+        return event_to_artifact.get(ref, ref)
+    # Coalesce wiki_edits to the *latest* edit per slug (highest
+    # payload.version, falling back to event id order). An older
+    # reviewed edit followed by a newer unreviewed edit on the same
+    # slug must NOT publish the page — the page body the operator
+    # would see is the newer unreviewed body. Walking edits in id
+    # order means the last write wins per slug.
+    latest_edit_by_slug: dict[str, dict] = {}
+    for edit in edits:
+        slug = (edit.get("payload") or {}).get("slug")
+        if not slug:
+            continue
+        prev = latest_edit_by_slug.get(slug)
+        if prev is None:
+            latest_edit_by_slug[slug] = edit
+            continue
+        prev_v = (prev.get("payload") or {}).get("version", 0)
+        cur_v = (edit.get("payload") or {}).get("version", 0)
+        # Prefer the highest version; on ties (or missing version),
+        # prefer the higher event id (later-emitted).
+        if (cur_v, edit.get("id", 0)) > (prev_v, prev.get("id", 0)):
+            latest_edit_by_slug[slug] = edit
+
+    for slug, edit in latest_edit_by_slug.items():
+        edit_refs = (edit.get("payload") or {}).get("refs") or []
+        if not isinstance(edit_refs, list):
+            edit_refs = []
+        # Per-draft proof: the LATEST wiki_edit for this slug must
+        # cite at least one artifact id the Critic reviewed clean
+        # this turn. Unreviewed re-edits of the same slug therefore
+        # block publication of the page even if an earlier edit was
+        # reviewed.
+        if not any(
+            _normalise(r) in reviewed_artifact_ids
+            for r in edit_refs
+            if isinstance(r, str)
+        ):
+            continue
+        page = wiki_store.get_page(slug)
+        if page is None or page.status != "draft":
+            continue
+        # Cross-check that the page's current version matches the
+        # reviewed edit's version. If a separate untracked write
+        # bumped the version after our edit, we'd be promoting a
+        # body the Critic never saw.
+        edit_version = (edit.get("payload") or {}).get("version")
+        if edit_version is not None and edit_version != page.version:
+            continue
+        # Pass `expected_version` so the publish is atomic against a
+        # racing /api/chat turn that bumps the version between the
+        # check above and the UPDATE inside publish_page. Without it,
+        # the gap is a TOCTOU: a newer unreviewed draft could land in
+        # that window and we would promote *it* instead of the body
+        # the Critic actually signed off on.
+        wiki_store.publish_page(
+            slug,
+            by_agent=NAME,
+            expected_version=edit_version if edit_version is not None else page.version,
+        )
+
+
 def run_chief(user_input: str, llm: LLMProvider) -> Iterator[AgentEvent]:
     """Run the orchestrator and stream events from CoS *and* delegated specialists."""
     # Track 4 M2: open the parent MLflow run for this operator turn.
@@ -528,11 +692,69 @@ def run_chief(user_input: str, llm: LLMProvider) -> Iterator[AgentEvent]:
     provider_model = getattr(llm, "model", "unknown")
     sink = _EventBuffer()
     chief = build_orchestrator(llm, sink)
-    with mesh_tracing.turn_run(user_input, provider_name, provider_model):
-        for ev in chief.run(user_input, llm):
-            # Drain any specialist events buffered before this CoS event
+    # Capture turn-start timestamp + mint a unique turn_id so the W4
+    # auto-publisher and W6 Curator can scope to *this* turn's events
+    # only. Without the per-turn id, two concurrent /api/chat requests
+    # would share a wall-clock window and cross-contaminate (one
+    # operator's clean Critic could auto-publish another operator's
+    # wiki drafts).
+    turn_start_iso = datetime.now(timezone.utc).isoformat()
+    turn_id = uuid.uuid4().hex
+    _turn_id_token = current_turn_id.set(turn_id)
+    # Outer try/finally ensures the contextvar resets even when
+    # chief.run raises mid-stream or the surrounding tracing context
+    # blows up. Without this, the worker thread would keep the stale
+    # turn id and a subsequent /api/chat dispatch on the same worker
+    # would mis-tag every append_event call — cross-contaminating
+    # auto-publish + curator scoping across requests.
+    try:
+        with mesh_tracing.turn_run(user_input, provider_name, provider_model):
+            for ev in chief.run(user_input, llm):
+                # Drain any specialist events buffered before this CoS event
+                for spec_ev in sink.drain():
+                    yield spec_ev
+                yield ev
             for spec_ev in sink.drain():
                 yield spec_ev
-            yield ev
-        for spec_ev in sink.drain():
-            yield spec_ev
+        # Track 5 W4 — fire auto-publish AFTER all events are streamed
+        # so the post-turn wiki state reflects every draft + critique
+        # that landed in the turn. Pass turn_id so concurrent turns
+        # don't cross-publish each other's drafts.
+        try:
+            _wiki_auto_publish_clean_drafts(turn_start_iso, llm, turn_id=turn_id)
+        except Exception:
+            # Never break the operator-facing reply because of a wiki
+            # post-processing error.
+            pass
+        # Track 5 W6 — Wiki Curator. Read-only post-turn observer that
+        # decides what's worth committing to the wiki. Runs under its
+        # own MLflow nested run so token spend shows up in the same
+        # dashboard as the operator-facing turn. Curator errors are
+        # caught so a bad LLM response can't break the chat path.
+        #
+        # Critically, we do NOT re-run _wiki_auto_publish_clean_drafts
+        # after the Curator. Curator drafts land *after* the Critic
+        # phase has already finished — they have no critique of their
+        # own. A second post-curator publish would auto-promote
+        # curator-authored drafts whenever the earlier turn-level
+        # critiques happened to be clean, which is unsafe (the
+        # curator may have hallucinated a lesson the agent's draft
+        # never actually proved). Curator drafts therefore always
+        # wait for explicit operator approval via the WikiTab — even
+        # on a turn whose agent draft was reviewed clean.
+        try:
+            from app.agents import wiki_curator
+
+            with mesh_tracing.delegate_run(wiki_curator.NAME, phase="curator"):
+                wiki_curator.curate_turn(
+                    turn_start_iso, user_input, llm, turn_id=turn_id
+                )
+        except Exception:
+            pass
+    finally:
+        # Reset the contextvar so a future request on this worker
+        # sees a clean slate. Runs unconditionally — chief.run raising
+        # mid-stream, the tracing context manager blowing up, or any
+        # other failure inside the try-block all still hit this
+        # cleanup.
+        current_turn_id.reset(_turn_id_token)
