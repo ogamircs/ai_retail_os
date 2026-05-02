@@ -366,6 +366,56 @@ class WikiAutoPublishTest(unittest.TestCase):
         # ALL critiques must be clean → mixed turn keeps draft.
         self.assertEqual(page.status, "draft")
 
+    def test_unreviewed_re_edit_blocks_publish_even_when_earlier_edit_was_reviewed(self):
+        """Same slug edited twice in one turn:
+          - v1 wiki_edit refs the reviewed Pricing draft
+          - v2 wiki_edit (unreviewed re-edit) overwrites with new body
+        Auto-publish must NOT publish the page — the body the
+        operator would see is the unreviewed v2.
+        """
+        from app.agents.chief_of_staff import _wiki_auto_publish_clean_drafts
+        from app.spine.events import append_event, current_turn_id
+        from datetime import datetime, timezone
+
+        turn_start = datetime.now(timezone.utc).isoformat()
+        token = current_turn_id.set("turn-reedit")
+        try:
+            pricing_draft_id = write_artifact(
+                agent="Pricing & Promo", kind="plan", title="P",
+                body_md="b", refs=[], stage="draft",
+            )
+            critique_id = write_artifact(
+                agent="Critic", kind="critique", title="C",
+                body_md=(
+                    "## Verified\nok\n## Gaps\n*No material findings.*\n"
+                    "## Risks\n*No material findings.*\n## Counter-recommendation\nhold\n"
+                ),
+                refs=[pricing_draft_id], stage="critique",
+            )
+            append_event(
+                agent="Critic", kind="observation",
+                payload={"artifact_title": "C"}, artifact_id=critique_id,
+            )
+            # First edit refs the reviewed draft
+            wiki.propose_edit(
+                "policy/reedit", "T", "VERSION 1", "Pricing & Promo",
+                refs=[pricing_draft_id],
+            )
+            # Same agent re-edits the same slug — but cites no reviewed
+            # artifact. The page body now reflects the unreviewed v2.
+            wiki.propose_edit(
+                "policy/reedit", "T", "VERSION 2 unreviewed", "Pricing & Promo",
+                refs=["unrelated-evt"],
+            )
+        finally:
+            current_turn_id.reset(token)
+
+        _wiki_auto_publish_clean_drafts(turn_start, llm=None, turn_id="turn-reedit")
+        page = wiki.get_page("policy/reedit")
+        # Latest edit was unreviewed → page must stay draft.
+        self.assertEqual(page.status, "draft")
+        self.assertEqual(page.body_md, "VERSION 2 unreviewed")
+
     def test_run_chief_resets_turn_id_even_when_chief_raises(self):
         """current_turn_id contextvar must be cleared even if
         chief.run raises mid-stream — otherwise the next request on

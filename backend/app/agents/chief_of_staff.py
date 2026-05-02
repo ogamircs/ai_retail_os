@@ -601,21 +601,48 @@ def _wiki_auto_publish_clean_drafts(
         for ref in critique.get("refs") or []:
             if isinstance(ref, str) and ref:
                 reviewed_artifact_ids.add(ref)
+    # Coalesce wiki_edits to the *latest* edit per slug (highest
+    # payload.version, falling back to event id order). An older
+    # reviewed edit followed by a newer unreviewed edit on the same
+    # slug must NOT publish the page — the page body the operator
+    # would see is the newer unreviewed body. Walking edits in id
+    # order means the last write wins per slug.
+    latest_edit_by_slug: dict[str, dict] = {}
     for edit in edits:
         slug = (edit.get("payload") or {}).get("slug")
         if not slug:
             continue
+        prev = latest_edit_by_slug.get(slug)
+        if prev is None:
+            latest_edit_by_slug[slug] = edit
+            continue
+        prev_v = (prev.get("payload") or {}).get("version", 0)
+        cur_v = (edit.get("payload") or {}).get("version", 0)
+        # Prefer the highest version; on ties (or missing version),
+        # prefer the higher event id (later-emitted).
+        if (cur_v, edit.get("id", 0)) > (prev_v, prev.get("id", 0)):
+            latest_edit_by_slug[slug] = edit
+
+    for slug, edit in latest_edit_by_slug.items():
         edit_refs = (edit.get("payload") or {}).get("refs") or []
         if not isinstance(edit_refs, list):
             edit_refs = []
-        # Per-draft proof: at least one of this wiki_edit's refs must
-        # be an artifact id the Critic reviewed clean this turn. An
-        # agent landing multiple wiki_edits can therefore only auto-
-        # publish the one(s) tied to a reviewed draft.
+        # Per-draft proof: the LATEST wiki_edit for this slug must
+        # cite at least one artifact id the Critic reviewed clean
+        # this turn. Unreviewed re-edits of the same slug therefore
+        # block publication of the page even if an earlier edit was
+        # reviewed.
         if not any(r in reviewed_artifact_ids for r in edit_refs if isinstance(r, str)):
             continue
         page = wiki_store.get_page(slug)
         if page is None or page.status != "draft":
+            continue
+        # Cross-check that the page's current version matches the
+        # reviewed edit's version. If a separate untracked write
+        # bumped the version after our edit, we'd be promoting a
+        # body the Critic never saw.
+        edit_version = (edit.get("payload") or {}).get("version")
+        if edit_version is not None and edit_version != page.version:
             continue
         wiki_store.publish_page(slug, by_agent=NAME)
 
