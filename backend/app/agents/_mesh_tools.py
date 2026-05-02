@@ -195,13 +195,26 @@ def peer_review_task_for(reviewer: str, target_id: str, scope: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+_AGENT_SEARCH_STATUSES = ("published", "draft", "deprecated", "all")
+
+
 def build_wiki_search_tool() -> tuple[Tool, Callable[[dict], dict]]:
     def _impl(args: dict) -> dict:
         q = (args.get("query") or "").strip()
         limit = max(1, min(int(args.get("limit", 10)), 50))
-        pages = wiki_store.search_pages(q, limit=limit)
+        # Default to published-only so unreviewed drafts + retired
+        # pages don't leak into agent context as evidence. Agents can
+        # opt into a wider view (e.g. "all" for an explicit audit
+        # task) but the safe default keeps the publish gate's intent
+        # intact: only signed-off lessons influence new decisions.
+        status_arg = (args.get("status") or "published").strip().lower()
+        if status_arg not in _AGENT_SEARCH_STATUSES:
+            status_arg = "published"
+        effective_status = None if status_arg == "all" else status_arg
+        pages = wiki_store.search_pages(q, limit=limit, status=effective_status)
         return {
             "query": q,
+            "status_filter": status_arg,
             "results": [
                 {
                     "slug": p.slug,
@@ -221,17 +234,27 @@ def build_wiki_search_tool() -> tuple[Tool, Callable[[dict], dict]]:
     tool = Tool(
         name="wiki_search",
         description=(
-            "Search the agentic wiki for prior lessons. Returns up to "
-            "`limit` matching pages with slug + title + 240-char "
-            "excerpt. Use before recommending a course of action — if "
-            "we already wrote down what worked, cite it instead of "
-            "re-deriving."
+            "Search the agentic wiki for prior lessons. Defaults to "
+            "`status='published'` so only signed-off lessons surface "
+            "as evidence. Pass `status='draft'` / `'deprecated'` / "
+            "`'all'` only when you are explicitly auditing in-flight "
+            "or retired pages. Returns up to `limit` matching pages "
+            "with slug + title + 240-char excerpt; call wiki_read for "
+            "the full body."
         ),
         input_schema={
             "type": "object",
             "properties": {
                 "query": {"type": "string"},
                 "limit": {"type": "integer"},
+                "status": {
+                    "type": "string",
+                    "enum": list(_AGENT_SEARCH_STATUSES),
+                    "description": (
+                        "Optional stage filter. Default 'published' — "
+                        "agents must opt in to see drafts/deprecated."
+                    ),
+                },
             },
             "required": ["query"],
         },

@@ -578,36 +578,41 @@ def _wiki_auto_publish_clean_drafts(
     all_clean = all(_critique_is_clean(ev["artifact_id"]) for ev in critique_artifacts)
     if not all_clean:
         return
-    # Per-draft gate (PR #31 follow-up fix): a clean turn-level
-    # critique is necessary but not sufficient. Each wiki_edit must
-    # also have been authored by an agent whose own draft was
-    # critiqued this turn — otherwise an Analyst (whose delegations
-    # bypass the auto-Critic loop) could land a wiki_edit that gets
-    # auto-published on the back of a Pricing critique that knows
-    # nothing about the Analyst's lesson.
+    # Per-draft gate (PR #31 follow-up fix). A clean turn-level
+    # critique is necessary but not sufficient — each individual
+    # wiki_edit must also be linked back to an artifact the Critic
+    # actually reviewed this turn. The previous "match by author"
+    # gate was too loose: one agent could land multiple wiki_edits
+    # off a single clean critique.
     #
-    # Build the set of reviewed-draft authors by walking each
-    # critique's refs[0] (the audited draft id) and reading its
-    # `agent` field. Drafts authored by anyone outside that set wait
-    # for explicit operator approval via the WikiTab.
-    reviewed_authors: set[str] = set()
+    # The link is the wiki_edit's `refs` field. wiki_propose_edit
+    # encourages agents to cite the spine event ids / artifact ids
+    # that prove the lesson; here we use those as the per-draft proof
+    # of review. Build the set of reviewed artifact ids by walking
+    # each critique's refs (the artifacts it audited). A wiki_edit
+    # publishes only when its refs intersect that set — meaning the
+    # specific draft it summarises was the one the Critic signed off.
+    # No refs ⇒ hold for operator approval.
+    reviewed_artifact_ids: set[str] = set()
     for c_ev in critique_artifacts:
         critique = read_artifact(c_ev["artifact_id"])
         if not critique:
             continue
         for ref in critique.get("refs") or []:
-            target = read_artifact(ref)
-            if target and target.get("agent"):
-                reviewed_authors.add(target["agent"])
+            if isinstance(ref, str) and ref:
+                reviewed_artifact_ids.add(ref)
     for edit in edits:
         slug = (edit.get("payload") or {}).get("slug")
         if not slug:
             continue
-        author = edit.get("agent")
-        if author not in reviewed_authors:
-            # Author wasn't reviewed by Critic this turn → hold the
-            # draft for the operator regardless of how clean the
-            # other critiques were.
+        edit_refs = (edit.get("payload") or {}).get("refs") or []
+        if not isinstance(edit_refs, list):
+            edit_refs = []
+        # Per-draft proof: at least one of this wiki_edit's refs must
+        # be an artifact id the Critic reviewed clean this turn. An
+        # agent landing multiple wiki_edits can therefore only auto-
+        # publish the one(s) tied to a reviewed draft.
+        if not any(r in reviewed_artifact_ids for r in edit_refs if isinstance(r, str)):
             continue
         page = wiki_store.get_page(slug)
         if page is None or page.status != "draft":

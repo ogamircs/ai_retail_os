@@ -180,10 +180,26 @@ class WikiToolsTest(unittest.TestCase):
 
     def test_search_tool_returns_excerpt_only(self):
         wiki.propose_edit("x/y", "T", "A" * 500, "Author")
+        wiki.publish_page("x/y", "Operator")
         _, search_impl = build_wiki_search_tool()
         out = search_impl({"query": ""})
         self.assertEqual(len(out["results"]), 1)
         self.assertLessEqual(len(out["results"][0]["excerpt"]), 240)
+
+    def test_search_tool_defaults_to_published(self):
+        """Drafts must NOT surface in agent search by default —
+        otherwise unreviewed knowledge leaks back into agent context.
+        """
+        wiki.propose_edit("d/x", "Draft", "BODY", "Author")  # never published
+        wiki.propose_edit("p/y", "Pub", "BODY", "Author")
+        wiki.publish_page("p/y", "Operator")
+        _, search_impl = build_wiki_search_tool()
+        out = search_impl({"query": ""})
+        slugs = {r["slug"] for r in out["results"]}
+        self.assertEqual(slugs, {"p/y"})
+        # Explicit opt-in for "all" surfaces drafts too.
+        out_all = search_impl({"query": "", "status": "all"})
+        self.assertEqual({r["slug"] for r in out_all["results"]}, {"d/x", "p/y"})
 
     def test_read_tool_returns_full_body(self):
         wiki.propose_edit("x/y", "T", "FULL BODY", "Author")
@@ -254,8 +270,10 @@ class WikiAutoPublishTest(unittest.TestCase):
             agent="Pricing & Promo", kind="plan", title="Markdown",
             body_md="markdown 25%", refs=[], stage="draft",
         )
-        # Pricing emits the wiki edit (matches the reviewed author)
-        wiki.propose_edit("x/y", "T", "BODY", "Pricing & Promo")
+        # Pricing emits the wiki edit; refs back to its reviewed draft
+        wiki.propose_edit(
+            "x/y", "T", "BODY", "Pricing & Promo", refs=[pricing_draft_id]
+        )
         # Critic critique referencing the Pricing draft, clean
         critique_id = write_artifact(
             agent="Critic", kind="critique", title="C",
@@ -414,7 +432,10 @@ class WikiAutoPublishTest(unittest.TestCase):
                 agent="Critic", kind="observation",
                 payload={"artifact_title": "C"}, artifact_id=critique_id,
             )
-            wiki.propose_edit("policy/turn-a", "P", "BODY", "Pricing & Promo")
+            wiki.propose_edit(
+                "policy/turn-a", "P", "BODY", "Pricing & Promo",
+                refs=[pricing_draft_id],
+            )
         finally:
             current_turn_id.reset(token_a)
 
@@ -463,8 +484,13 @@ class WikiAutoPublishTest(unittest.TestCase):
             artifact_id=clean_id,
         )
         # Analyst (un-reviewed) and Pricing both author wiki edits
+        # Analyst's wiki_edit cites no reviewed artifact → must hold.
         wiki.propose_edit("policy/x", "P", "B", "Analyst")
-        wiki.propose_edit("policy/y", "P2", "B2", "Pricing & Promo")
+        # Pricing's wiki_edit refs its reviewed draft → publishes.
+        wiki.propose_edit(
+            "policy/y", "P2", "B2", "Pricing & Promo",
+            refs=[pricing_draft_id],
+        )
 
         _wiki_auto_publish_clean_drafts(turn_start, llm=None)
         # Pricing's wiki edit publishes (its draft was reviewed clean).
