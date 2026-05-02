@@ -240,28 +240,50 @@ def propose_edit(
     return page
 
 
-def publish_page(slug: str, by_agent: str) -> WikiPage | None:
+def publish_page(
+    slug: str,
+    by_agent: str,
+    expected_version: int | None = None,
+) -> WikiPage | None:
     """Flip the latest revision to status='published'. Idempotent —
-    re-publishing an already-published page is a no-op."""
+    re-publishing an already-published page is a no-op.
+
+    `expected_version` makes the publish atomic against concurrent
+    edits: the UPDATE only fires when the page is still at the version
+    the caller validated (and still in 'draft'). If a racing turn
+    bumped the version between the caller's read and our UPDATE, the
+    rowcount is 0, no event is emitted, and we return the current page
+    unchanged. This closes the W4 TOCTOU gap where the auto-publisher
+    would otherwise promote a body the Critic never reviewed.
+    """
     page = get_page(slug)
     if page is None:
         return None
     if page.status == "published":
         return page
+    if expected_version is not None and page.version != expected_version:
+        return page
+    target_version = page.version
     now = _now()
     with conn() as c:
-        c.execute(
-            "UPDATE wiki_pages SET status = 'published', updated_ts = ? WHERE slug = ?",
-            (now, slug),
+        cur = c.execute(
+            "UPDATE wiki_pages SET status = 'published', updated_ts = ? "
+            "WHERE slug = ? AND version = ? AND status = 'draft'",
+            (now, slug, target_version),
         )
+        if cur.rowcount == 0:
+            # Concurrent writer changed status/version between our read
+            # and our write. Don't fall through to the revisions update
+            # or fire a wiki_publish event for a body we didn't validate.
+            return get_page(slug)
         c.execute(
             "UPDATE wiki_revisions SET status = 'published' WHERE slug = ? AND version = ?",
-            (slug, page.version),
+            (slug, target_version),
         )
     append_event(
         agent=by_agent,
         kind="wiki_publish",
-        payload={"slug": slug, "version": page.version, "promoted_by": by_agent},
+        payload={"slug": slug, "version": target_version, "promoted_by": by_agent},
     )
     return get_page(slug)
 

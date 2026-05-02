@@ -74,6 +74,30 @@ class WikiStorageTest(unittest.TestCase):
         # Second call short-circuited — only one publish event total.
         self.assertEqual(len(evs), 1)
 
+    def test_publish_with_expected_version_skips_when_version_advanced(self):
+        """If a racing turn bumped the version between the W4
+        auto-publisher's check and its publish call, the UPDATE must
+        no-op — no wiki_publish event, page stays at the newer
+        unreviewed draft. Closes the TOCTOU gap that would otherwise
+        promote a body the Critic never saw."""
+        wiki.propose_edit("x/y", "T", "v1", "A")  # version 1, draft
+        # Simulate a racing turn that bumped the version after our caller
+        # validated v1.
+        wiki.propose_edit("x/y", "T", "v2 racing", "A")  # version 2, draft
+        # Caller thinks it's still publishing v1 — must refuse.
+        result = wiki.publish_page("x/y", by_agent="ChiefOfStaff", expected_version=1)
+        # Page returned, but stage unchanged (still draft at v2).
+        self.assertEqual(result.status, "draft")
+        self.assertEqual(result.version, 2)
+        evs = [e for e in ev_store.list_events(limit=10) if e["kind"] == "wiki_publish"]
+        self.assertEqual(len(evs), 0)
+
+    def test_publish_with_expected_version_succeeds_when_version_matches(self):
+        wiki.propose_edit("x/y", "T", "v1", "A")
+        result = wiki.publish_page("x/y", by_agent="ChiefOfStaff", expected_version=1)
+        self.assertEqual(result.status, "published")
+        self.assertEqual(result.version, 1)
+
     def test_re_edit_after_publish_lands_as_draft(self):
         """A revision on a published page should drop the page back to
         draft so the W4 gate fires before the new body becomes
@@ -733,6 +757,47 @@ class WikiCuratorCapsTest(unittest.TestCase):
         })
         self.assertIn("error", out)
         self.assertIn("rate limit", out["error"].lower())
+
+    def test_per_slug_rate_limit_serializes_concurrent_proposals(self):
+        """Two threads both call propose for the same slug at the same
+        instant. The per-slug lock must serialize check+write so only
+        the first succeeds and the second hits the rate-limit error —
+        no duplicate wiki_edit row inside the cooldown window."""
+        import threading
+        from app.agents.wiki_curator import _wiki_propose_with_caps
+        from datetime import datetime, timezone
+
+        turn_start = datetime.now(timezone.utc).isoformat()
+        # Each thread gets its own per-turn impl (matches real wiring
+        # where every turn builds its own). Per-slug lock is process-
+        # global so they still serialize on the same slug.
+        impl_a = _wiki_propose_with_caps(turn_start, turn_id="turn-a")
+        impl_b = _wiki_propose_with_caps(turn_start, turn_id="turn-b")
+        results: list[dict] = []
+        results_lock = threading.Lock()
+        barrier = threading.Barrier(2)
+
+        def _run(impl):
+            barrier.wait()
+            r = impl({
+                "slug": "policy/concurrent_test",
+                "title": "T",
+                "body_md": "B",
+            })
+            with results_lock:
+                results.append(r)
+
+        t1 = threading.Thread(target=_run, args=(impl_a,))
+        t2 = threading.Thread(target=_run, args=(impl_b,))
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+        oks = [r for r in results if "slug" in r]
+        errs = [r for r in results if "error" in r]
+        self.assertEqual(len(oks), 1, f"expected exactly one success, got: {results}")
+        self.assertEqual(len(errs), 1)
+        self.assertIn("rate limit", errs[0]["error"].lower())
 
 
 class SpecialistsHaveWikiToolsTest(unittest.TestCase):

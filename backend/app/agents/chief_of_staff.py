@@ -670,7 +670,17 @@ def _wiki_auto_publish_clean_drafts(
         edit_version = (edit.get("payload") or {}).get("version")
         if edit_version is not None and edit_version != page.version:
             continue
-        wiki_store.publish_page(slug, by_agent=NAME)
+        # Pass `expected_version` so the publish is atomic against a
+        # racing /api/chat turn that bumps the version between the
+        # check above and the UPDATE inside publish_page. Without it,
+        # the gap is a TOCTOU: a newer unreviewed draft could land in
+        # that window and we would promote *it* instead of the body
+        # the Critic actually signed off on.
+        wiki_store.publish_page(
+            slug,
+            by_agent=NAME,
+            expected_version=edit_version if edit_version is not None else page.version,
+        )
 
 
 def run_chief(user_input: str, llm: LLMProvider) -> Iterator[AgentEvent]:

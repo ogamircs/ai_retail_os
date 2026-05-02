@@ -18,6 +18,7 @@ artifacts, search the existing wiki, propose at most 3 lessons.
 from __future__ import annotations
 
 import os
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -113,6 +114,27 @@ _WIKI_READ_TOOL, _wiki_read_impl = build_wiki_read_tool()
 _WIKI_PROPOSE_TOOL_BASE, _wiki_propose_impl_base = build_wiki_propose_edit_tool(NAME)
 
 
+# Process-wide per-slug mutex registry. The 24h rate-limit check is a
+# read-then-write pattern (events scan + propose_edit insert) and would
+# otherwise race when two concurrent /api/chat turns both pass the
+# check before either writes. Holding a per-slug lock for the whole
+# check+write closes the gap. Lock acquisition is keyed by slug so two
+# Curator runs on *different* slugs still proceed in parallel.
+_PER_SLUG_LOCKS_REGISTRY_LOCK = threading.Lock()
+_PER_SLUG_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _slug_lock(slug: str) -> threading.Lock:
+    """Return (creating if needed) the per-slug mutex used to serialize
+    rate-limit check + propose for a given wiki slug."""
+    with _PER_SLUG_LOCKS_REGISTRY_LOCK:
+        lock = _PER_SLUG_LOCKS.get(slug)
+        if lock is None:
+            lock = threading.Lock()
+            _PER_SLUG_LOCKS[slug] = lock
+        return lock
+
+
 def _wiki_propose_with_caps(turn_start_iso: str, turn_id: str | None = None):
     """Wrap the bare propose impl with per-turn + per-slug rate
     limiting so the Curator can't blow past either cap regardless of
@@ -127,15 +149,24 @@ def _wiki_propose_with_caps(turn_start_iso: str, turn_id: str | None = None):
                 )
             }
         slug = (args.get("slug") or "").strip()
-        if slug and not _check_rate_limit(slug):
-            return {
-                "error": (
-                    f"per-slug rate limit: '{slug}' was already proposed "
-                    f"by the Curator within the last "
-                    f"{PER_SLUG_RATE_LIMIT_HOURS}h. Skip."
-                )
-            }
-        return _wiki_propose_impl_base(args)
+        if not slug:
+            # Let the underlying impl surface the missing-slug error.
+            return _wiki_propose_impl_base(args)
+        # Hold the per-slug lock across the rate-limit check AND the
+        # propose_edit insert so concurrent Curator runs can't both
+        # pass the check before either writes wiki_edit. Without this,
+        # two turns racing on the same slug emit duplicate proposals
+        # inside the supposed cooldown window.
+        with _slug_lock(slug):
+            if not _check_rate_limit(slug):
+                return {
+                    "error": (
+                        f"per-slug rate limit: '{slug}' was already proposed "
+                        f"by the Curator within the last "
+                        f"{PER_SLUG_RATE_LIMIT_HOURS}h. Skip."
+                    )
+                }
+            return _wiki_propose_impl_base(args)
 
     return _impl
 
