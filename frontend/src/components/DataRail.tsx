@@ -8,6 +8,7 @@ import IntegrationsTab from "./dataTabs/IntegrationsTab";
 import ReportsTab from "./dataTabs/ReportsTab";
 import MlflowTab from "./dataTabs/MlflowTab";
 import WikiTab from "./dataTabs/WikiTab";
+import BrainTab from "./dataTabs/BrainTab";
 import "./DataRail.css";
 
 const TABS = [
@@ -18,6 +19,7 @@ const TABS = [
   { id: "int", label: "INTEGRATIONS" },
   { id: "rep", label: "REPORTS" },
   { id: "wik", label: "WIKI" },
+  { id: "brn", label: "BRAIN" },
   { id: "mlf", label: "MLFLOW" },
 ] as const;
 
@@ -42,7 +44,7 @@ export default function DataRail() {
     if (!el) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-      const idx = ["1", "2", "3", "4", "5", "6", "7", "8"].indexOf(e.key);
+      const idx = ["1", "2", "3", "4", "5", "6", "7", "8", "9"].indexOf(e.key);
       if (idx >= 0) {
         e.preventDefault();
         setTab(TABS[idx].id);
@@ -80,6 +82,7 @@ export default function DataRail() {
             {tab === "int" && <IntegrationsTab systems={data.systems} onRefresh={refresh} />}
             {tab === "rep" && <ReportsTab artifacts={data.artifacts} />}
             {tab === "wik" && <WikiTab />}
+            {tab === "brn" && <BrainTab />}
             {tab === "mlf" && <MlflowTab />}
           </>
         )}

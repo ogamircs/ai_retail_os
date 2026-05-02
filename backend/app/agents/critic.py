@@ -12,7 +12,14 @@ read the critique and revise.
 from __future__ import annotations
 
 from app.agents.base import Agent
-from app.agents._mesh_tools import build_wiki_read_tool, build_wiki_search_tool
+from app.agents._mesh_tools import (
+    build_wiki_read_tool,
+    build_wiki_search_tool,
+    build_brain_search_tool,
+    build_brain_read_tool,
+    build_brain_query_tool,
+    build_code_lookup_tool,
+)
 from app.llm.base import Tool
 from app.llm.prompts import resolve_prompt
 from app.spine.events import append_event, events_since_ts
@@ -275,6 +282,23 @@ _CRITIC_WIKI_SEARCH_TOOL, _critic_wiki_search_impl = build_wiki_search_tool()
 _CRITIC_WIKI_READ_TOOL, _critic_wiki_read_impl = build_wiki_read_tool()
 TOOLS.extend([_CRITIC_WIKI_SEARCH_TOOL, _CRITIC_WIKI_READ_TOOL])
 
+# Track 6 G2/G4: Critic also gets the brain MCP tools + the code-graph
+# lookups so it can quote prior decisions AND ground policy claims at
+# the actual source-line level. Mock-mode fallbacks keep the cockpit
+# demo running without a live GBrain instance.
+_CRITIC_BRAIN_SEARCH_TOOL, _critic_brain_search_impl = build_brain_search_tool()
+_CRITIC_BRAIN_READ_TOOL, _critic_brain_read_impl = build_brain_read_tool()
+_CRITIC_BRAIN_QUERY_TOOL, _critic_brain_query_impl = build_brain_query_tool()
+_CODE_TOOLS = [build_code_lookup_tool(k) for k in ("callers", "callees", "def", "refs")]
+TOOLS.extend(
+    [
+        _CRITIC_BRAIN_SEARCH_TOOL,
+        _CRITIC_BRAIN_READ_TOOL,
+        _CRITIC_BRAIN_QUERY_TOOL,
+    ]
+    + [t for t, _ in _CODE_TOOLS]
+)
+
 
 IMPLS = {
     "read_artifact": _tool_read_artifact,
@@ -290,7 +314,12 @@ IMPLS = {
     "write_artifact": _tool_write_artifact,
     "wiki_search": _critic_wiki_search_impl,
     "wiki_read": _critic_wiki_read_impl,
+    "brain_search": _critic_brain_search_impl,
+    "brain_read": _critic_brain_read_impl,
+    "brain_query": _critic_brain_query_impl,
 }
+for (tool, impl) in _CODE_TOOLS:
+    IMPLS[tool.name] = impl
 
 
 def build_agent() -> Agent:

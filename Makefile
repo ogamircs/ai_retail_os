@@ -235,3 +235,23 @@ mlflow-status:
 
 mlflow-logs:
 	$(MLFLOW_COMPOSE) logs -f --tail=50
+
+# Track 6 — GBrain. Not a docker-compose stack — GBrain is a Bun-native
+# CLI installed via `git clone + bun install + bun link`. These targets
+# wrap the lifecycle commands so cockpit operators stay inside `make ...`
+# semantics. `gbrain-up` runs in foreground (long-lived HTTP server).
+GBRAIN_PORT := 8787
+
+gbrain-up:
+	@command -v gbrain >/dev/null 2>&1 || { echo "gbrain not on PATH — see infra/gbrain/README.md"; exit 1; }
+	gbrain serve --http --port $(GBRAIN_PORT)
+
+gbrain-down:
+	@pkill -f "gbrain serve --http --port $(GBRAIN_PORT)" || echo "no gbrain process on :$(GBRAIN_PORT)"
+
+gbrain-doctor:
+	@command -v gbrain >/dev/null 2>&1 || { echo "gbrain not on PATH — see infra/gbrain/README.md"; exit 1; }
+	gbrain doctor
+
+gbrain-status:
+	@curl -fsS http://localhost:$(GBRAIN_PORT)/health 2>/dev/null && echo "" || echo "gbrain not reachable on :$(GBRAIN_PORT)"

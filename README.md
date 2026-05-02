@@ -563,6 +563,70 @@ If a future Analyst agent ever needs to auto-create dashboards (e.g. one-shot in
 
 `backend/tests/test_integrations_superset_live.py` exercises live sync against a real Superset. Skipped automatically when `SUPERSET_*` creds aren't set or the login round-trip fails, so CI stays mock-only.
 
+## Running with real GBrain
+
+GBrain (Track 6) is the cockpit's optional persistent agent memory layer — a Bun-native HTTP MCP server installed locally per the upstream pattern (`git clone + bun install + bun link`, no Docker). The cockpit runs in **mock mode by default** — without `GBRAIN_BEARER` set, the Critic's and Analyst's `brain_search` / `brain_read` / `brain_query` tools and the cockpit's `[BRAIN]` tab fall back to a substrate-backed view of `wiki_pages`, so the demo path is coherent without any external dependency.
+
+```bash
+# 1. Install GBrain locally (per its README — bun install -g is discouraged)
+git clone https://github.com/garrytan/gbrain.git ~/gbrain
+cd ~/gbrain
+bun install
+bun link
+gbrain init
+
+# 2. Mint a bearer token + start the HTTP server
+gbrain auth create --name "ai-retail-os" --print
+make gbrain-up   # foreground; runs `gbrain serve --http --port 8787`
+
+# 3. Wire backend/.env
+#    GBRAIN_BASE_URL=http://localhost:8787
+#    GBRAIN_BEARER=<token from step 2>
+
+# 4. Restart the backend to pick up the env
+uvicorn app.main:app --reload
+```
+
+Status strip chip flips from `brain mock` to `brain N pages` once the cockpit can reach the live endpoint. The Critic-side `code_callers` / `code_callees` / `code_def` / `code_refs` tools start returning real results once `gbrain sources add <this-repo> --strategy code` has been run against the codebase (operator-initiated; not part of `make gbrain-up`).
+
+| Cockpit tool | Mock mode (no creds) | Live mode |
+|---|---|---|
+| `brain_search` | falls back to `wiki.search_pages` | GBrain `/v1/search` |
+| `brain_read`   | falls back to `wiki.get_page`     | GBrain `/v1/get`    |
+| `brain_query`  | top wiki page body excerpt        | GBrain `/v1/query` (synthesized answer + citations) |
+| `code_callers` / `code_callees` / `code_def` / `code_refs` | `{mock: true, results: []}` | GBrain `/v1/code/<kind>` |
+| chat-turn ingest hook | logs `brain_ingest` event with mock=true (no external write) | POSTs to GBrain `/v1/ingest` in a daemon thread |
+
+### Disabled jobs
+
+GBrain ships several recurring jobs (`gbrain jobs list`). For the cockpit demo, disable any that hit the public web by default — they cost LLM calls and aren't required:
+
+```bash
+gbrain jobs disable web-research
+gbrain jobs disable smoke-test-public
+# Keep on:
+#   ingest    — pulls cockpit chat turns when G3's hook fires
+#   maintain  — compacts the brain corpus weekly
+```
+
+### Reset
+
+```bash
+gbrain doctor              # diagnostics
+gbrain corpus rm --confirm # nuke the local PGLite store
+gbrain init                # bootstraps fresh
+```
+
+The cockpit is unaffected — when the brain endpoint stops responding, the tools and tab fall back to mock automatically.
+
+### Track 5 vs Track 6
+
+Wiki (Track 5) keeps owning retail-domain pages (`category/*`, `vendor/*`, `policy/*`). Brain (Track 6) owns the operator's broader durable memory + code-graph. Full reasoning in `docs/track6/2026-05-02-track5-track6-reconciliation.md`.
+
+### Live-path tests
+
+`backend/tests/test_track6_gbrain.py` exercises the MCP client against a real GBrain when `GBRAIN_BEARER` is set; otherwise the live test is skipped and only the mock-mode tests run, so CI stays brain-less by design.
+
 ## Provider swap
 
 In the header, change the provider dropdown (Anthropic / OpenAI / Google). Identical behavior, different model. Requires the corresponding API key in `.env`.

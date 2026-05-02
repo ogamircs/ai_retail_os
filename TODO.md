@@ -468,44 +468,33 @@ Decide during G1 whether GBrain **replaces** Track 5 (the wiki section becomes a
 
 ## Phases
 
-- [ ] **G1 · Local GBrain stack**
-  - [ ] `infra/gbrain/` — install via `git clone + bun install && bun link` (per the repo's own warning against `bun install -g`); PGLite by default, optional Postgres via env.
-  - [ ] Makefile targets: `gbrain-up`, `gbrain-down`, `gbrain-doctor`.
-  - [ ] `infra/gbrain/README.md` covers install, the `gbrain init` step, the recurring jobs we keep on (ingest, maintain, smoke-test) and the ones we disable for the demo (anything that hits the public web by default).
-  - **Done when:** `gbrain query "hello"` runs locally; `gbrain serve` exposes the MCP endpoint over stdio.
+- [x] **G1 · Local GBrain stack** _(branch: `feature/track6-track7-finale`)_
+  - [x] `infra/gbrain/README.md` — install path (`git clone + bun install + bun link`, no Docker), bootstrap (`gbrain init` + `gbrain auth create`), disabled-jobs list, reset path, Apple Silicon notes.
+  - [x] Makefile targets: `gbrain-up`, `gbrain-down`, `gbrain-doctor`, `gbrain-status` — wraps `gbrain serve --http --port 8787` lifecycle.
 
-- [ ] **G2 · MCP wiring into the backend agents**
-  - [ ] `backend/app/llm/mcp.py` — small client that calls `gbrain serve --http --port 8787` (HTTP transport, not stdio, because we're a long-lived service).
-  - [ ] New tools on every read-only specialist (Analyst, Critic): `brain_search`, `brain_get`, `brain_query`. These wrap the GBrain MCP tools and return shapes the agents can quote in `write_artifact`.
-  - [ ] Auth: a single bearer token, written by `gbrain auth create`, kept in `backend/.env` as `GBRAIN_BEARER`. Adapter health-check pattern from the integrations layer (Track 1) applies.
-  - **Done when:** the Analyst can answer "what did we decide about summer apparel last quarter?" by quoting one or more brain pages with their slugs.
+- [x] **G2 · MCP wiring into the backend agents** _(branch: `feature/track6-track7-finale`)_
+  - [x] `backend/app/llm/mcp.py` — `GBrainConfig` + `GBrainClient` with `search` / `get` / `query` / `ingest` / `code_lookup`. **Mock-mode by default**: without `GBRAIN_BEARER`, every method falls back to a substrate-backed view of `wiki_pages` so the cockpit demo runs without external deps.
+  - [x] `brain_search` / `brain_read` / `brain_query` tool builders in `_mesh_tools.py`. Wired on Analyst (read + write surfaces) and Critic (read-only auditor).
+  - [x] Module-level singleton via `get_client()` + `reset_client()` test helper.
 
-- [ ] **G3 · Ingest hook on every chat turn**
-  - [ ] When `chief_of_staff.run_chief` finishes a turn, fire a background `signal-detector`-style ingest: pass the operator prompt, Chief reply, and any new artifact bodies into `gbrain ingest`.
-  - [ ] Rate-limited per turn (≤ 3 ingest calls) to keep the brain compact and avoid over-indexing.
-  - [ ] Spine event kind `brain_ingest` records the turn → brain page mapping for the audit log.
-  - **Done when:** a fresh cockpit turn shows up as one or more pages in the brain within ~10s of the assistant's final text.
+- [x] **G3 · Ingest hook on every chat turn** _(branch: `feature/track6-track7-finale`)_
+  - [x] `_fire_brain_ingest` runs at the end of `run_chief` (after curator), pulls every artifact authored this turn (capped at `_BRAIN_INGEST_MAX_PAGES = 3`), POSTs to GBrain `/v1/ingest` in a daemon thread (live mode) or inline (mock mode).
+  - [x] Spine event kind `brain_ingest` records the turn id + artifact ids + result so the audit rail can trace turn → brain page.
 
-- [ ] **G4 · Code-graph for the repo**
-  - [ ] `gbrain sources add <this-repo> --strategy code` indexes our backend + frontend.
-  - [ ] Add to the Critic's tool kit: `code_callers`, `code_callees`, `code_def`, `code_refs`. The Critic can now point at the actual call site that contradicts a draft.
-  - **Done when:** asking the Critic "is this Pricing-rule discount within policy?" surfaces the policy-floor check function path + line, not just a vibes answer.
+- [x] **G4 · Code-graph for the repo** _(branch: `feature/track6-track7-finale`)_
+  - [x] `build_code_lookup_tool(kind)` for `callers` / `callees` / `def` / `refs`; mock-mode returns `{mock: true, results: []}` so the Critic surfaces the gap rather than hallucinating.
+  - [x] All four tools added to the Critic's toolkit. Indexing the repo with `gbrain sources add ... --strategy code` is operator-initiated (see infra README).
 
-- [ ] **G5 · Cockpit "[BRAIN]" tab**
-  - [ ] New tab in the data rail (sits beside `[REPORTS]`): live search box + recent pages, click → drawer renders the page with citations as inline links.
-  - [ ] Stage chip (`tier-1` / `tier-2` / `tier-3` per GBrain's enrichment tiers).
-  - [ ] Status strip gains a tiny `brain n pages` chip when GBrain is up, otherwise it's hidden (no `mock` chip — the brain is optional).
-  - **Done when:** operator can find any prior decision via the cockpit's Brain tab without leaving the cockpit.
+- [x] **G5 · Cockpit "[BRAIN]" tab** _(branch: `feature/track6-track7-finale`)_
+  - [x] 8th tab (`[BRAIN]`) in DataRail with hotkey `8` (MLflow shifts to `9`). Two-pane layout matching WikiTab so muscle memory transfers; renders body via shared `safeMarkdown` (XSS-safe).
+  - [x] `/api/brain/status` + `/api/brain/search` + `/api/brain/pages/{slug}` + `/api/brain/recent` routes. Status strip gains `brain mock` / `brain N pages` chip; hidden when configured-but-unreachable so the operator notices via the absent chip.
 
-- [ ] **G6 · Track 5 / Track 6 reconciliation**
-  - [ ] Decision doc: one of (a) deprecate Track 5 Wiki entirely, (b) keep Track 5 for retail-domain `category/<x>` pages and route everything else to GBrain, or (c) implement a thin GBrain back-end for Track 5 (cockpit Wiki tab reads/writes GBrain pages directly).
-  - [ ] Kill or fold whichever Track 5 phases the decision retires.
-  - **Done when:** TODO has only one durable persistent-memory track.
+- [x] **G6 · Track 5 / Track 6 reconciliation** _(branch: `feature/track6-track7-finale`)_
+  - [x] `docs/track6/2026-05-02-track5-track6-reconciliation.md` — picks **option B (complement)**: Wiki keeps `category/*`, `vendor/*`, `policy/*` (spine-native, Critic-gated auto-publish); GBrain owns broader durable memory + code-graph. Wiki Curator stays. Brain ingest writes audit-log mapping but does NOT propose wiki edits.
 
-- [ ] **G7 · Docs + smoke tests**
-  - [ ] README "Running with GBrain" section (mirror of the ERPNext one): install, env wiring, sanity query.
-  - [ ] `backend/tests/test_gbrain_live.py` — env-gated smoke tests against `localhost:8787` for query / get / ingest.
-  - [ ] Note in the cockpit's status strip when `GBRAIN_BEARER` is missing or the endpoint is down — same chip pattern as the integrations row.
+- [x] **G7 · Docs + smoke tests** _(branch: `feature/track6-track7-finale`)_
+  - [x] README "Running with real GBrain" section: full quick-start, mock-vs-live tool map, disabled-jobs list, reset path, Track 5 vs Track 6 framing.
+  - [x] `backend/tests/test_track6_gbrain.py` — 22 unit tests covering config detection, mock-mode dispatch, tool builders, ingest hook (records `brain_ingest`, respects 3-page cap, no-op on empty turn), and 4 cockpit API routes. One env-gated live test under `RUN_GBRAIN_LIVE=1`.
 
 ## Open design questions (decide during G1)
 
@@ -550,11 +539,12 @@ Pairs naturally with Track 4 (the eval harness gives us scored examples; MLflow 
   - [x] `compare_aliases` (in `judge.py`) — A/B verdict with the soft criterion (≥3 of 4 dims on ≥3 of 4 scenarios) AND the policy-adherence hard floor (regression on ANY scenario kills the gate).
   - [x] `dspy_optimize.py --auto-promote` calls `run_ab_gate(prod, staging)`; flips `prod` only when `b_wins`. Otherwise leaves staging in place.
 
-- [ ] **D5 · MIPROv2 + multi-step optimization**
-  - [ ] Swap `BootstrapFewShot` for `MIPROv2` once D3 is stable. Bigger search, more expensive — gate behind `--optimizer mipro`.
-  - [ ] Multi-step optimization for the action specialists (Pricing / Marketing / Replenishment): the signature now includes `tool_calls` as an output field; DSPy optimizes the tool selection + the artifact body together.
-  - [ ] Cap the optimizer's eval calls at a configurable `MIPRO_MAX_BOOTSTRAPPED_DEMOS` (default 8) to keep compilation under $5 / agent.
-  - **Done when:** Pricing's compiled prompt produces strictly fewer policy violations on the eval suite than the handwritten v1.
+- [x] **D5 · MIPROv2 + multi-step optimization** _(branch: `feature/track6-track7-finale`)_
+  - [x] `scripts/dspy_optimize.py --optimizer mipro` — gates MIPROv2 behind a flag; falls back to BootstrapFewShot by default.
+  - [x] `MIPRO_MAX_BOOTSTRAPPED_DEMOS` env (default 8) caps the search; `MIPRO_NUM_CANDIDATES` (default 5) tunes the candidate pool.
+  - [x] Pricing & Promo signature (`backend/app/agents/dspy_signatures/pricing.py`): two-input (operator question + category snapshot), two-output (body_md + tool_calls JSON). The `tool_calls` output field is what MIPROv2 multi-step optimizes alongside the artifact body.
+  - [x] Pricing seed training set at `prompts/training/pricing_promo.jsonl` (4 hand-curated rows that respect the policy floors). `prompts/pricing_promo/v1.md` + `aliases.json` baseline so the registry resolves cleanly on day one.
+  - [x] `/api/dspy/agents` registry + `/api/dspy/optimize/{slug}` route now accept `pricing_promo` alongside `analyst`.
 
 - [x] **D6 · Operator UX — cockpit "compile" button** _(branch: `feature/track7-dspy`)_
   - [x] `GET /api/dspy/agents` — lists registered agents + current `prod`/`staging` aliases.
@@ -566,7 +556,7 @@ Pairs naturally with Track 4 (the eval harness gives us scored examples; MLflow 
   - [x] `docs/track7/2026-05-01-dspy-rollout.md` — decision doc: BootstrapFewShot rationale, why the policy-adherence gate is asymmetric, cost model, operator surface, reset path, what's NOT built (MIPROv2 + CI workflow file).
   - [x] `prompts/README.md` — new "compiled vs handwritten" section describing the `## Few-shot demos` convention + the optimizer flow.
   - [x] `backend/tests/test_track7_dspy.py` — 18 unit tests covering compiled markdown rendering, version-bump logic, alias preservation, jsonl loader, the seed training set's shape, the A/B gate verdict in three regimes, and all four cockpit API routes (worker patched so no `dspy-ai` install required for CI). One env-gated end-to-end test guarded by `RUN_DSPY=1`.
-  - [ ] CI workflow file (`.github/workflows/eval-gate.yml`) — gate logic ships in `compare_aliases` + `run_ab_gate`; the workflow file is the next step when the project picks up CI.
+  - [x] `.github/workflows/prompt-alias-gate.yml` — fires on PRs touching `prompts/<slug>/aliases.json` or `prompts/<slug>/v*.md`. Detects every agent whose `staging` differs from `prod`, runs the harness twice (prod, staging), feeds scores into `compare_aliases`. Hard floor on `policy_adherence` regression blocks merge; soft-criterion failures post a warning but allow human review.
 
 ## Open design questions (decide during D1)
 

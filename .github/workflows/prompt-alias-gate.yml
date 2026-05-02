@@ -1,0 +1,174 @@
+# Track 7 D7 — DSPy prompt-alias gate.
+#
+# Fires only on PRs that touch `prompts/<slug>/aliases.json` or add a
+# new `prompts/<slug>/v*.md`. Detects every agent whose `staging`
+# alias differs from `prod`, runs the eval harness twice (prod, then
+# staging), feeds the per-scenario JudgeScores into
+# `judge.compare_aliases`, and applies the same gate the cockpit's
+# `compile + auto-promote` action runs at runtime:
+#   * soft criterion: candidate wins ≥3 of 4 dims on ≥3 of 4 scenarios
+#   * HARD floor:     candidate must NOT regress `policy_adherence`
+#                     on ANY scenario
+#
+# When the candidate fails the hard floor, the workflow exits non-zero
+# and blocks merge. Soft-criterion failures post a delta comment but
+# do NOT block merge — operators can still ship via human review.
+#
+# Sibling workflow:
+#   `eval-gate.yml` (Track 4 M6) runs the single_pass vs multi_pass
+#   gate on the broader agent surface. This workflow is narrower —
+#   only triggers on alias bumps, only compares prod vs staging.
+
+name: prompt-alias-gate
+
+on:
+  pull_request:
+    paths:
+      - "prompts/*/aliases.json"
+      - "prompts/*/v*.md"
+
+concurrency:
+  group: prompt-alias-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  alias-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      pull-requests: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install backend
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Detect provider key
+        id: keycheck
+        run: |
+          if [ -n "${{ secrets.ANTHROPIC_API_KEY }}" ]; then
+            echo "provider=anthropic" >> "$GITHUB_OUTPUT"
+            echo "ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}" >> "$GITHUB_ENV"
+          elif [ -n "${{ secrets.OPENAI_API_KEY }}" ]; then
+            echo "provider=openai" >> "$GITHUB_OUTPUT"
+            echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}" >> "$GITHUB_ENV"
+          elif [ -n "${{ secrets.GOOGLE_API_KEY }}" ]; then
+            echo "provider=google" >> "$GITHUB_OUTPUT"
+            echo "GOOGLE_API_KEY=${{ secrets.GOOGLE_API_KEY }}" >> "$GITHUB_ENV"
+          elif [ -n "${{ secrets.GEMINI_API_KEY }}" ]; then
+            echo "provider=google" >> "$GITHUB_OUTPUT"
+            echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}" >> "$GITHUB_ENV"
+          else
+            echo "provider=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Find agents with diverging aliases
+        id: detect
+        run: |
+          set -euo pipefail
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          from pathlib import Path
+
+          slugs = []
+          for p in sorted(Path("prompts").glob("*/aliases.json")):
+              try:
+                  data = json.loads(p.read_text())
+              except Exception:
+                  continue
+              prod = data.get("prod")
+              staging = data.get("staging")
+              if staging and staging != prod:
+                  slugs.append(p.parent.name)
+
+          if not slugs:
+              print("skip=true")
+              print("agents=")
+          else:
+              print("skip=false")
+              # Space-separated list — easy to consume in bash.
+              print(f"agents={' '.join(slugs)}")
+          PY
+
+      - name: Skip notice (no agents need re-eval)
+        if: steps.detect.outputs.skip == 'true'
+        run: |
+          echo "::notice ::prompt-alias-gate: no agent has staging != prod; skipping eval harness."
+
+      - name: Skip notice (no provider key configured)
+        if: steps.detect.outputs.skip == 'false' && steps.keycheck.outputs.provider == ''
+        run: |
+          echo "::warning ::prompt-alias-gate: no LLM provider secret available; cannot run eval harness on this PR."
+
+      - name: Run prod baseline
+        if: steps.detect.outputs.skip == 'false' && steps.keycheck.outputs.provider != ''
+        working-directory: backend
+        env:
+          RUN_EVAL: "1"
+          LLM_PROVIDER: ${{ steps.keycheck.outputs.provider }}
+        run: |
+          # Default aliases (no --prompts-alias) ⇒ prod resolves
+          python -m tests.agents.eval.run_eval --mode multi_pass
+          mv tests/agents/eval/last_run.json /tmp/last_run_prod.json
+
+      - name: Run staging candidate
+        if: steps.detect.outputs.skip == 'false' && steps.keycheck.outputs.provider != ''
+        working-directory: backend
+        env:
+          RUN_EVAL: "1"
+          LLM_PROVIDER: ${{ steps.keycheck.outputs.provider }}
+          AGENTS: ${{ steps.detect.outputs.agents }}
+        run: |
+          set -euo pipefail
+          args=""
+          for slug in $AGENTS; do
+            args="$args --prompts-alias $slug=staging"
+          done
+          python -m tests.agents.eval.run_eval --mode multi_pass $args
+          mv tests/agents/eval/last_run.json /tmp/last_run_staging.json
+
+      - name: Compare prod vs staging
+        if: steps.detect.outputs.skip == 'false' && steps.keycheck.outputs.provider != ''
+        working-directory: backend
+        run: |
+          python - <<'PY'
+          import json, sys
+          sys.path.insert(0, ".")
+          from tests.agents.eval.judge import JudgeScore, compare_aliases
+
+          def _load(path):
+              data = json.load(open(path))
+              runs = data.get("runs") or {}
+              scores = {}
+              for scen, modes in runs.items():
+                  payload = (modes or {}).get("multi_pass") or {}
+                  sc = payload.get("score") or {}
+                  scores[scen] = JudgeScore(
+                      factual_correctness=int(sc.get("factual_correctness", 0)),
+                      evidence_cited=int(sc.get("evidence_cited", 0)),
+                      policy_adherence=int(sc.get("policy_adherence", 0)),
+                      recommendation_quality=int(sc.get("recommendation_quality", 0)),
+                      notes=str(sc.get("notes", "")),
+                  )
+              return scores
+
+          a = _load("/tmp/last_run_prod.json")
+          b = _load("/tmp/last_run_staging.json")
+          verdict = compare_aliases(a, b)
+          json.dump(verdict, open("/tmp/alias_gate_verdict.json", "w"), indent=2)
+          print(json.dumps(verdict, indent=2))
+          if not verdict["policy_floor_ok"]:
+              print("::error::prompt-alias-gate: policy_adherence regressed on at least one scenario — blocking merge")
+              sys.exit(2)
+          if not verdict["b_wins"]:
+              print("::warning::prompt-alias-gate: candidate failed soft criterion (≥3/4 dims on ≥3/4 scenarios). Operator can still ship via human review.")
+          PY

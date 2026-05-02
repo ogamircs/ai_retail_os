@@ -683,6 +683,92 @@ def _wiki_auto_publish_clean_drafts(
         )
 
 
+_BRAIN_INGEST_MAX_PAGES = 3
+
+
+def _fire_brain_ingest(user_input: str, turn_start_iso: str, turn_id: str) -> None:
+    """Track 6 G3 — push the turn into GBrain in the background.
+
+    Pulls every artifact event from this turn (capped at
+    `_BRAIN_INGEST_MAX_PAGES`) and POSTs to GBrain's `/v1/ingest`.
+    Each page is keyed by its artifact id so re-ingestion of the same
+    artifact (e.g. a re-run scenario) overwrites in place rather than
+    duplicating. Spine event kind `brain_ingest` records the mapping
+    so the cockpit's audit log can trace turn → brain page.
+
+    Mock-mode is a no-op (`GBrainClient.ingest` short-circuits when
+    no bearer is configured). Live-mode runs in a daemon thread so a
+    slow brain can't stall the operator-facing response.
+    """
+    import threading
+
+    from app.llm.mcp import get_client
+    from app.spine.artifacts import read_artifact
+    from app.spine.events import events_for_turn
+
+    scoped = events_for_turn(turn_id, since_ts=turn_start_iso)
+    artifact_ids: list[str] = []
+    seen: set[str] = set()
+    for ev in scoped:
+        aid = ev.get("artifact_id")
+        if aid and aid not in seen:
+            seen.add(aid)
+            artifact_ids.append(aid)
+        if len(artifact_ids) >= _BRAIN_INGEST_MAX_PAGES:
+            break
+    if not artifact_ids:
+        return
+    pages: list[dict] = []
+    for aid in artifact_ids:
+        art = read_artifact(aid)
+        if not art:
+            continue
+        pages.append(
+            {
+                "slug": f"chat/{turn_id}/{aid}",
+                "title": art.get("title") or "(untitled)",
+                "body": (art.get("body") or "")[:8000],
+                "tags": [
+                    f"agent:{art.get('agent', 'unknown')}",
+                    f"kind:{art.get('kind', 'unknown')}",
+                    f"turn:{turn_id}",
+                ],
+            }
+        )
+    if not pages:
+        return
+    client = get_client()
+
+    def _do_ingest() -> None:
+        result = {}
+        try:
+            result = client.ingest(pages)
+        except Exception as e:
+            result = {"error": str(e)}
+        try:
+            append_event(
+                agent="GBrain",
+                kind="brain_ingest",
+                payload={
+                    "turn_id": turn_id,
+                    "artifact_ids": artifact_ids,
+                    "pages_attempted": len(pages),
+                    "result": result,
+                },
+            )
+        except Exception:
+            # Audit-log failure should never propagate. The brain
+            # write itself already happened.
+            pass
+
+    if not client.config.configured:
+        # Mock mode — record the would-have-ingested mapping inline so
+        # the cockpit's audit log shows the link. Skip the thread.
+        _do_ingest()
+        return
+    threading.Thread(target=_do_ingest, daemon=True, name=f"brain-ingest-{turn_id[:8]}").start()
+
+
 def run_chief(user_input: str, llm: LLMProvider) -> Iterator[AgentEvent]:
     """Run the orchestrator and stream events from CoS *and* delegated specialists."""
     # Track 4 M2: open the parent MLflow run for this operator turn.
@@ -749,6 +835,17 @@ def run_chief(user_input: str, llm: LLMProvider) -> Iterator[AgentEvent]:
                 wiki_curator.curate_turn(
                     turn_start_iso, user_input, llm, turn_id=turn_id
                 )
+        except Exception:
+            pass
+        # Track 6 G3 — fire-and-forget ingest of the turn into GBrain.
+        # Pulls the operator prompt + every artifact authored this turn
+        # and POSTs to GBrain's /v1/ingest. Rate-limited to 3 pages /
+        # turn so a verbose mesh round can't flood the brain. Always
+        # safe — mock mode is a no-op; live mode runs in a daemon
+        # thread so a slow brain can't stall the operator-facing
+        # response.
+        try:
+            _fire_brain_ingest(user_input, turn_start_iso, turn_id)
         except Exception:
             pass
     finally:

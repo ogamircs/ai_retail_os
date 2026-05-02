@@ -125,3 +125,18 @@
   text-align: center;
 }
 .wiki-empty.err { color: var(--bad); }
+
+/* Track 6 G5 — BrainTab status bar (live/mock/unreachable + error). */
+.wiki-status-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-3);
+  border-bottom: 1px dashed var(--line);
+  font-size: var(--fs-xs);
+  color: var(--ink-dim);
+}
+.wiki-error {
+  color: var(--warn);
+  margin-left: auto;
+}
