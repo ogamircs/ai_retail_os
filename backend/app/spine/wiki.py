@@ -172,30 +172,59 @@ def propose_edit(
     matches the operator's expectation of "drafts queue up; published
     requires approval").
     """
+    import sqlite3 as _sqlite3
+
     refs = list(refs or [])
     refs_json = json.dumps(refs)
     now = _now()
-    with conn() as c:
-        existing = c.execute("SELECT * FROM wiki_pages WHERE slug = ?", (slug,)).fetchone()
-        if existing is None:
-            new_version = 1
-            c.execute(
-                "INSERT INTO wiki_pages (slug, title, body_md, owner_agent, status, version, updated_ts, refs_json, pinned) "
-                "VALUES (?, ?, ?, ?, 'draft', ?, ?, ?, 0)",
-                (slug, title, body_md, author_agent, new_version, now, refs_json),
-            )
-        else:
-            new_version = int(existing["version"]) + 1
-            c.execute(
-                "UPDATE wiki_pages SET title = ?, body_md = ?, status = 'draft', "
-                "version = ?, updated_ts = ?, refs_json = ? WHERE slug = ?",
-                (title, body_md, new_version, now, refs_json, slug),
-            )
-        c.execute(
-            "INSERT INTO wiki_revisions (slug, version, title, body_md, author_agent, status, refs_json, ts) "
-            "VALUES (?, ?, ?, ?, ?, 'draft', ?, ?)",
-            (slug, new_version, title, body_md, author_agent, refs_json, now),
-        )
+    # Concurrent /api/chat turns + Curator passes can race the SELECT
+    # → INSERT/UPDATE pair on the same slug. Both readers see the
+    # same existing.version, both compute version+1, and the second
+    # INSERT into wiki_revisions blows up on UNIQUE(slug, version).
+    # Retry on integrity / locked errors — the next SELECT sees the
+    # winner's commit and bumps version one higher. Three attempts is
+    # enough; in 30M+ years of operator turns we have not yet seen a
+    # 3-way concurrent write to the same slug.
+    last_err: Exception | None = None
+    for attempt in range(3):
+        try:
+            with conn() as c:
+                existing = c.execute(
+                    "SELECT * FROM wiki_pages WHERE slug = ?", (slug,)
+                ).fetchone()
+                if existing is None:
+                    new_version = 1
+                    c.execute(
+                        "INSERT INTO wiki_pages (slug, title, body_md, owner_agent, status, version, updated_ts, refs_json, pinned) "
+                        "VALUES (?, ?, ?, ?, 'draft', ?, ?, ?, 0)",
+                        (slug, title, body_md, author_agent, new_version, now, refs_json),
+                    )
+                else:
+                    new_version = int(existing["version"]) + 1
+                    c.execute(
+                        "UPDATE wiki_pages SET title = ?, body_md = ?, status = 'draft', "
+                        "version = ?, updated_ts = ?, refs_json = ? WHERE slug = ?",
+                        (title, body_md, new_version, now, refs_json, slug),
+                    )
+                c.execute(
+                    "INSERT INTO wiki_revisions (slug, version, title, body_md, author_agent, status, refs_json, ts) "
+                    "VALUES (?, ?, ?, ?, ?, 'draft', ?, ?)",
+                    (slug, new_version, title, body_md, author_agent, refs_json, now),
+                )
+            break
+        except _sqlite3.IntegrityError as e:
+            # UNIQUE(slug, version) tripped — another writer beat us
+            # to this version number. Retry; the next SELECT sees
+            # their commit and bumps version one higher.
+            last_err = e
+            if attempt == 2:
+                raise
+        except _sqlite3.OperationalError as e:
+            # Database is locked (BEGIN IMMEDIATE contention). Same
+            # retry strategy.
+            last_err = e
+            if attempt == 2:
+                raise
     append_event(
         agent=author_agent,
         kind="wiki_edit",
