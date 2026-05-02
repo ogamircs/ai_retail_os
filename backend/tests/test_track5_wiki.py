@@ -366,6 +366,55 @@ class WikiAutoPublishTest(unittest.TestCase):
         # ALL critiques must be clean → mixed turn keeps draft.
         self.assertEqual(page.status, "draft")
 
+    def test_event_id_refs_resolve_to_reviewed_artifact(self):
+        """wiki_propose_edit refs may be event IDs or artifact IDs.
+        Auto-publish must resolve event-id refs to the linked
+        artifact id and treat that as reviewed-proof. Without this,
+        citing only event ids forced manual approval even when the
+        linked artifact had been critiqued."""
+        from app.agents.chief_of_staff import _wiki_auto_publish_clean_drafts
+        from app.spine.events import append_event, current_turn_id
+        from datetime import datetime, timezone
+
+        turn_start = datetime.now(timezone.utc).isoformat()
+        token = current_turn_id.set("turn-evtref")
+        try:
+            pricing_draft_id = write_artifact(
+                agent="Pricing & Promo", kind="plan", title="P",
+                body_md="b", refs=[], stage="draft",
+            )
+            # Spine event linking to the Pricing draft artifact
+            ev_id = append_event(
+                agent="Pricing & Promo", kind="proposal",
+                payload={"artifact_title": "P"},
+                artifact_id=pricing_draft_id,
+            )
+            critique_id = write_artifact(
+                agent="Critic", kind="critique", title="C",
+                body_md=(
+                    "## Verified\nok\n## Gaps\n*No material findings.*\n"
+                    "## Risks\n*No material findings.*\n## Counter-recommendation\nhold\n"
+                ),
+                refs=[pricing_draft_id], stage="critique",
+            )
+            append_event(
+                agent="Critic", kind="observation",
+                payload={"artifact_title": "C"}, artifact_id=critique_id,
+            )
+            # wiki_edit cites the EVENT id (not the artifact id).
+            wiki.propose_edit(
+                "policy/evt", "T", "BODY", "Pricing & Promo",
+                refs=[str(ev_id)],
+            )
+        finally:
+            current_turn_id.reset(token)
+
+        _wiki_auto_publish_clean_drafts(
+            turn_start, llm=None, turn_id="turn-evtref"
+        )
+        # Event ref resolved to the reviewed Pricing artifact → publish.
+        self.assertEqual(wiki.get_page("policy/evt").status, "published")
+
     def test_unreviewed_re_edit_blocks_publish_even_when_earlier_edit_was_reviewed(self):
         """Same slug edited twice in one turn:
           - v1 wiki_edit refs the reviewed Pricing draft

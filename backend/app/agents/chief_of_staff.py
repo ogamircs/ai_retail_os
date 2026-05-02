@@ -601,6 +601,28 @@ def _wiki_auto_publish_clean_drafts(
         for ref in critique.get("refs") or []:
             if isinstance(ref, str) and ref:
                 reviewed_artifact_ids.add(ref)
+    # Build a lookup of event_id → artifact_id from this turn's
+    # events so a wiki_edit citing an event id (a valid ref shape per
+    # wiki_propose_edit's documented contract) still resolves to the
+    # underlying artifact for the proof check. Without this, agents
+    # citing event ids cleanly were forced into manual approval even
+    # though the linked artifact had already been reviewed.
+    event_to_artifact: dict[str, str] = {}
+    for ev in scoped:
+        eid = ev.get("id")
+        aid = ev.get("artifact_id")
+        if eid is not None and aid:
+            # Stringify event id so str-based ref comparisons work
+            # regardless of how the agent emitted it.
+            event_to_artifact[str(eid)] = str(aid)
+
+    def _normalise(ref: str) -> str:
+        """Map a ref to the artifact id it ultimately points at —
+        identity for artifact ids, event-id-to-artifact-id resolution
+        for event refs."""
+        if ref in reviewed_artifact_ids:
+            return ref
+        return event_to_artifact.get(ref, ref)
     # Coalesce wiki_edits to the *latest* edit per slug (highest
     # payload.version, falling back to event id order). An older
     # reviewed edit followed by a newer unreviewed edit on the same
@@ -632,7 +654,11 @@ def _wiki_auto_publish_clean_drafts(
         # this turn. Unreviewed re-edits of the same slug therefore
         # block publication of the page even if an earlier edit was
         # reviewed.
-        if not any(r in reviewed_artifact_ids for r in edit_refs if isinstance(r, str)):
+        if not any(
+            _normalise(r) in reviewed_artifact_ids
+            for r in edit_refs
+            if isinstance(r, str)
+        ):
             continue
         page = wiki_store.get_page(slug)
         if page is None or page.status != "draft":
