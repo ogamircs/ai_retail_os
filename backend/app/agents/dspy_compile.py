@@ -31,6 +31,7 @@ without that section is unaffected.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -152,16 +153,54 @@ def write_compiled_prompt(
 
     Picks v<n+1> where n is the highest existing v* file. A fresh
     agent dir starts at v1.
+
+    Two concurrent compiles for the same agent (possible via repeated
+    `/api/dspy/optimize/{agent}` calls) used to be a TOCTOU: both scan
+    the dir, both pick `v(n+1)`, the second `write_text` silently
+    overwrites the first and the alias bumps reflect only the last
+    writer. Atomic create via `os.O_CREAT | os.O_EXCL` closes the gap
+    — the loser of the race gets `FileExistsError`, bumps to v(n+2),
+    and retries. Capped at 64 attempts so a misconfigured filesystem
+    can't busy-loop the worker.
     """
     agent_dir = prompts_root / agent_slug
     agent_dir.mkdir(parents=True, exist_ok=True)
-    existing = sorted(int(p.stem[1:]) for p in agent_dir.glob("v*.md") if p.stem[1:].isdigit())
-    next_n = (existing[-1] + 1) if existing else 1
-    next_version = f"v{next_n}"
-    path = agent_dir / f"{next_version}.md"
     body = compiled_to_markdown(compiled_module, handwritten_policy_block)
-    path.write_text(body)
-    return path, next_version
+    body_bytes = body.encode("utf-8")
+    for _attempt in range(64):
+        existing = sorted(
+            int(p.stem[1:])
+            for p in agent_dir.glob("v*.md")
+            if p.stem[1:].isdigit()
+        )
+        next_n = (existing[-1] + 1) if existing else 1
+        next_version = f"v{next_n}"
+        path = agent_dir / f"{next_version}.md"
+        try:
+            fd = os.open(
+                str(path),
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o644,
+            )
+        except FileExistsError:
+            # Another compile won this slot; rescan and try the next n.
+            continue
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(body_bytes)
+        except Exception:
+            # Best-effort cleanup — leave a partial v<n>.md behind only
+            # when even the unlink fails.
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            raise
+        return path, next_version
+    raise RuntimeError(
+        f"could not allocate a fresh prompt version under {agent_dir} "
+        "after 64 attempts — check filesystem state."
+    )
 
 
 def bump_alias(

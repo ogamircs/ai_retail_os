@@ -116,6 +116,14 @@ def run(
     """
     scenarios = scenarios or [s.name for s in SCENARIOS]
     modes = modes or ["single_pass", "multi_pass"]
+    # Snapshot the prior `<AGENT>_PROMPT_ALIAS` env for every slug we
+    # touch BEFORE mutating, so the try/finally below restores the
+    # exact pre-call state. Without this, alias overrides leak into
+    # the rest of the process — `run_ab_gate` calls run() in-process
+    # twice (prod, then staging), and the staging override would stay
+    # set after the gate, making subsequent /api/chat turns resolve
+    # via staging even when the candidate didn't pass.
+    _alias_snapshot: dict[str, str | None] = {}
     if prompts_alias:
         # `<AGENT>_PROMPT_ALIAS` is what `app.llm.prompts.resolve_prompt`
         # already reads; setting the env at run() entry point means
@@ -123,47 +131,57 @@ def run(
         # without us threading the alias through the agent builders.
         for slug, alias in prompts_alias.items():
             env_name = f"{slug.upper()}_PROMPT_ALIAS"
+            _alias_snapshot[env_name] = os.environ.get(env_name)
             os.environ[env_name] = alias
-    runs: dict[str, dict[str, dict]] = {}
-    mlflow = _try_mlflow()
-    sha = _git_sha()
-    for s in scenarios:
-        runs[s] = {}
-        # Track 4 M3: each scenario maps to one MLflow experiment;
-        # single-pass + multi-pass land as nested runs underneath so
-        # the comparison view shows them side-by-side.
-        if mlflow is not None:
-            mlflow.set_experiment(f"eval/{s}/{sha}")
-        for m in modes:
-            t0 = time.monotonic()
-            transcript, final, artifacts = _run_one(s, m)
-            dt = round(time.monotonic() - t0, 2)
-            score = score_transcript(by_name(s), transcript, final, artifacts)
-            runs[s][m] = {
-                "score": score.to_dict(),
-                "elapsed_s": dt,
-                "artifact_count": len(artifacts),
-                "final_chars": len(final),
-            }
+    try:
+        runs: dict[str, dict[str, dict]] = {}
+        mlflow = _try_mlflow()
+        sha = _git_sha()
+        for s in scenarios:
+            runs[s] = {}
+            # Track 4 M3: each scenario maps to one MLflow experiment;
+            # single-pass + multi-pass land as nested runs underneath so
+            # the comparison view shows them side-by-side.
             if mlflow is not None:
-                _log_eval_run(mlflow, s, m, sha, score, dt, transcript, final, artifacts)
-    # Aggregate (need raw JudgeScore objects)
-    raw: dict[str, dict[str, JudgeScore]] = {}
-    for s, modes_d in runs.items():
-        raw[s] = {}
-        for m, payload in modes_d.items():
-            sc = payload["score"]
-            raw[s][m] = JudgeScore(
-                factual_correctness=sc["factual_correctness"],
-                evidence_cited=sc["evidence_cited"],
-                policy_adherence=sc["policy_adherence"],
-                recommendation_quality=sc["recommendation_quality"],
-                notes=sc.get("notes", ""),
-            )
-    summary = compare_modes(raw)
-    out = {"runs": runs, "summary": summary, "scenarios": scenarios, "modes": modes}
-    LAST_RUN_PATH.write_text(json.dumps(out, indent=2))
-    return out
+                mlflow.set_experiment(f"eval/{s}/{sha}")
+            for m in modes:
+                t0 = time.monotonic()
+                transcript, final, artifacts = _run_one(s, m)
+                dt = round(time.monotonic() - t0, 2)
+                score = score_transcript(by_name(s), transcript, final, artifacts)
+                runs[s][m] = {
+                    "score": score.to_dict(),
+                    "elapsed_s": dt,
+                    "artifact_count": len(artifacts),
+                    "final_chars": len(final),
+                }
+                if mlflow is not None:
+                    _log_eval_run(mlflow, s, m, sha, score, dt, transcript, final, artifacts)
+        # Aggregate (need raw JudgeScore objects)
+        raw: dict[str, dict[str, JudgeScore]] = {}
+        for s, modes_d in runs.items():
+            raw[s] = {}
+            for m, payload in modes_d.items():
+                sc = payload["score"]
+                raw[s][m] = JudgeScore(
+                    factual_correctness=sc["factual_correctness"],
+                    evidence_cited=sc["evidence_cited"],
+                    policy_adherence=sc["policy_adherence"],
+                    recommendation_quality=sc["recommendation_quality"],
+                    notes=sc.get("notes", ""),
+                )
+        summary = compare_modes(raw)
+        out = {"runs": runs, "summary": summary, "scenarios": scenarios, "modes": modes}
+        LAST_RUN_PATH.write_text(json.dumps(out, indent=2))
+        return out
+    finally:
+        # Restore prior env exactly. Vars that didn't exist before are
+        # popped so an absent var stays absent.
+        for env_name, prior in _alias_snapshot.items():
+            if prior is None:
+                os.environ.pop(env_name, None)
+            else:
+                os.environ[env_name] = prior
 
 
 def _log_eval_run(

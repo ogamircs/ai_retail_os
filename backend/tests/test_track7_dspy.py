@@ -119,6 +119,53 @@ class WriteCompiledPromptTest(unittest.TestCase):
         )
         self.assertEqual(version, "v3")
 
+    def test_concurrent_compiles_pick_distinct_versions(self):
+        """Two threads racing on the same agent dir must end up with
+        DIFFERENT version files — the atomic O_CREAT|O_EXCL guard
+        means the loser of the v(n+1) slot rescans and bumps to
+        v(n+2), instead of silently overwriting the winner."""
+        import threading
+        from app.agents.dspy_compile import write_compiled_prompt
+
+        class _M:
+            demos = []
+
+        results: list[str] = []
+        errors: list[Exception] = []
+        results_lock = threading.Lock()
+        barrier = threading.Barrier(4)
+
+        def _run():
+            barrier.wait()
+            try:
+                _, version = write_compiled_prompt(
+                    agent_slug="canary",
+                    compiled_module=_M(),
+                    handwritten_policy_block="Policy.",
+                    prompts_root=self.root,
+                )
+                with results_lock:
+                    results.append(version)
+            except Exception as e:
+                with results_lock:
+                    errors.append(e)
+
+        threads = [threading.Thread(target=_run) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(errors, [], f"unexpected errors: {errors}")
+        self.assertEqual(len(results), 4)
+        # All distinct versions — none collided. Since no prior files
+        # existed, the four compiles must produce v1..v4 in some order.
+        self.assertEqual(sorted(results), ["v1", "v2", "v3", "v4"])
+        # Every version file actually landed on disk with content.
+        for v in results:
+            p = self.root / "canary" / f"{v}.md"
+            self.assertTrue(p.exists())
+            self.assertIn("Policy.", p.read_text())
+
     def test_bump_alias_preserves_other_aliases(self):
         from app.agents.dspy_compile import bump_alias
 
@@ -182,6 +229,83 @@ class DspyDatasetTest(unittest.TestCase):
         for row in rows:
             for key in ("operator_question", "spine_snapshot", "findings_md", "evidence_md"):
                 self.assertIn(key, row, f"row missing {key!r}: {row}")
+
+
+class RunEvalAliasEnvRestoreTest(unittest.TestCase):
+    """Track 7 D4 P1 fix: `<AGENT>_PROMPT_ALIAS` env vars set by
+    `run()` must be restored on exit (and on exception). Otherwise
+    `run_ab_gate` leaks the staging override into subsequent /api/chat
+    turns and breaks the prod gate semantics."""
+
+    def setUp(self):
+        # Snapshot + clear the env vars we care about so tests start clean.
+        self._saved = {}
+        for k in ("ANALYST_PROMPT_ALIAS", "PRICING_PROMPT_ALIAS"):
+            self._saved[k] = os.environ.pop(k, None)
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_alias_env_restored_after_successful_run(self):
+        from tests.agents.eval import run_eval
+
+        # Patch the inner run-one to a no-op that doesn't need an LLM.
+        from tests.agents.eval.judge import JudgeScore
+
+        with mock.patch.object(
+            run_eval, "_run_one", return_value=("transcript", "final", [])
+        ), mock.patch.object(
+            run_eval,
+            "score_transcript",
+            return_value=JudgeScore(2, 2, 2, 2, ""),
+        ):
+            run_eval.run(
+                scenarios=["overstock_summer"],
+                modes=["multi_pass"],
+                prompts_alias={"analyst": "staging"},
+            )
+        # The alias must be unset on exit since it wasn't set before.
+        self.assertNotIn("ANALYST_PROMPT_ALIAS", os.environ)
+
+    def test_alias_env_restored_to_prior_value(self):
+        from tests.agents.eval import run_eval
+        from tests.agents.eval.judge import JudgeScore
+
+        os.environ["ANALYST_PROMPT_ALIAS"] = "experimental"
+        with mock.patch.object(
+            run_eval, "_run_one", return_value=("t", "f", [])
+        ), mock.patch.object(
+            run_eval,
+            "score_transcript",
+            return_value=JudgeScore(2, 2, 2, 2, ""),
+        ):
+            run_eval.run(
+                scenarios=["overstock_summer"],
+                modes=["multi_pass"],
+                prompts_alias={"analyst": "staging"},
+            )
+        # Prior value restored exactly — not 'staging', not unset.
+        self.assertEqual(os.environ["ANALYST_PROMPT_ALIAS"], "experimental")
+
+    def test_alias_env_restored_on_exception(self):
+        from tests.agents.eval import run_eval
+
+        def _boom(*a, **kw):
+            raise RuntimeError("inner failure")
+
+        with mock.patch.object(run_eval, "_run_one", side_effect=_boom):
+            with self.assertRaises(RuntimeError):
+                run_eval.run(
+                    scenarios=["overstock_summer"],
+                    modes=["multi_pass"],
+                    prompts_alias={"analyst": "staging"},
+                )
+        # Even though run() raised, the env must be cleaned up.
+        self.assertNotIn("ANALYST_PROMPT_ALIAS", os.environ)
 
 
 class CompareAliasesTest(unittest.TestCase):
