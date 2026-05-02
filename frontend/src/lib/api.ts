@@ -441,6 +441,57 @@ export async function applyIntegrationAction(
   return r.json();
 }
 
+// Track 7 D6 — DSPy optimizer cockpit surface.
+
+export type DspyAgent = {
+  slug: string;
+  prod: string | null;
+  staging: string | null;
+};
+
+export type DspyJob = {
+  id: string;
+  agent: string;
+  auto_promote: boolean;
+  status: "running" | "ok" | "error";
+  started_at?: string;
+  ended_at?: string;
+  summary?: Record<string, any>;
+  error?: string;
+};
+
+export async function listDspyAgents(): Promise<DspyAgent[]> {
+  const r = await fetch("/api/dspy/agents");
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const j = await r.json();
+  return j.agents ?? [];
+}
+
+export async function compileDspyAgent(
+  slug: string,
+  autoPromote = false,
+): Promise<{ job_id: string; status: string }> {
+  const r = await fetch(
+    `/api/dspy/optimize/${encodeURIComponent(slug)}?auto_promote=${autoPromote}`,
+    { method: "POST" },
+  );
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function getDspyJob(jobId: string): Promise<DspyJob> {
+  const r = await fetch(`/api/dspy/jobs/${encodeURIComponent(jobId)}`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function listDspyJobs(limit = 20): Promise<DspyJob[]> {
+  const r = await fetch(`/api/dspy/jobs?limit=${limit}`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const j = await r.json();
+  return j.jobs ?? [];
+}
+
 /** Stream chat events via fetch + SSE parser (POST body required, EventSource is GET-only). */
 export async function chatStream(
   message: string,

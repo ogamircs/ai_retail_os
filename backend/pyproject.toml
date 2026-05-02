@@ -23,6 +23,13 @@ mlflow = [
     "mlflow>=2.16",
     "boto3>=1.35",
 ]
+# Track 7 — DSPy + prompt optimization. Optional. The cockpit demo
+# path runs identically without DSPy; the optimizer (scripts/
+# dspy_optimize.py) and the analyst_dspy adapter only fire when this
+# extra is installed. Activate with `pip install -e .[dspy]`.
+dspy = [
+    "dspy-ai>=2.5",
+]
 
 [build-system]
 requires = ["hatchling"]

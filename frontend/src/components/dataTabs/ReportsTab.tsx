@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
-import type { ArtifactMeta } from "../../lib/api";
-import { getArtifact } from "../../lib/api";
+import type { ArtifactMeta, DspyAgent, DspyJob } from "../../lib/api";
+import {
+  compileDspyAgent,
+  getArtifact,
+  getDspyJob,
+  listDspyAgents,
+} from "../../lib/api";
 import { useDrawer } from "../../lib/drawerContext";
 import { agentInkStyle } from "../../lib/agentInk";
 import { useSort } from "./sortable";
@@ -97,6 +102,7 @@ export default function ReportsTab({ artifacts }: Props) {
 
   return (
     <div className="reports-tab" data-testid="tab-reports">
+      <DspyCompilePanel />
       <div className="reports-search">
         <span className="prompt">/</span>
         <input
@@ -174,6 +180,137 @@ export default function ReportsTab({ artifacts }: Props) {
               </td>
             </tr>
           )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// Track 7 D6 — DSPy compile panel. Sits at the top of the Reports tab
+// because that's where the operator already looks for prompt-versioned
+// output. Shows current prod/staging alias chips per registered agent
+// and a `compile` action that kicks off `/api/dspy/optimize/<slug>`.
+// Polls the job until terminal so the operator sees the new staging
+// version land without a refresh.
+function DspyCompilePanel() {
+  const [agents, setAgents] = useState<DspyAgent[] | null>(null);
+  const [jobByAgent, setJobByAgent] = useState<Record<string, DspyJob>>({});
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    listDspyAgents()
+      .then((list) => {
+        if (!cancelled) setAgents(list);
+      })
+      .catch((e) => {
+        if (!cancelled) setError(e?.message || String(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Refresh the agent list (with new aliases) when any tracked job
+  // finishes. The job summary carries the freshly-bumped aliases but
+  // re-fetching also catches manual `aliases.json` edits.
+  const reloadAgents = async () => {
+    try {
+      const list = await listDspyAgents();
+      setAgents(list);
+    } catch (e: any) {
+      setError(e?.message || String(e));
+    }
+  };
+
+  const onCompile = async (slug: string, autoPromote: boolean) => {
+    setError(null);
+    try {
+      const { job_id } = await compileDspyAgent(slug, autoPromote);
+      // Begin polling. Each tick refreshes the job; on terminal status
+      // we reload the agent list so the alias chips re-paint.
+      const tick = async () => {
+        try {
+          const job = await getDspyJob(job_id);
+          setJobByAgent((m) => ({ ...m, [slug]: job }));
+          if (job.status === "running") {
+            setTimeout(tick, 2000);
+          } else {
+            await reloadAgents();
+          }
+        } catch (e: any) {
+          setError(e?.message || String(e));
+        }
+      };
+      setTimeout(tick, 500);
+    } catch (e: any) {
+      setError(e?.message || String(e));
+    }
+  };
+
+  if (!agents || agents.length === 0) return null;
+
+  return (
+    <div className="dspy-panel" data-testid="dspy-panel">
+      <div className="dspy-header">
+        <span className="prompt">/</span>
+        <span className="dspy-title">DSPy prompt registry</span>
+        {error && <span className="dspy-error">! {error}</span>}
+      </div>
+      <table className="dspy-table">
+        <thead>
+          <tr>
+            <th>Agent</th>
+            <th>prod</th>
+            <th>staging</th>
+            <th>compile</th>
+            <th>last job</th>
+          </tr>
+        </thead>
+        <tbody>
+          {agents.map((a) => {
+            const job = jobByAgent[a.slug];
+            const running = job?.status === "running";
+            return (
+              <tr key={a.slug} data-testid={`dspy-row-${a.slug}`}>
+                <td>{a.slug}</td>
+                <td>
+                  <span className="chip stage-final">{a.prod || "—"}</span>
+                </td>
+                <td>
+                  <span className="chip stage-draft">{a.staging || "—"}</span>
+                </td>
+                <td>
+                  <button
+                    onClick={() => onCompile(a.slug, false)}
+                    disabled={running}
+                    data-testid={`dspy-compile-${a.slug}`}
+                  >
+                    {running ? "compiling…" : "compile → staging"}
+                  </button>
+                  <button
+                    onClick={() => onCompile(a.slug, true)}
+                    disabled={running}
+                    title="Compile, then run the eval gate; flip prod only on win"
+                    data-testid={`dspy-compile-promote-${a.slug}`}
+                  >
+                    {running ? "…" : "compile + auto-promote"}
+                  </button>
+                </td>
+                <td className="dspy-job">
+                  {job ? (
+                    <span className={`chip stage-${job.status === "ok" ? "final" : job.status === "error" ? "critique" : "draft"}`}>
+                      {job.status}
+                      {job.summary?.version ? ` · ${job.summary.version}` : ""}
+                      {job.summary?.promoted ? " · promoted" : ""}
+                    </span>
+                  ) : (
+                    <span className="dspy-job-none">—</span>
+                  )}
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>

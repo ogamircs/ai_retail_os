@@ -195,3 +195,68 @@ def compare_modes(per_scenario_scores: dict[str, dict[str, JudgeScore]]) -> dict
 
 def serialize_score(s: JudgeScore) -> str:
     return json.dumps(s.to_dict(), indent=2)
+
+
+def compare_aliases(
+    scores_a: dict[str, JudgeScore],
+    scores_b: dict[str, JudgeScore],
+    target_scenarios: int = 3,
+    target_dimensions: int = 3,
+) -> dict:
+    """A/B compare two prompt aliases scored on the same scenarios
+    (Track 7 D4). `scores_a` is the baseline (typically `prod`),
+    `scores_b` is the candidate (typically `staging`).
+
+    Win criterion mirrors the Track 2 A5 bar — `b` wins when:
+      * `b` strictly beats `a` on >= `target_dimensions` of the 4
+        dimensions, on >= `target_scenarios` of the 4 scenarios.
+      * AND `b` does not regress `policy_adherence` on ANY scenario
+        (hard floor — DSPy can drift on style; can't drift on rules).
+
+    Returns a structured verdict dict with `b_wins`, `policy_floor_ok`,
+    per-scenario per-dimension breakdown, and notes for the audit log.
+    """
+    dimensions = (
+        "factual_correctness",
+        "evidence_cited",
+        "policy_adherence",
+        "recommendation_quality",
+    )
+    scenarios = sorted(set(scores_a) & set(scores_b))
+    per_scenario: dict[str, dict] = {}
+    scenarios_b_wins = 0
+    policy_floor_ok = True
+    for s in scenarios:
+        a = scores_a[s]
+        b = scores_b[s]
+        dim_wins: dict[str, dict] = {}
+        wins_this_scenario = 0
+        for d in dimensions:
+            a_v = getattr(a, d)
+            b_v = getattr(b, d)
+            won = b_v > a_v
+            dim_wins[d] = {"a": a_v, "b": b_v, "b_wins": won}
+            if won:
+                wins_this_scenario += 1
+        # Hard policy floor — candidate must not regress policy on any
+        # scenario or the gate fails outright (regardless of dimension
+        # wins elsewhere).
+        if dim_wins["policy_adherence"]["b"] < dim_wins["policy_adherence"]["a"]:
+            policy_floor_ok = False
+        per_scenario[s] = {
+            "a_total": a.total(),
+            "b_total": b.total(),
+            "per_dimension": dim_wins,
+            "b_strict_win": wins_this_scenario >= target_dimensions,
+        }
+        if wins_this_scenario >= target_dimensions:
+            scenarios_b_wins += 1
+    b_wins = policy_floor_ok and scenarios_b_wins >= target_scenarios
+    return {
+        "b_wins": b_wins,
+        "policy_floor_ok": policy_floor_ok,
+        "scenarios_b_strict_win": scenarios_b_wins,
+        "target_scenarios": target_scenarios,
+        "target_dimensions_per_scenario": target_dimensions,
+        "scenarios": per_scenario,
+    }
