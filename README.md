@@ -116,6 +116,29 @@ Supported adapter IDs:
 
 Optional env vars are listed in `backend/.env.example`. Leave them blank for mock mode.
 
+### Backend test suite (mock vs. live)
+
+Default `python -m unittest discover -s tests` runs **mock-only**. Every live-path suite (`test_integrations_<system>_live.py`) is opt-in via the gate in `backend/tests/_live_gate.py` and skips unless explicitly switched on, so a credential lying around in `.env` or external-system drift can't break the default suite.
+
+```bash
+# Mock-only (default — green even when .env has live creds)
+make test
+
+# Every live suite, in addition to mock paths
+make test-live
+
+# Or one adapter at a time
+make test-live-erpnext
+make test-live-mautic
+make test-live-medusa
+make test-live-openboxes
+make test-live-akeneo
+make test-live-superset
+make test-live-shopify
+```
+
+Equivalent flags if you'd rather drive `unittest` directly: `RUN_LIVE_TESTS=1` (all adapters) or `RUN_<SYSTEM>_LIVE=1` (one adapter, e.g. `RUN_ERPNEXT_LIVE=1`). Each per-system suite still validates required env vars + reachability before running.
+
 ## Running with real ERPNext
 
 The `erpnext` adapter has a full local-stack rollout — the cockpit can drive a real ERPNext v15 instance instead of mocked data. See `infra/erpnext/README.md` for the full setup; quick path:
@@ -181,12 +204,11 @@ Nothing is auto-submitted — every doc lands as `docstatus=0` so the operator c
 
 ### Live-path tests
 
-`backend/tests/test_integrations_erpnext_live.py` exercises sync + apply against a real ERPNext. The tests skip automatically when `ERPNEXT_BASE_URL`/`ERPNEXT_API_KEY`/`ERPNEXT_API_SECRET` aren't set or the endpoint isn't reachable, so CI stays mock-only:
+`backend/tests/test_integrations_erpnext_live.py` exercises sync + apply against a real ERPNext. Opt-in only — see "Backend test suite (mock vs. live)" above. Skipped unless `RUN_ERPNEXT_LIVE=1` (or `RUN_LIVE_TESTS=1`) is set, the env vars are present, and the endpoint is reachable:
 
 ```bash
-cd backend
-python -m unittest discover -s tests          # 9 mock pass, 6 live skipped
-python -m unittest discover -s tests          # 15 pass with .env wired
+make test                  # mock-only — ERPNext live skipped
+make test-live-erpnext     # ERPNext live suite only (with .env wired)
 ```
 
 To reset everything from scratch:
@@ -258,12 +280,11 @@ Nothing auto-publishes — every Mautic doc lands as a draft so the operator can
 
 ### Live-path tests
 
-`backend/tests/test_integrations_mautic_live.py` exercises sync + apply against a real Mautic. Skipped automatically when `MAUTIC_BASE_URL` / `MAUTIC_USERNAME` / `MAUTIC_PASSWORD` aren't set or the endpoint isn't reachable, so CI stays mock-only:
+`backend/tests/test_integrations_mautic_live.py` exercises sync + apply against a real Mautic. Opt-in only — see "Backend test suite (mock vs. live)" above. Skipped unless `RUN_MAUTIC_LIVE=1` (or `RUN_LIVE_TESTS=1`) is set, the env vars are present, and the endpoint is reachable:
 
 ```bash
-cd backend
-python -m unittest discover -s tests          # mock-only — live tests skipped
-python -m unittest discover -s tests          # all pass with backend/.env wired
+make test                  # mock-only — Mautic live skipped
+make test-live-mautic      # Mautic live suite only (with .env wired)
 ```
 
 To reset everything from scratch:
@@ -344,12 +365,11 @@ Why metadata stashes (not orders / fulfillments / reservations)? Medusa v2 has n
 
 ### Live-path tests
 
-`backend/tests/test_integrations_medusa_live.py` exercises sync + apply against a real Medusa. Skipped automatically when `MEDUSA_BASE_URL` / `MEDUSA_ADMIN_EMAIL` / `MEDUSA_ADMIN_PASSWORD` aren't set or the endpoint isn't reachable, so CI stays mock-only:
+`backend/tests/test_integrations_medusa_live.py` exercises sync + apply against a real Medusa. Opt-in only — see "Backend test suite (mock vs. live)" above. Skipped unless `RUN_MEDUSA_LIVE=1` (or `RUN_LIVE_TESTS=1`) is set, the env vars are present, and the endpoint is reachable:
 
 ```bash
-cd backend
-python -m unittest discover -s tests          # mock-only — live tests skipped
-python -m unittest discover -s tests          # all pass with backend/.env wired
+make test                  # mock-only — Medusa live skipped
+make test-live-medusa      # Medusa live suite only (with .env wired)
 ```
 
 To reset everything from scratch:
@@ -430,12 +450,11 @@ A walkthrough with CLI-equivalent verification steps lives in [`docs/uat/2026-04
 
 ### Live-path tests
 
-`backend/tests/test_integrations_openboxes_live.py` exercises sync + apply against a real OpenBoxes. Skipped automatically when `OPENBOXES_BASE_URL` isn't set or auth env (token OR user/password) is missing, so CI stays mock-only:
+`backend/tests/test_integrations_openboxes_live.py` exercises sync + apply against a real OpenBoxes. Opt-in only — see "Backend test suite (mock vs. live)" above. Skipped unless `RUN_OPENBOXES_LIVE=1` (or `RUN_LIVE_TESTS=1`) is set, `OPENBOXES_BASE_URL` plus auth env (token OR user/password) is present, and the endpoint is reachable:
 
 ```bash
-cd backend
-python -m unittest discover -s tests          # mock-only — live tests skipped
-python -m unittest discover -s tests          # all pass with backend/.env wired
+make test                     # mock-only — OpenBoxes live skipped
+make test-live-openboxes      # OpenBoxes live suite only (with .env wired)
 ```
 
 To reset everything from scratch:
@@ -501,7 +520,7 @@ A walkthrough lives in [`docs/uat/2026-04-30-akeneo-p5-pim-enrich-demo.md`](docs
 
 ### Live-path tests
 
-`backend/tests/test_integrations_akeneo_live.py` exercises sync + apply against a real Akeneo. Skipped automatically when `AKENEO_*` creds aren't set or the OAuth2 round-trip fails, so CI stays mock-only.
+`backend/tests/test_integrations_akeneo_live.py` exercises sync + apply against a real Akeneo. Opt-in only — see "Backend test suite (mock vs. live)" above. Skipped unless `RUN_AKENEO_LIVE=1` (or `RUN_LIVE_TESTS=1`) is set, the `AKENEO_*` creds are present, and the OAuth2 round-trip succeeds. Run via `make test-live-akeneo`.
 
 ## Running with real Superset
 
@@ -561,7 +580,7 @@ If a future Analyst agent ever needs to auto-create dashboards (e.g. one-shot in
 
 ### Live-path tests
 
-`backend/tests/test_integrations_superset_live.py` exercises live sync against a real Superset. Skipped automatically when `SUPERSET_*` creds aren't set or the login round-trip fails, so CI stays mock-only.
+`backend/tests/test_integrations_superset_live.py` exercises live sync against a real Superset. Opt-in only — see "Backend test suite (mock vs. live)" above. Skipped unless `RUN_SUPERSET_LIVE=1` (or `RUN_LIVE_TESTS=1`) is set, the `SUPERSET_*` creds are present, and the login round-trip succeeds. Run via `make test-live-superset`.
 
 ## Running with real Shopify Plus
 
@@ -627,7 +646,7 @@ A walkthrough lives in [`docs/uat/2026-05-03-shopify-p5-promo-demo.md`](docs/uat
 
 ### Live-path tests
 
-`backend/tests/test_integrations_shopify_live.py` exercises live sync + apply against a real Shopify dev store. Skipped automatically when `SHOPIFY_SHOP_DOMAIN` / `SHOPIFY_ADMIN_TOKEN` aren't set or the dev store isn't reachable, so CI stays mock-only.
+`backend/tests/test_integrations_shopify_live.py` exercises live sync + apply against a real Shopify dev store. Opt-in only — see "Backend test suite (mock vs. live)" above. Skipped unless `RUN_SHOPIFY_LIVE=1` (or `RUN_LIVE_TESTS=1`) is set, `SHOPIFY_SHOP_DOMAIN` / `SHOPIFY_ADMIN_TOKEN` are present, and the dev store accepts a `{ shop { name } }` probe. Run via `make test-live-shopify`.
 
 > **Heads-up:** `ShopifyLiveApplyTest::test_promotion_creates_draft_discount_in_dev_store` creates a *real* automatic discount in the dev store. It's not destructive — Shopify Plus dev stores have no real customers — but you'll see the row in `Discounts → Automatic` after the test runs. Delete it from Shopify Admin (or `make` a clean reset) when you're done.
 

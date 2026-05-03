@@ -1,13 +1,10 @@
 """Live-path tests for the OpenBoxes adapter.
 
-Skipped automatically when:
-  * OPENBOXES_BASE_URL isn't set, or
-  * neither OPENBOXES_API_TOKEN nor (OPENBOXES_USERNAME + OPENBOXES_PASSWORD) is set, or
-  * the configured OpenBoxes instance isn't reachable / login fails.
-
-CI stays mock-only — these only fire when the operator has run the local
-OpenBoxes stack (`make openboxes-up && make openboxes-bootstrap && make openboxes-seed`)
-and pasted the credentials into `backend/.env`.
+Opt-in only — see `backend/tests/_live_gate.py`. Skipped unless:
+  * `RUN_LIVE_TESTS=1` or `RUN_OPENBOXES_LIVE=1` is set
+  * OPENBOXES_BASE_URL is set, plus either OPENBOXES_API_TOKEN or
+    OPENBOXES_USERNAME+OPENBOXES_PASSWORD
+  * The configured OpenBoxes instance is reachable
 """
 
 from __future__ import annotations
@@ -15,40 +12,25 @@ from __future__ import annotations
 import json
 import os
 import unittest
-from base64 import b64encode  # noqa: F401  (kept for symmetry with other live tests)
-from pathlib import Path
 from urllib.error import URLError
-from urllib.request import Request, urlopen
+from urllib.request import urlopen
+
+from tests._live_gate import load_env, opt_in
 
 
-def _load_env() -> None:
-    root = Path(__file__).resolve().parents[2]
-    for f in (root / ".env", root / "backend" / ".env"):
-        if not f.exists():
-            continue
-        for line in f.read_text().splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            k, _, v = line.partition("=")
-            os.environ.setdefault(k.strip(), v.strip())
+load_env()
 
 
-_load_env()
-
-
-def _live_creds() -> tuple[str, dict[str, str]] | None:
+def _has_creds() -> tuple[bool, str]:
     base = os.environ.get("OPENBOXES_BASE_URL", "").strip()
     if not base:
-        return None
+        return False, "OPENBOXES_BASE_URL"
     token = os.environ.get("OPENBOXES_API_TOKEN", "").strip()
-    if token:
-        return base, {"X-Auth-Token": token}
     user = os.environ.get("OPENBOXES_USERNAME", "").strip()
     pw = os.environ.get("OPENBOXES_PASSWORD", "").strip()
-    if user and pw:
-        return base, {}  # bootstrap login flow handles auth
-    return None
+    if not token and not (user and pw):
+        return False, "OPENBOXES_API_TOKEN or OPENBOXES_USERNAME+OPENBOXES_PASSWORD"
+    return True, base
 
 
 def _openboxes_reachable(base: str) -> bool:
@@ -59,10 +41,21 @@ def _openboxes_reachable(base: str) -> bool:
         return False
 
 
-CREDS = _live_creds()
-SKIP_REASON = "OpenBoxes live env not configured" if not CREDS else None
-if CREDS and not _openboxes_reachable(CREDS[0]):
-    SKIP_REASON = f"OpenBoxes at {CREDS[0]} not reachable"
+def _compute_skip_reason() -> str | None:
+    if not opt_in("openboxes"):
+        return (
+            "openboxes live tests opt-in only — "
+            "set RUN_LIVE_TESTS=1 or RUN_OPENBOXES_LIVE=1"
+        )
+    ok, info = _has_creds()
+    if not ok:
+        return f"OpenBoxes live env not configured (missing: {info})"
+    if not _openboxes_reachable(info):
+        return f"OpenBoxes at {info} not reachable"
+    return None
+
+
+SKIP_REASON = _compute_skip_reason()
 
 
 @unittest.skipIf(SKIP_REASON, SKIP_REASON)

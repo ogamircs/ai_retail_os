@@ -1,52 +1,32 @@
 """Live-path tests for the ERPNext adapter.
 
-Skipped automatically when:
-  * ERPNEXT_BASE_URL / ERPNEXT_API_KEY / ERPNEXT_API_SECRET aren't set
-  * The configured ERPNext instance isn't reachable
+Opt-in only — see `backend/tests/_live_gate.py`. Skipped unless:
+  * `RUN_LIVE_TESTS=1` or `RUN_ERPNEXT_LIVE=1` is set
+  * ERPNEXT_BASE_URL / ERPNEXT_API_KEY / ERPNEXT_API_SECRET are set
+  * The configured ERPNext instance is reachable
 
-CI stays mock-only — these only fire when the operator has run the local
-ERPNext stack (`make erpnext-up && make erpnext-bootstrap && make erpnext-seed`)
-and pasted the API credentials into `backend/.env`.
+CI and stock `python -m unittest discover` stay mock-only by default.
 """
 
 from __future__ import annotations
 
 import os
 import unittest
-from pathlib import Path
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
-
-# Load credentials from project root .env / backend/.env the same way
-# `app.config` does, but eagerly — the env-skip decision happens at module
-# import, which runs before any app.* import in this test file.
-def _load_env() -> None:
-    root = Path(__file__).resolve().parents[2]
-    for f in (root / ".env", root / "backend" / ".env"):
-        if not f.exists():
-            continue
-        for line in f.read_text().splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            k, _, v = line.partition("=")
-            os.environ.setdefault(k.strip(), v.strip())
+from tests._live_gate import load_env, skip_reason
 
 
-_load_env()
+load_env()
 
 REQUIRED_ENV = ("ERPNEXT_BASE_URL", "ERPNEXT_API_KEY", "ERPNEXT_API_SECRET")
 
 
-def _live_creds() -> tuple[str, str, str] | None:
-    vals = [os.environ.get(k, "").strip() for k in REQUIRED_ENV]
-    if not all(vals):
-        return None
-    return vals[0], vals[1], vals[2]
-
-
-def _erpnext_reachable(base: str, key: str, secret: str) -> bool:
+def _erpnext_reachable() -> bool:
+    base = os.environ["ERPNEXT_BASE_URL"].strip()
+    key = os.environ["ERPNEXT_API_KEY"].strip()
+    secret = os.environ["ERPNEXT_API_SECRET"].strip()
     try:
         req = Request(
             base.rstrip("/") + "/api/method/frappe.auth.get_logged_user",
@@ -58,10 +38,7 @@ def _erpnext_reachable(base: str, key: str, secret: str) -> bool:
         return False
 
 
-CREDS = _live_creds()
-SKIP_REASON = "ERPNext live env not configured" if not CREDS else None
-if CREDS and not _erpnext_reachable(*CREDS):
-    SKIP_REASON = f"ERPNext at {CREDS[0]} not reachable"
+SKIP_REASON = skip_reason("erpnext", REQUIRED_ENV, _erpnext_reachable)
 
 
 @unittest.skipIf(SKIP_REASON, SKIP_REASON)

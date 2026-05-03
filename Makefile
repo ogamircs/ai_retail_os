@@ -29,7 +29,8 @@ MLFLOW_COMPOSE := docker compose -p ai-retail-mlflow -f $(MLFLOW_DIR)/docker-com
         akeneo-up akeneo-down akeneo-bootstrap akeneo-seed akeneo-logs akeneo-status akeneo-nuke \
         superset-up superset-down superset-bootstrap superset-seed superset-logs superset-status superset-nuke \
         mlflow-up mlflow-down mlflow-logs mlflow-status mlflow-nuke \
-        shopify-seed
+        shopify-seed \
+        test test-live test-live-erpnext test-live-mautic test-live-medusa test-live-openboxes test-live-akeneo test-live-superset test-live-shopify
 
 help:
 	@echo "ERPNext:"
@@ -95,6 +96,17 @@ help:
 	@echo ""
 	@echo "Shopify Plus (cloud-hosted, no local stack):"
 	@echo "  shopify-seed          project the spine demo data into a Shopify dev store (idempotent)"
+	@echo ""
+	@echo "Tests (mock-only by default; live suites are opt-in):"
+	@echo "  test                  run the full backend test suite (mock-only — live suites skipped)"
+	@echo "  test-live             run mock + every live suite (RUN_LIVE_TESTS=1)"
+	@echo "  test-live-erpnext     run only the ERPNext live suite (RUN_ERPNEXT_LIVE=1)"
+	@echo "  test-live-mautic      run only the Mautic live suite (RUN_MAUTIC_LIVE=1)"
+	@echo "  test-live-medusa      run only the Medusa live suite (RUN_MEDUSA_LIVE=1)"
+	@echo "  test-live-openboxes   run only the OpenBoxes live suite (RUN_OPENBOXES_LIVE=1)"
+	@echo "  test-live-akeneo      run only the Akeneo live suite (RUN_AKENEO_LIVE=1)"
+	@echo "  test-live-superset    run only the Superset live suite (RUN_SUPERSET_LIVE=1)"
+	@echo "  test-live-shopify     run only the Shopify live suite (RUN_SHOPIFY_LIVE=1)"
 
 erpnext-up:
 	$(ERPNEXT_COMPOSE) up -d
@@ -242,6 +254,40 @@ mlflow-logs:
 
 shopify-seed:
 	python3 infra/shopify/seed.py
+
+# ---- Test runners ---------------------------------------------------------
+# `test` is the default — every live suite skips because no opt-in flag is set.
+# `test-live` and `test-live-<system>` flip exactly one flag at a time so a
+# brittle live test (e.g. ERPNext drift) can never break the default suite.
+
+PY := cd backend && ./.venv/bin/python -m unittest discover -s tests
+
+test:
+	$(PY)
+
+test-live:
+	cd backend && RUN_LIVE_TESTS=1 ./.venv/bin/python -m unittest discover -s tests
+
+test-live-erpnext:
+	cd backend && RUN_ERPNEXT_LIVE=1 ./.venv/bin/python -m unittest tests.test_integrations_erpnext_live
+
+test-live-mautic:
+	cd backend && RUN_MAUTIC_LIVE=1 ./.venv/bin/python -m unittest tests.test_integrations_mautic_live
+
+test-live-medusa:
+	cd backend && RUN_MEDUSA_LIVE=1 ./.venv/bin/python -m unittest tests.test_integrations_medusa_live
+
+test-live-openboxes:
+	cd backend && RUN_OPENBOXES_LIVE=1 ./.venv/bin/python -m unittest tests.test_integrations_openboxes_live
+
+test-live-akeneo:
+	cd backend && RUN_AKENEO_LIVE=1 ./.venv/bin/python -m unittest tests.test_integrations_akeneo_live
+
+test-live-superset:
+	cd backend && RUN_SUPERSET_LIVE=1 ./.venv/bin/python -m unittest tests.test_integrations_superset_live
+
+test-live-shopify:
+	cd backend && RUN_SHOPIFY_LIVE=1 ./.venv/bin/python -m unittest tests.test_integrations_shopify_live
 
 # Track 6 — GBrain. Not a docker-compose stack — GBrain is a Bun-native
 # CLI installed via `git clone + bun install + bun link`. These targets

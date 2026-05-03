@@ -1,12 +1,9 @@
 """Live-path tests for the Mautic adapter.
 
-Skipped automatically when:
-  * MAUTIC_BASE_URL / MAUTIC_USERNAME / MAUTIC_PASSWORD aren't set
-  * The configured Mautic instance isn't reachable
-
-CI stays mock-only — these only fire when the operator has run the local
-Mautic stack (`make mautic-up && make mautic-bootstrap && make mautic-seed`)
-and pasted the API credentials into `backend/.env`.
+Opt-in only — see `backend/tests/_live_gate.py`. Skipped unless:
+  * `RUN_LIVE_TESTS=1` or `RUN_MAUTIC_LIVE=1` is set
+  * MAUTIC_BASE_URL / MAUTIC_USERNAME / MAUTIC_PASSWORD are set
+  * The configured Mautic instance is reachable
 """
 
 from __future__ import annotations
@@ -14,37 +11,21 @@ from __future__ import annotations
 import os
 import unittest
 from base64 import b64encode
-from pathlib import Path
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
-
-def _load_env() -> None:
-    root = Path(__file__).resolve().parents[2]
-    for f in (root / ".env", root / "backend" / ".env"):
-        if not f.exists():
-            continue
-        for line in f.read_text().splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            k, _, v = line.partition("=")
-            os.environ.setdefault(k.strip(), v.strip())
+from tests._live_gate import load_env, skip_reason
 
 
-_load_env()
+load_env()
 
 REQUIRED_ENV = ("MAUTIC_BASE_URL", "MAUTIC_USERNAME", "MAUTIC_PASSWORD")
 
 
-def _live_creds() -> tuple[str, str, str] | None:
-    vals = [os.environ.get(k, "").strip() for k in REQUIRED_ENV]
-    if not all(vals):
-        return None
-    return vals[0], vals[1], vals[2]
-
-
-def _mautic_reachable(base: str, user: str, password: str) -> bool:
+def _mautic_reachable() -> bool:
+    base = os.environ["MAUTIC_BASE_URL"].strip()
+    user = os.environ["MAUTIC_USERNAME"].strip()
+    password = os.environ["MAUTIC_PASSWORD"].strip()
     try:
         token = b64encode(f"{user}:{password}".encode()).decode()
         req = Request(
@@ -57,10 +38,7 @@ def _mautic_reachable(base: str, user: str, password: str) -> bool:
         return False
 
 
-CREDS = _live_creds()
-SKIP_REASON = "Mautic live env not configured" if not CREDS else None
-if CREDS and not _mautic_reachable(*CREDS):
-    SKIP_REASON = f"Mautic at {CREDS[0]} not reachable"
+SKIP_REASON = skip_reason("mautic", REQUIRED_ENV, _mautic_reachable)
 
 
 @unittest.skipIf(SKIP_REASON, SKIP_REASON)
