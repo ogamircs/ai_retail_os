@@ -1,13 +1,9 @@
 """Live-path tests for the Medusa adapter.
 
-Skipped automatically when:
-  * MEDUSA_BASE_URL / MEDUSA_ADMIN_EMAIL / MEDUSA_ADMIN_PASSWORD aren't set
-  * The configured Medusa instance isn't reachable
-  * Admin auth (POST /auth/user/emailpass) fails
-
-CI stays mock-only — these only fire when the operator has run the local
-Medusa stack (`make medusa-up && make medusa-bootstrap && make medusa-seed`)
-and pasted the admin credentials into `backend/.env`.
+Opt-in only — see `backend/tests/_live_gate.py`. Skipped unless:
+  * `RUN_LIVE_TESTS=1` or `RUN_MEDUSA_LIVE=1` is set
+  * MEDUSA_BASE_URL / MEDUSA_ADMIN_EMAIL / MEDUSA_ADMIN_PASSWORD are set
+  * The configured Medusa instance is reachable and admin auth succeeds
 """
 
 from __future__ import annotations
@@ -15,37 +11,21 @@ from __future__ import annotations
 import json
 import os
 import unittest
-from pathlib import Path
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
-
-def _load_env() -> None:
-    root = Path(__file__).resolve().parents[2]
-    for f in (root / ".env", root / "backend" / ".env"):
-        if not f.exists():
-            continue
-        for line in f.read_text().splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            k, _, v = line.partition("=")
-            os.environ.setdefault(k.strip(), v.strip())
+from tests._live_gate import load_env, skip_reason
 
 
-_load_env()
+load_env()
 
 REQUIRED_ENV = ("MEDUSA_BASE_URL", "MEDUSA_ADMIN_EMAIL", "MEDUSA_ADMIN_PASSWORD")
 
 
-def _live_creds() -> tuple[str, str, str] | None:
-    vals = [os.environ.get(k, "").strip() for k in REQUIRED_ENV]
-    if not all(vals):
-        return None
-    return vals[0], vals[1], vals[2]
-
-
-def _medusa_reachable(base: str, email: str, password: str) -> bool:
+def _medusa_reachable() -> bool:
+    base = os.environ["MEDUSA_BASE_URL"].strip()
+    email = os.environ["MEDUSA_ADMIN_EMAIL"].strip()
+    password = os.environ["MEDUSA_ADMIN_PASSWORD"].strip()
     try:
         req = Request(
             base.rstrip("/") + "/auth/user/emailpass",
@@ -62,10 +42,7 @@ def _medusa_reachable(base: str, email: str, password: str) -> bool:
         return False
 
 
-CREDS = _live_creds()
-SKIP_REASON = "Medusa live env not configured" if not CREDS else None
-if CREDS and not _medusa_reachable(*CREDS):
-    SKIP_REASON = f"Medusa at {CREDS[0]} not reachable / auth failed"
+SKIP_REASON = skip_reason("medusa", REQUIRED_ENV, _medusa_reachable)
 
 
 @unittest.skipIf(SKIP_REASON, SKIP_REASON)

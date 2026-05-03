@@ -1,13 +1,9 @@
 """Live-path tests for the Apache Superset adapter.
 
-Skipped automatically when:
-  * SUPERSET_BASE_URL / USERNAME / PASSWORD aren't set
-  * The configured Superset instance isn't reachable
-  * Login round-trip fails
-
-CI stays mock-only — these only fire when the operator has run the
-local Superset stack (`make superset-up && make superset-bootstrap && make superset-seed`)
-and pasted the credentials into `backend/.env`.
+Opt-in only — see `backend/tests/_live_gate.py`. Skipped unless:
+  * `RUN_LIVE_TESTS=1` or `RUN_SUPERSET_LIVE=1` is set
+  * SUPERSET_BASE_URL / USERNAME / PASSWORD are set
+  * The login round-trip succeeds against the configured instance
 """
 
 from __future__ import annotations
@@ -15,37 +11,21 @@ from __future__ import annotations
 import json
 import os
 import unittest
-from pathlib import Path
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
-
-def _load_env() -> None:
-    root = Path(__file__).resolve().parents[2]
-    for f in (root / ".env", root / "backend" / ".env"):
-        if not f.exists():
-            continue
-        for line in f.read_text().splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            k, _, v = line.partition("=")
-            os.environ.setdefault(k.strip(), v.strip())
+from tests._live_gate import load_env, skip_reason
 
 
-_load_env()
+load_env()
 
 REQUIRED_ENV = ("SUPERSET_BASE_URL", "SUPERSET_USERNAME", "SUPERSET_PASSWORD")
 
 
-def _live_creds() -> tuple[str, str, str] | None:
-    vals = [os.environ.get(k, "").strip() for k in REQUIRED_ENV]
-    if not all(vals):
-        return None
-    return tuple(vals)  # type: ignore[return-value]
-
-
-def _superset_reachable(base: str, user: str, pw: str) -> bool:
+def _superset_reachable() -> bool:
+    base = os.environ["SUPERSET_BASE_URL"].strip()
+    user = os.environ["SUPERSET_USERNAME"].strip()
+    pw = os.environ["SUPERSET_PASSWORD"].strip()
     try:
         body = json.dumps({
             "username": user,
@@ -66,10 +46,7 @@ def _superset_reachable(base: str, user: str, pw: str) -> bool:
         return False
 
 
-CREDS = _live_creds()
-SKIP_REASON = "Superset live env not configured" if not CREDS else None
-if CREDS and not _superset_reachable(*CREDS):
-    SKIP_REASON = f"Superset at {CREDS[0]} not reachable / auth failed"
+SKIP_REASON = skip_reason("superset", REQUIRED_ENV, _superset_reachable)
 
 
 @unittest.skipIf(SKIP_REASON, SKIP_REASON)

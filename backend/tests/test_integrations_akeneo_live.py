@@ -1,13 +1,9 @@
 """Live-path tests for the Akeneo PIM adapter.
 
-Skipped automatically when:
-  * AKENEO_BASE_URL / CLIENT_ID / SECRET / USERNAME / PASSWORD aren't set
-  * The configured Akeneo instance isn't reachable
-  * OAuth2 token round-trip fails
-
-CI stays mock-only — these only fire when the operator has run the
-local Akeneo stack (`make akeneo-up && make akeneo-bootstrap && make akeneo-seed`)
-and pasted the credentials into `backend/.env`.
+Opt-in only — see `backend/tests/_live_gate.py`. Skipped unless:
+  * `RUN_LIVE_TESTS=1` or `RUN_AKENEO_LIVE=1` is set
+  * AKENEO_BASE_URL / CLIENT_ID / SECRET / USERNAME / PASSWORD are set
+  * The OAuth2 token round-trip succeeds against the configured instance
 """
 
 from __future__ import annotations
@@ -16,25 +12,13 @@ import base64
 import json
 import os
 import unittest
-from pathlib import Path
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
-
-def _load_env() -> None:
-    root = Path(__file__).resolve().parents[2]
-    for f in (root / ".env", root / "backend" / ".env"):
-        if not f.exists():
-            continue
-        for line in f.read_text().splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            k, _, v = line.partition("=")
-            os.environ.setdefault(k.strip(), v.strip())
+from tests._live_gate import load_env, skip_reason
 
 
-_load_env()
+load_env()
 
 REQUIRED_ENV = (
     "AKENEO_BASE_URL",
@@ -45,19 +29,15 @@ REQUIRED_ENV = (
 )
 
 
-def _live_creds() -> tuple[str, str, str, str, str] | None:
-    vals = [os.environ.get(k, "").strip() for k in REQUIRED_ENV]
-    if not all(vals):
-        return None
-    return tuple(vals)  # type: ignore[return-value]
-
-
-def _akeneo_reachable(base: str, cid: str, sec: str, user: str, pw: str) -> bool:
+def _akeneo_reachable() -> bool:
+    base = os.environ["AKENEO_BASE_URL"].strip()
+    cid = os.environ["AKENEO_CLIENT_ID"].strip()
+    sec = os.environ["AKENEO_SECRET"].strip()
+    user = os.environ["AKENEO_USERNAME"].strip()
+    pw = os.environ["AKENEO_PASSWORD"].strip()
     try:
         basic = base64.b64encode(f"{cid}:{sec}".encode()).decode()
-        body = (
-            f"grant_type=password&username={user}&password={pw}".encode()
-        )
+        body = f"grant_type=password&username={user}&password={pw}".encode()
         req = Request(
             base.rstrip("/") + "/api/oauth/v1/token",
             data=body,
@@ -73,10 +53,7 @@ def _akeneo_reachable(base: str, cid: str, sec: str, user: str, pw: str) -> bool
         return False
 
 
-CREDS = _live_creds()
-SKIP_REASON = "Akeneo live env not configured" if not CREDS else None
-if CREDS and not _akeneo_reachable(*CREDS):
-    SKIP_REASON = f"Akeneo at {CREDS[0]} not reachable / auth failed"
+SKIP_REASON = skip_reason("akeneo", REQUIRED_ENV, _akeneo_reachable)
 
 
 @unittest.skipIf(SKIP_REASON, SKIP_REASON)

@@ -1,12 +1,9 @@
 """Live-path tests for the Shopify Plus adapter.
 
-Skipped automatically when:
-  * SHOPIFY_SHOP_DOMAIN / SHOPIFY_ADMIN_TOKEN aren't set
-  * The configured Shopify dev store isn't reachable / token is invalid
-
-CI stays mock-only — these only fire when the operator has provisioned a
-Shopify Partner dev store, minted a custom-app token, run `make shopify-seed`,
-and pasted credentials into `backend/.env`.
+Opt-in only — see `backend/tests/_live_gate.py`. Skipped unless:
+  * `RUN_LIVE_TESTS=1` or `RUN_SHOPIFY_LIVE=1` is set
+  * SHOPIFY_SHOP_DOMAIN / SHOPIFY_ADMIN_TOKEN are set
+  * The dev store accepts a `{ shop { name } }` GraphQL probe
 """
 
 from __future__ import annotations
@@ -14,39 +11,21 @@ from __future__ import annotations
 import json
 import os
 import unittest
-from pathlib import Path
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
-
-def _load_env() -> None:
-    root = Path(__file__).resolve().parents[2]
-    for f in (root / ".env", root / "backend" / ".env"):
-        if not f.exists():
-            continue
-        for line in f.read_text().splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            k, _, v = line.partition("=")
-            os.environ.setdefault(k.strip(), v.strip())
+from tests._live_gate import load_env, skip_reason
 
 
-_load_env()
+load_env()
 
 REQUIRED_ENV = ("SHOPIFY_SHOP_DOMAIN", "SHOPIFY_ADMIN_TOKEN")
 
 
-def _live_creds() -> tuple[str, str, str] | None:
-    domain = os.environ.get("SHOPIFY_SHOP_DOMAIN", "").strip()
-    token = os.environ.get("SHOPIFY_ADMIN_TOKEN", "").strip()
+def _shopify_reachable() -> bool:
+    domain = os.environ["SHOPIFY_SHOP_DOMAIN"].strip()
+    token = os.environ["SHOPIFY_ADMIN_TOKEN"].strip()
     version = os.environ.get("SHOPIFY_API_VERSION", "2025-01").strip() or "2025-01"
-    if not domain or not token:
-        return None
-    return domain, token, version
-
-
-def _shopify_reachable(domain: str, token: str, version: str) -> bool:
     try:
         body = json.dumps({"query": "{ shop { name } }"}).encode()
         req = Request(
@@ -67,10 +46,7 @@ def _shopify_reachable(domain: str, token: str, version: str) -> bool:
         return False
 
 
-CREDS = _live_creds()
-SKIP_REASON = "Shopify live env not configured" if not CREDS else None
-if CREDS and not _shopify_reachable(*CREDS):
-    SKIP_REASON = f"Shopify at {CREDS[0]} not reachable / token invalid"
+SKIP_REASON = skip_reason("shopify", REQUIRED_ENV, _shopify_reachable)
 
 
 @unittest.skipIf(SKIP_REASON, SKIP_REASON)
