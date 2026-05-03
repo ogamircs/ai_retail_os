@@ -1987,11 +1987,11 @@ class IntegrationLayerTest(unittest.TestCase):
                 return {"data": {"id": "klv_camp_42", "type": "campaign"}}
 
         # The Klaviyo path doesn't go through _gql; it constructs a JsonHttpClient.
-        # Patch the JsonHttpClient symbol the module imports.
-        from app.integrations import systems as systems_mod
+        # Patch the JsonHttpClient symbol the shopify adapter module imports.
+        from app.integrations.adapters import shopify as shopify_mod
 
-        old_client = systems_mod.JsonHttpClient
-        systems_mod.JsonHttpClient = lambda *a, **k: _StubKlaviyo()  # type: ignore[assignment]
+        old_client = shopify_mod.JsonHttpClient
+        shopify_mod.JsonHttpClient = lambda *a, **k: _StubKlaviyo()  # type: ignore[assignment]
         try:
             row = adapter_store.create_outbox_action(
                 system_id="shopify",
@@ -2005,7 +2005,7 @@ class IntegrationLayerTest(unittest.TestCase):
             )
             result = adapter.apply_outbound(row["id"])
         finally:
-            systems_mod.JsonHttpClient = old_client
+            shopify_mod.JsonHttpClient = old_client
             os.environ.pop("KLAVIYO_API_KEY", None)
         self.assertEqual(result["status"], "draft_created", msg=result)
         self.assertEqual(result["external_id"], "klv_camp_42")
