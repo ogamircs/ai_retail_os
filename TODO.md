@@ -7,6 +7,50 @@ Two parallel tracks. Pick whichever has the next freeing-up unit.
 
 ---
 
+# Codebase cleanup audit - 2026-05-03
+
+Context from this pass: the repo is now a full vertical-slice workbench, not just the original mock demo. The runtime is FastAPI in `backend/app/main.py`, a specialist agent mesh in `backend/app/agents/`, a SQLite spine in `backend/app/spine/` plus `backend/data/spine.db`, mocked retail substrate helpers in `backend/app/substrate/`, live/mock system adapters in `backend/app/integrations/`, and a React/Vite cockpit in `frontend/src/`.
+
+Audit evidence:
+- [x] Frontend build passes: `cd frontend && npm run build`.
+- [ ] Backend test suite is not fully green in the current local live setup: `cd backend && ./.venv/bin/python -m unittest discover -s tests` ran 253 tests with 29 skips and 1 failure. Failing case: `test_integrations_erpnext_live.ERPNextLiveApplyTest.test_po_held_annotates_existing_purchase_order`, where ERPNext PO matching found no supplier + schedule_date matches for the current seeded PO payload.
+
+## Highest leverage cleanup
+
+- [ ] **P0 - Stabilize live integration tests.** The ERPNext live PO-hold test currently depends on external desk state matching `substrate_inbound_pos` exactly. Make live tests opt-in via explicit `RUN_*_LIVE=1` flags, reseed or validate preconditions inside each live test class, and add a "repair local stack" command when records drift. Files: `backend/tests/test_integrations_erpnext_live.py`, `infra/erpnext/seed.py`, `Makefile`.
+- [ ] **P0 - Split `backend/app/integrations/systems.py` into adapter modules.** This file is over 3,300 lines and owns ERPNext, Mautic, Medusa, OpenBoxes, Akeneo, Superset, Shopify, shared HTTP, pagination, caching, and outbound apply behavior. Move to `backend/app/integrations/adapters/{erpnext,mautic,medusa,openboxes,akeneo,superset,shopify}.py`, keep only shared primitives in `base.py` / a new `http.py`, and update `registry.py` to import an explicit adapter list.
+- [ ] **P0 - Extract route modules from `backend/app/main.py`.** `main.py` is doing app setup, REST reads, integration actions, wiki, MLflow, improvement jobs, brain, DSPy jobs, and chat SSE. Split into routers such as `routes/core.py`, `routes/integrations.py`, `routes/wiki.py`, `routes/improvements.py`, `routes/brain.py`, `routes/dspy.py`, and `routes/chat.py`.
+- [ ] **P0 - Add a one-command quality gate.** There is no repo-level lint/type/test gate yet. Add `make check` that runs Python unit tests, frontend build, TypeScript check, and formatting/linting once the tools are added. Add CI coverage for the same command so regressions do not rely on manual memory.
+- [ ] **P0 - Introduce Python lint and typing checks.** Add `ruff` plus either `pyright` or `mypy` configuration. Start with non-invasive rules, then tighten. Good first targets: broad `except Exception` blocks that swallow state-changing failures, import cycles, unused code, and mutable model defaults.
+
+## Backend correctness and architecture
+
+- [ ] **P1 - Create a real schema migration path for the SQLite spine.** `backend/app/spine/db.py` uses `CREATE TABLE IF NOT EXISTS` only. Add `schema_version`, idempotent migrations, and tests that upgrade an older `spine.db` snapshot without destructive reseeding.
+- [ ] **P1 - Make event kinds a shared contract.** The architecture doc describes a fixed event vocabulary, but code currently emits additional kinds such as `measurement`, `critique`, and `report`, and `append_event` accepts any string. Add a typed enum or registry in `backend/app/spine/events.py`, update docs, and make telemetry/tests assert the allowed set.
+- [ ] **P1 - Decide what to do with chat history.** `ChatRequest.history` exists in `backend/app/schemas.py`, but `/api/chat` passes only `req.message` into `run_chief`, and the frontend keeps prompt history locally rather than sending conversation context. Either wire history into the agent loop intentionally or remove the field to avoid a false contract. Also replace the mutable list default with `Field(default_factory=list)`.
+- [ ] **P1 - Durable job tracking for background work.** Improvement audits and DSPy compiles run in daemon threads with in-memory state. Move job state to SQLite, add cancellation/concurrency caps, preserve terminal status across backend restarts, and share one job helper for auditor/DSPy/brain ingest paths.
+- [ ] **P1 - Normalize integration apply semantics.** Each adapter repeats configured/mock/live dispatch, supported-action checks, error landing, idempotency markers, and result shaping. Pull this into a common `LiveApplyMixin` or strategy helper so every adapter returns the same success/error envelope.
+- [ ] **P1 - Harden outbound matching against real-system drift.** ERPNext PO matching by supplier + schedule_date is brittle. Prefer external refs or explicit seed markers when available, fall back to supplier/date only as a secondary heuristic, and surface "no external match" remediation in the cockpit drawer.
+- [ ] **P1 - Add API response models for mutable routes.** Many FastAPI endpoints return raw dicts. Add Pydantic response models for integration actions, sync runs, improvement jobs, wiki pages, brain status, and DSPy jobs so frontend type assumptions are enforced at the server boundary.
+- [ ] **P1 - Scope CORS for non-demo runs.** `backend/app/main.py` currently allows all origins. Keep permissive demo mode, but add env-driven allowed origins before any shared or customer-facing deployment.
+
+## Frontend cleanup
+
+- [ ] **P1 - Centralize frontend fetch/error handling.** `frontend/src/lib/api.ts` has many direct `fetch(...).json()` calls that do not check `response.ok`, while a few newer paths do. Add a typed `apiFetch<T>()` helper that handles non-2xx responses, JSON parse failures, and consistent error messages.
+- [ ] **P1 - Replace broad `Record<string, any>` types with domain types.** Start with `AgentEvent.data`, `ExternalAction.payload/result`, integration metadata, improvement summaries, and MLflow run metrics. This will make the cockpit safer as more external systems land.
+- [ ] **P2 - Move tab metadata to a component registry.** `DataRail.tsx` hardcodes tab ids, labels, keyboard order, and render conditions. A registry object would reduce drift as `[WIKI]`, `[BRAIN]`, `[MLFLOW]`, and `[IMPROVE]` keep growing.
+- [ ] **P2 - Add focused UI tests for approval and error states.** The frontend build passes, but there is no visible Playwright/Vitest gate for drawer apply failures, stage-gated approvals, integration sync errors, tab keyboard navigation, or chat SSE error rendering.
+
+## Data, docs, and operations
+
+- [ ] **P1 - Add deterministic local reset commands.** The project has many `*-nuke`, `*-seed`, and live-stack paths, but the current backend tests show local state can still drift. Add one documented "reset demo world" path that reseeds `spine.db`, clears outbox/test-generated events when desired, and validates each configured adapter.
+- [ ] **P1 - Separate product backlog from cleanup backlog.** `TODO.md` mixes shipped history, active rollout plans, open PR notes, and future cleanup. Split long-term completed history into `docs/roadmap/` or changelog files, leaving `TODO.md` as a smaller active queue.
+- [ ] **P2 - Keep generated local assets observable but bounded.** `artifacts/` is ignored and currently contains over 1,200 markdown artifacts locally. Add a cleanup target and optional retention setting so long-running demos do not accumulate unbounded local state.
+- [ ] **P2 - Add architecture fitness checks.** The architecture doc says dependencies flow surfaces -> routes -> agents -> spine/substrate/integrations. Add a small import-lint or dependency-boundary test to prevent substrate importing agents, integrations importing UI assumptions, or route logic creeping back into lower layers.
+- [ ] **P2 - Document a production-readiness boundary.** The repo is excellent as a prototype, but docs should state what is intentionally not production-ready yet: auth, tenant isolation, secrets rotation, migrations, durable background workers, rate limiting, external retry policy, and audit retention.
+
+---
+
 # Track 1 — Real-system rollout
 
 Goal: replace mock-mode adapters with real systems, one at a time, in a foundation-first order. Each system goes through its own 6-phase rollout (P1–P6). When all 6 are done for a system, we move on.
@@ -565,3 +609,76 @@ Pairs naturally with Track 4 (the eval harness gives us scored examples; MLflow 
 - DSPy's adapter for our LLMProvider abstraction — write a `dspy.LM` subclass that delegates to `app.llm.get_provider()` so optimizer runs go through the same Anthropic / OpenAI / Google switch as production turns. Otherwise we'd compile prompts on one provider and ship them to another.
 - How does DSPy interact with Track 2's review loop? D5 should let the Critic critique a *compiled* draft and the bootstrap demos absorb that revision. Worth prototyping during D3.
 - Where do compiled prompts physically live — in `prompts/` (current plan) or in MLflow's Model Registry? Lean: filesystem keeps git diffs reviewable; MLflow stays the run-history surface.
+
+
+---
+
+# Track 8 — Distribution adapters
+
+Goal: extend the integration-adapter surface to platforms used by larger mid-market retailers — Shopify Plus, NetSuite, Microsoft Dynamics 365 Commerce. Each follows the Track 1 P1–P6 rollout. Shopify Plus first (covers ~10× the retailer count of the existing six open-source adapters combined); NetSuite + Dynamics gated on a real customer pulling them.
+
+Order:
+1. **Shopify Plus** ← active
+2. NetSuite (gated)
+3. Microsoft Dynamics 365 Commerce (gated)
+
+Per-system phases identical to Track 1: P1 local instance · P2 demo seed · P3 inbound sync · P4 live outbound apply · P5 agent-loop UAT · P6 docs + env-gated tests.
+
+---
+
+## Shopify Plus (active)
+
+- [x] **P1 · Sandbox instance**
+  - Shopify Partner dev store (free; Shopify-hosted, no Docker / compose).
+  - `infra/shopify/README.md` — Partner account creation, dev store provisioning, custom-app install with Admin API access scopes (`read_products`, `write_products`, `read_orders`, `write_orders`, `read_inventory`, `write_inventory`, `read_locations`, `write_discounts`, `write_marketing_events`), env block for `SHOPIFY_SHOP_DOMAIN` / `SHOPIFY_ADMIN_TOKEN` / `SHOPIFY_API_VERSION`, reset path (uninstall app + reinstall to rotate creds).
+  - No Makefile lifecycle targets — no local container to manage.
+
+- [x] **P2 · Demo seed**
+  - `infra/shopify/seed.py` — Admin GraphQL + REST, idempotent, stdlib-only (urllib + sqlite3).
+  - Reads `backend/data/spine.db`. Creates: 30 Products (one per `substrate_skus`), 5 Locations (one per `substrate_stores`), inventory levels per (variant × location), 10 draft Orders.
+  - Idempotency via `metafield.namespace="retail_os"` markers (`spine_sku`, `store_id`) so re-runs print zero `++` lines and round-trip back to substrate ids in P3.
+  - Out of scope: Customers, Collections, multi-currency.
+  - Makefile target: `shopify-seed` (no `up/down/bootstrap` — Shopify-hosted).
+
+- [x] **P3 · Inbound sync**
+  - `backend/app/integrations/systems.py` — extend the existing `ShopifyAdapter` (currently mock-only). `configured()` requires `SHOPIFY_SHOP_DOMAIN` + `SHOPIFY_ADMIN_TOKEN`.
+  - `_live_sync()` pulls Products, Variants, Locations, InventoryLevels, Orders via Admin GraphQL with cursor pagination (uncapped by default; explicit `max_rows` surfaces `truncated=True` + `status="partial"` matching Mautic / Medusa pattern).
+  - Each row caches into `record_cache`; local_id round-trips via `metafields.retail_os.spine_sku` (products) and `metafields.retail_os.store_id` (locations).
+  - `external_url` deep-links: `admin/products/<id>`, `admin/orders/<id>`, `admin/settings/locations/<id>`, `admin/discounts/<id>`.
+  - `sync_inbound()` dispatches: configured → `_live_sync`, else → existing `_mock_sync`.
+  - Tests: extend `tests/test_integrations.py` with mock-mode unit tests; new `backend/tests/test_integrations_shopify_live.py` env-gated (live sync round-trip, seeded metafield external_ref round-trip, registry reports `mode=connected`).
+
+- [x] **P4 · Live outbound apply**
+  - `LIVE_ACTION_TYPES = {"promotion", "fulfillment_routing", "campaign_brief"}`. Everything else falls back to base mock-apply (matches the ERPNext / Mautic / Medusa shape).
+  - `_shopify_create_discount` (promotion) → `discountAutomaticBasicCreate` GraphQL mutation with percentage off, 30-day window, target collection derived from the proposal's category. `automaticDiscountId` mirrors into outbox `external_id`.
+  - `_shopify_route_fulfillment` (fulfillment_routing) → `fulfillmentOrderMove` to the recommended Location. Requires the order id in the payload.
+  - `_shopify_campaign_brief` (campaign_brief) → `marketingActivityCreate` draft (Shopify Email) with `[retail-os:<campaign_id>]` marker in the description for round-trip; if `KLAVIYO_API_KEY` is set, override to POST `/api/campaigns` against Klaviyo instead. Either path lands a draft, never a sent campaign.
+  - Adapter rejection lands the row in `error` (not `draft_created`) so the cockpit's red chip surfaces it.
+  - Five new unit tests in `tests/test_integrations.py` (stub `_client`): promotion happy path, fulfillment-routing happy path, campaign-brief Shopify-Email path, campaign-brief Klaviyo passthrough path, unsupported-type fallback. Two new env-gated live tests in `tests/test_integrations_shopify_live.py`.
+
+- [x] **P5 · Agent-loop UAT**
+  - `docs/uat/<date>-shopify-p5-promo-demo.md` — full walkthrough: Pricing & Promo proposes → cockpit drawer apply → real automatic discount lands in dev store; idempotency note (re-applying the same outbox row → existing discount id reused, not duplicated); acceptance checklist; screenshot placeholders.
+  - One Marketing demo path (`campaign_brief` → draft Shopify Email campaign) bundled in the same doc.
+
+- [x] **P6 · Docs + tests**
+  - README "Running with real Shopify Plus" section: full quick-start (Partner setup → dev store → custom-app install → env wiring → seed → sanity curl), per-action-type mapping table, troubleshooting cheat sheet (Admin API throttle, GraphQL cost-limit budgeting, custom-app scope drift, metafield-marker round-trip mismatch, Klaviyo opt-in), live-test instructions, reset path.
+  - Live-path tests already env-gated (P3 + P4); README points at them so CI stays mock-only by design.
+
+---
+
+## NetSuite (gated)
+
+- [ ] **G0 · Trigger** — block until ≥1 NetSuite-running design partner appears. Path: SuiteApp via SDF (SuiteCloud Development Framework); multi-month effort vs the weeks-scale of the open-source adapters. Until then: expensive optionality.
+- [ ] P1–P6 — same `IntegrationAdapter` contract as Track 1. P3/P4 use the SuiteTalk REST + Restlet surface.
+
+## Microsoft Dynamics 365 Commerce (gated)
+
+- [ ] **G0 · Trigger** — block until ≥1 D365 customer pulls it. Heavy integration + slow Microsoft cert process.
+- [ ] P1–P6 — same adapter contract; P3/P4 use the Commerce Scale Unit APIs.
+
+---
+
+## Shopify App Store listing (post-PMF)
+
+- [ ] **L1 · Compliance audit** — security review (token storage, scope minimisation, webhook HMAC verification), support SLA documentation, performance benchmarks against Shopify's published thresholds (~4–8 weeks of compliance work). Defer until Shopify P1–P6 ship and ≥1 customer is live so distribution doesn't outrun product fit.
+- [ ] **L2 · Listing submission** — public listing in the Shopify App Store, OAuth install flow, billing API integration for managed billing. Out of scope until L1 closes.
