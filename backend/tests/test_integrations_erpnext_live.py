@@ -155,7 +155,9 @@ class ERPNextLiveApplyTest(unittest.TestCase):
         from app.spine.db import conn
 
         spine_db.init_db()
-        self.base, self.key, self.secret = CREDS  # type: ignore[misc]
+        self.base = os.environ["ERPNEXT_BASE_URL"].strip()
+        self.key = os.environ["ERPNEXT_API_KEY"].strip()
+        self.secret = os.environ["ERPNEXT_API_SECRET"].strip()
         # hold_or_expedite_po flips PO rows to 'held' / 'expedited' permanently.
         # Reset the seeded POs to 'open' so each test sees a fresh substrate.
         with conn() as c:
