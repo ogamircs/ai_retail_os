@@ -409,7 +409,6 @@ def mlflow_status(limit_runs: int = 10):
     }
 
 
-# Track 8 — Improvement Auditor cockpit surface.
 @app.post("/api/improvements/run")
 def improvements_run():
     """Kick off an audit. Background thread; returns `{run_id}`. The

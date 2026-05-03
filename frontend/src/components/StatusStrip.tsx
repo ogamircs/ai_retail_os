@@ -27,6 +27,18 @@ const CHIP_LABELS: Record<string, string> = {
   "Store exceptions": "STORE",
 };
 
+// JSON-stringify-based equality is good enough for the small status
+// payloads polled here (mesh status, pinned wiki list, brain status,
+// open suggestions). Avoids pulling in a deep-equal dependency.
+const deepEqual = (a: unknown, b: unknown): boolean => {
+  if (a === b) return true;
+  try {
+    return JSON.stringify(a) === JSON.stringify(b);
+  } catch {
+    return false;
+  }
+};
+
 const cur = new Intl.NumberFormat("en-US", {
   style: "currency",
   currency: "USD",
@@ -100,37 +112,30 @@ export default function StatusStrip() {
 
   useEffect(() => {
     let cancelled = false;
+    // Skip each setter when the next payload is structurally identical
+    // to the current one — the strip would otherwise re-render every
+    // 5s even when nothing changed (KPI chips, approve button, status
+    // chips all rebuild for no reason).
     const tick = () => {
-      // Track 2 A6: poll every 5s for recent mesh_downgrade events. The
-      // chip surfaces when the orchestrator hit a token/wall-clock cap
-      // in the last 5 minutes, so the operator knows the latest reply
-      // skipped review-loop convergence.
       getMeshStatus(300)
         .then((s) => {
-          if (!cancelled) setMesh(s);
+          if (!cancelled) setMesh((cur) => (deepEqual(cur, s) ? cur : s));
         })
         .catch(() => {});
-      // Track 5 W5: refresh pinned wiki pages so the chips stay live
-      // when the operator pins/unpins from the WikiTab.
       listPinnedWikiPages()
         .then((p) => {
-          if (!cancelled) setPinnedWiki(p);
+          if (!cancelled) setPinnedWiki((cur) => (deepEqual(cur, p) ? cur : p));
         })
         .catch(() => {});
-      // Track 6 G5: brain status chip — 'mock' when no GBRAIN_BEARER,
-      // 'brain N pages' when the live endpoint is reachable, hidden
-      // when the env says GBrain is configured but the endpoint is
-      // down (so the operator notices via the absent chip).
       getBrainStatus()
         .then((s) => {
-          if (!cancelled) setBrain(s);
+          if (!cancelled) setBrain((cur) => (deepEqual(cur, s) ? cur : s));
         })
         .catch(() => {});
-      // Track 8: open improvement suggestions — chip in the strip so
-      // an audit run that finished off-screen still gets seen.
       listImprovementSuggestions({ status: "open", limit: 50 })
         .then((s) => {
-          if (!cancelled) setOpenSuggestions(s);
+          if (!cancelled)
+            setOpenSuggestions((cur) => (deepEqual(cur, s) ? cur : s));
         })
         .catch(() => {});
     };

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   ImprovementRun,
   ImprovementSuggestion,
@@ -12,72 +12,86 @@ import {
 import { renderSafeMarkdown } from "../../lib/safeMarkdown";
 import "./WikiTab.css";
 
-/**
- * Track 8 — Improvement Auditor cockpit surface.
- *
- * Operator clicks `audit now`. Backend kicks off a daemon thread
- * that walks the cockpit's signals snapshot, runs an LLM agent, and
- * writes 3-8 suggestions. This tab polls the run until terminal,
- * then surfaces every open suggestion with accept/dismiss.
- *
- * Two-pane layout matching WikiTab so the operator's muscle memory
- * transfers — left: suggestion list (severity chip + title), right:
- * full body markdown + actions.
- */
-
 const SEVERITY_CHIP: Record<string, string> = {
   high: "stage-critique",
   medium: "stage-draft",
   low: "stage-revision",
 };
 
+const SUGGESTION_STATUS_CHIP: Record<string, string> = {
+  open: "stage-draft",
+  accepted: "stage-final",
+  dismissed: "stage-revision",
+};
+
+const RUN_STATUS_CHIP: Record<string, string> = {
+  ok: "stage-final",
+  error: "stage-critique",
+  running: "stage-draft",
+};
+
 const STATUS_FILTERS = ["open", "accepted", "dismissed", "all"] as const;
 type StatusFilter = (typeof STATUS_FILTERS)[number];
+
+function suggestionsEqual(
+  a: ImprovementSuggestion[],
+  b: ImprovementSuggestion[],
+): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i].id !== b[i].id || a[i].status !== b[i].status) return false;
+  }
+  return true;
+}
+
+function runsEqual(a: ImprovementRun[], b: ImprovementRun[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i].id !== b[i].id || a[i].status !== b[i].status) return false;
+  }
+  return true;
+}
 
 export default function ImproveTab() {
   const [suggestions, setSuggestions] = useState<ImprovementSuggestion[]>([]);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("open");
-  const [activeRun, setActiveRun] = useState<ImprovementRun | null>(null);
   const [recentRuns, setRecentRuns] = useState<ImprovementRun[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const refreshSuggestions = useMemo(
-    () => async () => {
-      try {
-        const list = await listImprovementSuggestions({
-          status: statusFilter,
-          limit: 100,
-        });
-        setSuggestions(list);
-        // Snap selection: keep prior id when still in list, else first.
-        setSelectedId((cur) => {
-          if (list.length === 0) return null;
-          if (cur && list.some((s) => s.id === cur)) return cur;
-          return list[0].id;
-        });
-        setError(null);
-      } catch (e: any) {
-        setError(e?.message ?? "fetch failed");
-      }
-    },
-    [statusFilter],
-  );
+  // Derived: the most recent run, prioritising any in-flight run.
+  const activeRun =
+    recentRuns.find((r) => r.status === "running") ?? recentRuns[0] ?? null;
+  const isRunning = activeRun?.status === "running";
 
-  const refreshRuns = useMemo(
-    () => async () => {
-      try {
-        const runs = await listImprovementRuns(8);
-        setRecentRuns(runs);
-        // If a run is currently `running`, surface it as the active one.
-        const live = runs.find((r) => r.status === "running");
-        setActiveRun((cur) => live ?? cur);
-      } catch {
-        // Don't clobber existing error state — runs poll is best-effort.
-      }
-    },
-    [],
-  );
+  const refreshSuggestions = useCallback(async () => {
+    try {
+      const list = await listImprovementSuggestions({
+        status: statusFilter,
+        limit: 100,
+      });
+      // Skip the setter when the list hasn't changed — avoids a
+      // re-render storm when the 4s poll fires identical payloads.
+      setSuggestions((cur) => (suggestionsEqual(cur, list) ? cur : list));
+      setSelectedId((cur) => {
+        if (list.length === 0) return null;
+        if (cur && list.some((s) => s.id === cur)) return cur;
+        return list[0].id;
+      });
+      setError(null);
+    } catch (e: any) {
+      setError(e?.message ?? "fetch failed");
+    }
+  }, [statusFilter]);
+
+  const refreshRuns = useCallback(async () => {
+    try {
+      const runs = await listImprovementRuns(8);
+      setRecentRuns((cur) => (runsEqual(cur, runs) ? cur : runs));
+    } catch {
+      // Don't clobber existing error state — runs poll is best-effort.
+    }
+  }, []);
 
   useEffect(() => {
     refreshSuggestions();
@@ -89,30 +103,38 @@ export default function ImproveTab() {
     return () => clearInterval(id);
   }, [refreshSuggestions, refreshRuns]);
 
-  // While a run is in flight, poll its status more aggressively so the
-  // banner flips from `running` → `ok`/`error` quickly.
+  // Aggressive 1.5s poll while a run is in flight so the chip flips
+  // from `running` → `ok`/`error` quickly without waiting on the 4s
+  // baseline poll.
   useEffect(() => {
     if (!activeRun || activeRun.status !== "running") return;
     let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
     const tick = async () => {
+      if (cancelled) return;
       try {
         const fresh = await getImprovementRun(activeRun.id);
         if (cancelled) return;
-        setActiveRun(fresh);
+        setRecentRuns((cur) => {
+          const next = cur.map((r) => (r.id === fresh.id ? fresh : r));
+          return runsEqual(cur, next) ? cur : next;
+        });
         if (fresh.status !== "running") {
-          // Pull fresh suggestions immediately on terminal status.
           refreshSuggestions();
           refreshRuns();
-        } else {
-          setTimeout(tick, 1500);
+          return;
         }
       } catch {
-        // Ignore — overall 4s poll covers it.
+        // 4s baseline poll covers it.
+      }
+      if (!cancelled) {
+        timer = setTimeout(tick, 1500);
       }
     };
-    setTimeout(tick, 1500);
+    timer = setTimeout(tick, 1500);
     return () => {
       cancelled = true;
+      if (timer) clearTimeout(timer);
     };
   }, [activeRun?.id, activeRun?.status, refreshSuggestions, refreshRuns]);
 
@@ -120,14 +142,17 @@ export default function ImproveTab() {
     setError(null);
     try {
       const { run_id } = await startImprovementsRun();
-      setActiveRun({
-        id: run_id,
-        started_ts: new Date().toISOString(),
-        ended_ts: null,
-        status: "running",
-        summary: {},
-        error: null,
-      });
+      setRecentRuns((cur) => [
+        {
+          id: run_id,
+          started_ts: new Date().toISOString(),
+          ended_ts: null,
+          status: "running",
+          summary: {},
+          error: null,
+        },
+        ...cur,
+      ]);
     } catch (e: any) {
       setError(e?.message ?? "audit failed to start");
     }
@@ -154,8 +179,6 @@ export default function ImproveTab() {
   const selected = selectedId
     ? suggestions.find((s) => s.id === selectedId)
     : null;
-
-  const isRunning = activeRun?.status === "running";
 
   return (
     <div className="wiki-tab" data-testid="tab-improve">
@@ -186,13 +209,7 @@ export default function ImproveTab() {
         <div className="wiki-status-bar">
           {activeRun ? (
             <span
-              className={`chip ${
-                activeRun.status === "ok"
-                  ? "stage-final"
-                  : activeRun.status === "error"
-                    ? "stage-critique"
-                    : "stage-draft"
-              }`}
+              className={`chip ${RUN_STATUS_CHIP[activeRun.status] ?? "stage-draft"}`}
               title={`run ${activeRun.id}`}
             >
               run · {activeRun.status}
@@ -202,13 +219,6 @@ export default function ImproveTab() {
               {activeRun.summary?.elapsed_s
                 ? ` · ${activeRun.summary.elapsed_s}s`
                 : ""}
-            </span>
-          ) : recentRuns.length > 0 ? (
-            <span
-              className="chip stage-final"
-              title={`last run ${recentRuns[0].id}`}
-            >
-              last · {recentRuns[0].status} · {recentRuns[0].summary?.suggestions ?? 0} suggestions
             </span>
           ) : (
             <span className="chip stage-draft">no audits yet</span>
@@ -254,7 +264,9 @@ export default function ImproveTab() {
                 </span>
                 <span className="wiki-page-slug">{selected.area}</span>
                 <span className="wiki-page-slug">→ {selected.action_hint}</span>
-                <span className={`chip stage-${selected.status === "accepted" ? "final" : selected.status === "dismissed" ? "revision" : "draft"}`}>
+                <span
+                  className={`chip ${SUGGESTION_STATUS_CHIP[selected.status] ?? "stage-draft"}`}
+                >
                   {selected.status}
                 </span>
                 {selected.ts && (
