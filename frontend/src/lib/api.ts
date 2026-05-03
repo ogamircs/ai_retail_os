@@ -441,6 +441,85 @@ export async function applyIntegrationAction(
   return r.json();
 }
 
+// Track 8 — Improvement Auditor cockpit surface.
+
+export type ImprovementSuggestion = {
+  id: number;
+  run_id: string;
+  area: string;
+  severity: "high" | "medium" | "low";
+  title: string;
+  body_md: string;
+  action_hint: "propose_outbox" | "wiki_edit" | "operator_review" | "no_action";
+  status: "open" | "accepted" | "dismissed";
+  refs: string[];
+  ts: string;
+};
+
+export type ImprovementRun = {
+  id: string;
+  started_ts: string;
+  ended_ts: string | null;
+  status: "running" | "ok" | "error";
+  summary: Record<string, any>;
+  error: string | null;
+};
+
+export async function startImprovementsRun(): Promise<{
+  run_id: string;
+  status: string;
+}> {
+  const r = await fetch("/api/improvements/run", { method: "POST" });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function getImprovementRun(runId: string): Promise<ImprovementRun> {
+  const r = await fetch(`/api/improvements/runs/${encodeURIComponent(runId)}`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function listImprovementRuns(limit = 10): Promise<ImprovementRun[]> {
+  const r = await fetch(`/api/improvements/runs?limit=${limit}`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const j = await r.json();
+  return j.runs ?? [];
+}
+
+export async function listImprovementSuggestions(
+  opts: { status?: string; run_id?: string; limit?: number } = {},
+): Promise<ImprovementSuggestion[]> {
+  const params = new URLSearchParams();
+  if (opts.status) params.set("status", opts.status);
+  if (opts.run_id) params.set("run_id", opts.run_id);
+  if (opts.limit) params.set("limit", String(opts.limit));
+  const r = await fetch(`/api/improvements/suggestions?${params}`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const j = await r.json();
+  return j.suggestions ?? [];
+}
+
+export async function acceptImprovementSuggestion(
+  id: number,
+): Promise<ImprovementSuggestion> {
+  const r = await fetch(`/api/improvements/suggestions/${id}/accept`, {
+    method: "POST",
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function dismissImprovementSuggestion(
+  id: number,
+): Promise<ImprovementSuggestion> {
+  const r = await fetch(`/api/improvements/suggestions/${id}/dismiss`, {
+    method: "POST",
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
 // Track 6 G5 — GBrain cockpit surface.
 
 export type BrainStatus = {

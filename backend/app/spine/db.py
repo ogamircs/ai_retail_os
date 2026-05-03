@@ -258,6 +258,38 @@ CREATE TABLE IF NOT EXISTS wiki_revisions (
     UNIQUE(slug, version)
 );
 CREATE INDEX IF NOT EXISTS idx_wiki_revisions_slug ON wiki_revisions(slug, version DESC);
+
+-- Track 8 — Improvement Auditor.
+-- One row per audit run kicked off via /api/improvements/run. The audit
+-- agent walks substrate / spine / wiki / brain signals, then emits 0..N
+-- improvement_suggestions rows scoped to its run_id. Status flips
+-- pending → ok / error when the agent finishes; suggestions stay live
+-- until the operator dismisses or accepts them via the cockpit's
+-- [IMPROVE] tab.
+CREATE TABLE IF NOT EXISTS improvement_runs (
+    id TEXT PRIMARY KEY,
+    started_ts TEXT NOT NULL,
+    ended_ts TEXT,
+    status TEXT NOT NULL DEFAULT 'running', -- 'running' | 'ok' | 'error'
+    summary_json TEXT NOT NULL DEFAULT '{}',
+    error TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_improvement_runs_started ON improvement_runs(started_ts DESC);
+
+CREATE TABLE IF NOT EXISTS improvement_suggestions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    area TEXT NOT NULL,        -- e.g. 'pricing' | 'replenishment' | 'wiki_coverage'
+    severity TEXT NOT NULL,    -- 'high' | 'medium' | 'low'
+    title TEXT NOT NULL,
+    body_md TEXT NOT NULL,
+    action_hint TEXT NOT NULL DEFAULT 'operator_review',
+    status TEXT NOT NULL DEFAULT 'open', -- 'open' | 'accepted' | 'dismissed'
+    refs_json TEXT NOT NULL DEFAULT '[]',
+    ts TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_improvement_suggestions_run ON improvement_suggestions(run_id, severity);
+CREATE INDEX IF NOT EXISTS idx_improvement_suggestions_open ON improvement_suggestions(status, ts DESC);
 """
 
 

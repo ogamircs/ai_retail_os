@@ -409,6 +409,109 @@ def mlflow_status(limit_runs: int = 10):
     }
 
 
+# Track 8 — Improvement Auditor cockpit surface.
+@app.post("/api/improvements/run")
+def improvements_run():
+    """Kick off an audit. Background thread; returns `{run_id}`. The
+    cockpit polls `/api/improvements/runs/{run_id}` for terminal
+    status and pulls suggestions from `/api/improvements/suggestions`.
+
+    The auditor is read-only — it never proposes outbox actions or
+    edits substrate. It walks structured signals and records
+    suggestions for operator review.
+    """
+    import threading
+    import uuid
+
+    from app.agents import improvement_auditor as ia
+
+    try:
+        llm = get_provider()
+    except RuntimeError as e:
+        raise HTTPException(500, str(e))
+
+    run_id = uuid.uuid4().hex[:12]
+    ia.create_run(run_id)
+
+    def _worker():
+        try:
+            ia.run_audit(run_id, llm)
+        except Exception as exc:  # noqa: BLE001
+            ia.complete_run(run_id, {"phase": "worker"}, error=str(exc))
+
+    threading.Thread(
+        target=_worker, daemon=True, name=f"improvement-audit-{run_id}"
+    ).start()
+    return {"run_id": run_id, "status": "running"}
+
+
+@app.get("/api/improvements/runs/{run_id}")
+def improvements_run_status(run_id: str):
+    from app.agents import improvement_auditor as ia
+
+    run = ia.get_run(run_id)
+    if not run:
+        raise HTTPException(404, f"unknown run '{run_id}'")
+    return run
+
+
+@app.get("/api/improvements/runs")
+def improvements_runs_list(limit: int = 20):
+    from app.agents import improvement_auditor as ia
+
+    return {"runs": ia.list_runs(limit=limit)}
+
+
+@app.get("/api/improvements/suggestions")
+def improvements_suggestions(
+    status: str | None = "open",
+    run_id: str | None = None,
+    limit: int = 100,
+):
+    from app.agents import improvement_auditor as ia
+
+    # Treat empty / 'all' as "no filter" so the cockpit can switch
+    # between open / accepted / dismissed via a single dropdown.
+    eff_status: str | None = status
+    if not status or status == "all":
+        eff_status = None
+    return {
+        "suggestions": ia.list_suggestions(
+            run_id=run_id, status=eff_status, limit=limit
+        )
+    }
+
+
+@app.post("/api/improvements/suggestions/{suggestion_id}/accept")
+def improvements_accept(suggestion_id: int):
+    from app.agents import improvement_auditor as ia
+
+    out = ia.update_suggestion_status(suggestion_id, "accepted")
+    if not out:
+        raise HTTPException(404, f"unknown suggestion {suggestion_id}")
+    return out
+
+
+@app.post("/api/improvements/suggestions/{suggestion_id}/dismiss")
+def improvements_dismiss(suggestion_id: int):
+    from app.agents import improvement_auditor as ia
+
+    out = ia.update_suggestion_status(suggestion_id, "dismissed")
+    if not out:
+        raise HTTPException(404, f"unknown suggestion {suggestion_id}")
+    return out
+
+
+@app.get("/api/improvements/signals")
+def improvements_signals():
+    """Debug endpoint — exposes the deterministic signals snapshot the
+    audit agent sees, without invoking the LLM. Useful when tweaking
+    `gather_signals` to verify it surfaces what you expect."""
+    from app.agents import improvement_auditor as ia
+
+    return ia.gather_signals()
+
+
 @app.get("/api/brain/status")
 def brain_status():
     """Track 6 G5 — cockpit-side surface for the GBrain integration.

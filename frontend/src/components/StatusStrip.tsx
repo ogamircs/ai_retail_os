@@ -10,6 +10,8 @@ import {
   WikiPage,
   getBrainStatus,
   BrainStatus,
+  listImprovementSuggestions,
+  ImprovementSuggestion,
 } from "../lib/api";
 import { useDashboardData } from "../lib/data";
 import { useDrawer } from "../lib/drawerContext";
@@ -85,6 +87,7 @@ export default function StatusStrip() {
   });
   const [pinnedWiki, setPinnedWiki] = useState<WikiPage[]>([]);
   const [brain, setBrain] = useState<BrainStatus | null>(null);
+  const [openSuggestions, setOpenSuggestions] = useState<ImprovementSuggestion[]>([]);
 
   useEffect(() => {
     getConfig().then(setCfg).catch(() => {});
@@ -121,6 +124,13 @@ export default function StatusStrip() {
       getBrainStatus()
         .then((s) => {
           if (!cancelled) setBrain(s);
+        })
+        .catch(() => {});
+      // Track 8: open improvement suggestions — chip in the strip so
+      // an audit run that finished off-screen still gets seen.
+      listImprovementSuggestions({ status: "open", limit: 50 })
+        .then((s) => {
+          if (!cancelled) setOpenSuggestions(s);
         })
         .catch(() => {});
     };
@@ -202,6 +212,18 @@ export default function StatusStrip() {
           }
         >
           {brain.mock ? "brain mock" : `brain ${brain.pages_count} pages`}
+        </span>
+      )}
+      {openSuggestions.length > 0 && (
+        <span
+          className="wiki-pinned"
+          data-testid="improve-status-chip"
+          title={openSuggestions
+            .slice(0, 8)
+            .map((s) => `[${s.severity}] ${s.area} — ${s.title}`)
+            .join("\n")}
+        >
+          ⚡ improve {openSuggestions.length}
         </span>
       )}
       {mesh?.recent_downgrade && (

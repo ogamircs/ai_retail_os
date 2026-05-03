@@ -120,6 +120,11 @@ Three families of tables, by purpose:
 | `wiki_pages`       | Latest revision per slug. `status ∈ {draft, published,    |
 |                    | deprecated}`. Read path is O(1) (no joins). Track 5.      |
 | `wiki_revisions`   | Full version history per slug. Track 5.                   |
+| `improvement_runs` | One row per `audit now` invocation. Status: running →     |
+|                    | ok / error. Track 8.                                      |
+| `improvement_     `| 3-8 rows per run. severity ∈ {high, medium, low}, area    |
+| `suggestions`      | enum (pricing / replenishment / wiki_coverage / …),       |
+|                    | status ∈ {open, accepted, dismissed}. Track 8.            |
 
 **Substrate** (mock retail systems of record — populated by `seed.py`):
 
@@ -172,6 +177,7 @@ measurement queries read here.
 | `wiki_deprecate`      | operator           | Page retired                         |
 | `brain_ingest`        | Chief of Staff     | Turn ingested into GBrain (Track 6)  |
 | `mesh_downgrade`      | Chief of Staff     | Review loop hit token/wallclock cap  |
+| `observation`         | Improvement Auditor| Audit run summary (Track 8)          |
 
 ### 3.3 Per-turn id propagation (T5 W4 + T6 G3)
 
@@ -513,6 +519,8 @@ into vertical sections.
 | BRAIN        | `/api/brain/status` + `/api/brain/search` + `/api/brain/     |
 |              | pages/{slug}`                                                |
 | MLFLOW       | `/api/mlflow/status` (when `MLFLOW_TRACKING_URI` set)        |
+| IMPROVE      | `/api/improvements/runs` + `/api/improvements/suggestions`   |
+|              | + accept/dismiss POST routes                                 |
 
 ---
 
@@ -650,6 +658,41 @@ drives BootstrapFewShot or MIPROv2. Cockpit's Reports tab DSPy
 panel kicks off compiles via `/api/dspy/optimize/{slug}`. CI gate
 (`prompt-alias-gate.yml`) blocks merge on `policy_adherence`
 regression.
+
+### Track 8 — Improvement Auditor
+
+Operator-triggered audit loop. The cockpit's `[IMPROVE]` tab has an
+`audit now` button that POSTs `/api/improvements/run`; a daemon
+thread fires `app.agents.improvement_auditor.run_audit(run_id, llm)`
+which:
+
+1. Calls `gather_signals()` — pure-Python, deterministic. Walks
+   substrate KPIs, flagged categories, inventory health, action-queue
+   depth, store exceptions, integration mode, wiki coverage gaps,
+   recent agent decisions. Returns one structured dict.
+2. Builds an `Agent` with a single tool, `record_suggestion`. Closes
+   over `run_id` so the agent doesn't re-pass it.
+3. Drives the agent over the signals snapshot. The agent emits 3-8
+   suggestions via the tool; each call validates `area` / `severity`
+   / `action_hint` against an enum and writes a row to
+   `improvement_suggestions`.
+4. Flips `improvement_runs.status` to `ok` / `error` and appends an
+   `observation` event to the spine.
+
+The agent is **read-only** — it never proposes outbox actions, never
+edits substrate, never publishes wiki pages. Operator decides what
+to do with each suggestion via `accept` (status flips to `accepted`)
+or `dismiss` (`dismissed`). Future integrations can pivot accepted
+suggestions into outbox actions; the current scope stops at
+operator review.
+
+Schema: two new tables — `improvement_runs(id, started_ts, ended_ts,
+status, summary_json, error)` and `improvement_suggestions(id, run_id,
+area, severity, title, body_md, action_hint, status, refs_json, ts)`.
+
+Status strip surfaces a `⚡ improve N` chip when N ≥ 1 open
+suggestions exist — same chip pattern as the wiki-pinned and brain
+chips. Hover shows the top 8 titles inline.
 
 ---
 
