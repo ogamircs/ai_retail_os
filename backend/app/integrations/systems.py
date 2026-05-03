@@ -2671,13 +2671,16 @@ class ShopifyAdapter(IntegrationAdapter):
             data = self._gql(query, params)
             conn_obj = data.get(root_key) or {}
             edges = conn_obj.get("edges") or []
-            for edge in edges:
+            for idx, edge in enumerate(edges):
                 node = edge.get("node")
                 if isinstance(node, dict):
                     out.append(node)
                 if max_rows is not None and len(out) >= max_rows:
                     page_info = conn_obj.get("pageInfo") or {}
-                    truncated = bool(page_info.get("hasNextPage"))
+                    # Truncated if we stopped mid-page (more edges left here)
+                    # OR there's another page we won't fetch.
+                    more_in_page = idx < len(edges) - 1
+                    truncated = more_in_page or bool(page_info.get("hasNextPage"))
                     return out, truncated
             page_info = conn_obj.get("pageInfo") or {}
             if not page_info.get("hasNextPage"):
@@ -3092,7 +3095,12 @@ class ShopifyAdapter(IntegrationAdapter):
         """
         from datetime import datetime, timedelta, timezone
 
-        pct = float(payload.get("discount_pct") or payload.get("percentage") or 0.20)
+        pct = float(
+            payload.get("discount_pct")
+            or payload.get("discount_percent")
+            or payload.get("percentage")
+            or 0.20
+        )
         if pct > 1:
             pct = pct / 100.0
         starts = datetime.now(timezone.utc).replace(microsecond=0)

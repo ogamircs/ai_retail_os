@@ -1782,6 +1782,70 @@ class IntegrationLayerTest(unittest.TestCase):
         pct = captured["variables"]["automaticBasicDiscount"]["customerGets"]["value"]["percentage"]
         self.assertAlmostEqual(pct, 0.25, places=4)
 
+    def test_shopify_apply_promotion_reads_discount_percent_field(self):
+        """The agent/improvement_auditor flow emits `discount_percent` (not
+        `discount_pct`). Adapter must honour that key, otherwise approved
+        promotions silently fall back to the 20% default.
+        """
+        from app.integrations import store as adapter_store
+        from app.integrations.systems import ShopifyAdapter
+
+        os.environ["SHOPIFY_SHOP_DOMAIN"] = "demo.myshopify.com"
+        os.environ["SHOPIFY_ADMIN_TOKEN"] = "shpat_demo"
+        adapter = ShopifyAdapter()
+
+        captured: dict = {}
+
+        def _stub_gql(query: str, variables=None):
+            captured["variables"] = variables
+            return {
+                "discountAutomaticBasicCreate": {
+                    "automaticDiscountNode": {"id": "gid://shopify/DiscountAutomaticNode/9002"},
+                    "userErrors": [],
+                }
+            }
+
+        adapter._gql = _stub_gql  # type: ignore[method-assign]
+        row = adapter_store.create_outbox_action(
+            system_id="shopify",
+            action_queue_id=None,
+            agent="Pricing & Promo",
+            action_type="promotion",
+            title="Winter outerwear 35% off",
+            external_domain="Discount",
+            payload={"category": "outerwear", "discount_percent": 0.35},
+            configured=True,
+        )
+        result = adapter.apply_outbound(row["id"])
+        self.assertEqual(result["status"], "draft_created", msg=result)
+        pct = captured["variables"]["automaticBasicDiscount"]["customerGets"]["value"]["percentage"]
+        self.assertAlmostEqual(pct, 0.35, places=4)
+
+    def test_shopify_gql_list_flags_truncation_when_cap_hits_mid_page(self):
+        """`max_rows` reached mid-page must yield truncated=True even if
+        the current page is the last one (`hasNextPage=false`); otherwise
+        `_live_sync` reports `success` despite dropping rows.
+        """
+        from app.integrations.systems import ShopifyAdapter
+
+        os.environ["SHOPIFY_SHOP_DOMAIN"] = "demo.myshopify.com"
+        os.environ["SHOPIFY_ADMIN_TOKEN"] = "shpat_demo"
+
+        adapter = ShopifyAdapter()
+        adapter._gql = lambda q, v=None: {  # type: ignore[method-assign]
+            "products": {
+                "edges": [
+                    {"node": {"id": "gid://shopify/Product/1"}},
+                    {"node": {"id": "gid://shopify/Product/2"}},
+                    {"node": {"id": "gid://shopify/Product/3"}},
+                ],
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+            }
+        }
+        out, truncated = adapter._gql_list("query", "products", max_rows=2)
+        self.assertEqual(len(out), 2)
+        self.assertTrue(truncated, "must flag truncation when rows dropped from current page")
+
     def test_shopify_apply_fulfillment_routing_stashes_metafield(self):
         """fulfillment_routing → find location by retail_os.store_id metafield,
         append routing entry to retail_os.routing_log, return location external_id.
