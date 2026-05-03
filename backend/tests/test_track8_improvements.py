@@ -212,14 +212,10 @@ class RecordSuggestionToolTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_tool_rejects_invalid_severity(self):
-        from app.agents.improvement_auditor import (
-            _build_record_suggestion_tool,
-            create_run,
-        )
+        from app.agents.improvement_auditor import SuggestionRecorder, create_run
 
         create_run("r1")
-        _, impl, _ = _build_record_suggestion_tool("r1")
-        out = impl(
+        out = SuggestionRecorder("r1").record(
             {
                 "area": "pricing",
                 "severity": "URGENT",
@@ -231,14 +227,10 @@ class RecordSuggestionToolTest(unittest.TestCase):
         self.assertIn("severity", out["error"])
 
     def test_tool_rejects_invalid_area(self):
-        from app.agents.improvement_auditor import (
-            _build_record_suggestion_tool,
-            create_run,
-        )
+        from app.agents.improvement_auditor import SuggestionRecorder, create_run
 
         create_run("r1")
-        _, impl, _ = _build_record_suggestion_tool("r1")
-        out = impl(
+        out = SuggestionRecorder("r1").record(
             {
                 "area": "bogus_area",
                 "severity": "high",
@@ -252,14 +244,14 @@ class RecordSuggestionToolTest(unittest.TestCase):
     def test_tool_caps_at_max_per_run(self):
         from app.agents.improvement_auditor import (
             MAX_SUGGESTIONS_PER_RUN,
-            _build_record_suggestion_tool,
+            SuggestionRecorder,
             create_run,
         )
 
         create_run("r1")
-        _, impl, counter = _build_record_suggestion_tool("r1")
+        recorder = SuggestionRecorder("r1")
         for i in range(MAX_SUGGESTIONS_PER_RUN):
-            out = impl(
+            out = recorder.record(
                 {
                     "area": "pricing",
                     "severity": "low",
@@ -268,8 +260,7 @@ class RecordSuggestionToolTest(unittest.TestCase):
                 }
             )
             self.assertIn("suggestion_id", out)
-        # N+1 must error out.
-        out = impl(
+        out = recorder.record(
             {
                 "area": "pricing",
                 "severity": "low",
@@ -278,7 +269,7 @@ class RecordSuggestionToolTest(unittest.TestCase):
             }
         )
         self.assertIn("error", out)
-        self.assertEqual(counter["n"], MAX_SUGGESTIONS_PER_RUN)
+        self.assertEqual(recorder.count, MAX_SUGGESTIONS_PER_RUN)
 
 
 class ImprovementsApiRoutesTest(unittest.TestCase):

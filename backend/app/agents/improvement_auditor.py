@@ -37,14 +37,14 @@ from __future__ import annotations
 import json
 import time
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
-from app.agents.base import Agent, AgentEvent
+from app.agents.base import Agent
 from app.llm.base import LLMProvider, Tool
 from app.llm.prompts import resolve_prompt
 from app.spine import db, wiki as wiki_store
 from app.spine.events import append_event, list_events
-from app.substrate import omnichannel, pos
+from app.substrate import omnichannel
 
 
 NAME = "Improvement Auditor"
@@ -91,13 +91,19 @@ Output exactly:
 """
 
 
-# ---------------------------------------------------------------------------
-# Signal gathering — deterministic; the LLM consumes the dict it returns.
-# ---------------------------------------------------------------------------
-
-
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _safe(signals: dict[str, Any], key: str, fn: Callable[[], Any]) -> None:
+    """Run `fn()` and stash result under `key`; on exception, stash the
+    error under `<key>_error`. Each signal source can fail independently
+    without aborting the whole snapshot — the audit still surfaces what
+    it could collect."""
+    try:
+        signals[key] = fn()
+    except Exception as exc:
+        signals[f"{key}_error"] = str(exc)
 
 
 def gather_signals(
@@ -109,24 +115,18 @@ def gather_signals(
     `/api/improvements/signals` for debugging."""
     signals: dict[str, Any] = {"generated_ts": _now_iso()}
 
-    # --- KPIs ---
-    try:
-        kpis = omnichannel.executive_kpis()
-        signals["kpis"] = kpis
-    except Exception as exc:
-        signals["kpis_error"] = str(exc)
+    _safe(signals, "kpis", omnichannel.executive_kpis)
 
-    # --- Categories — flag weak sell-through + overstock ---
-    try:
+    def _flagged_categories():
         cats = omnichannel.list_categories()
-        flagged_cats = []
+        flagged = []
         for c in cats:
             sell_through = c.get("sales_units", 0) / max(c.get("on_hand", 1), 1)
             margin_rate = c.get("margin_rate", 0)
             if sell_through < weak_sell_through_threshold or margin_rate < c.get(
                 "margin_target", 0.30
             ):
-                flagged_cats.append(
+                flagged.append(
                     {
                         "category": c.get("category"),
                         "display_name": c.get("display_name"),
@@ -139,27 +139,28 @@ def gather_signals(
                         "active_campaigns": c.get("active_campaigns"),
                     }
                 )
-        signals["categories_flagged"] = flagged_cats
         signals["categories_total"] = len(cats)
-    except Exception as exc:
-        signals["categories_error"] = str(exc)
+        return flagged
 
-    # --- Inventory health: vendor risk + inbound POs ---
-    try:
+    _safe(signals, "categories_flagged", _flagged_categories)
+
+    def _inventory_summary():
         inv = omnichannel.inventory_health()
-        signals["inventory_summary"] = {
+        return {
             "categories_at_risk": inv.get("categories_at_risk", []),
             "supplier_risks": inv.get("supplier_risks", []),
             "inbound_pos": inv.get("inbound_pos", []),
         }
-    except Exception as exc:
-        signals["inventory_error"] = str(exc)
 
-    # --- Action queue — pending approvals ---
-    try:
+    _safe(signals, "inventory_summary", _inventory_summary)
+
+    def _pending_actions():
         actions = omnichannel.list_action_queue()
-        pending = [a for a in actions if a.get("status") in ("pending", "approval_required")]
-        signals["pending_actions"] = [
+        pending = [
+            a for a in actions if a.get("status") in ("pending", "approval_required")
+        ]
+        signals["pending_actions_count"] = len(pending)
+        return [
             {
                 "id": a.get("id"),
                 "action_type": a.get("action_type"),
@@ -170,14 +171,13 @@ def gather_signals(
             }
             for a in pending[:20]
         ]
-        signals["pending_actions_count"] = len(pending)
-    except Exception as exc:
-        signals["actions_error"] = str(exc)
 
-    # --- Stores — capacity / labor exceptions ---
-    try:
+    _safe(signals, "pending_actions", _pending_actions)
+
+    def _flagged_stores():
         stores = omnichannel.list_stores()
-        flagged_stores = [
+        signals["stores_total"] = len(stores)
+        return [
             {
                 "store_id": s.get("store_id"),
                 "name": s.get("name"),
@@ -185,35 +185,31 @@ def gather_signals(
                 "local_demand_signal": s.get("local_demand_signal"),
             }
             for s in stores
-            if s.get("labor_pressure", 0) > 0.7 or s.get("local_demand_signal", 0) > 0.7
+            if s.get("labor_pressure", 0) > 0.7
+            or s.get("local_demand_signal", 0) > 0.7
         ]
-        signals["stores_flagged"] = flagged_stores
-        signals["stores_total"] = len(stores)
-    except Exception as exc:
-        signals["stores_error"] = str(exc)
 
-    # --- Wiki coverage — which categories lack a policy/playbook page? ---
-    try:
+    _safe(signals, "stores_flagged", _flagged_stores)
+
+    def _wiki_coverage():
         all_pages = wiki_store.list_pages(status="published", limit=500)
-        slugs = [p.slug for p in all_pages]
-        cat_names = [c.get("category") for c in (signals.get("categories_flagged") or [])]
-        coverage_gaps: list[str] = []
-        for cat in cat_names:
-            if not cat:
-                continue
-            if not any(cat in s for s in slugs):
-                coverage_gaps.append(cat)
-        signals["wiki"] = {
+        slug_blob = "\n".join(p.slug for p in all_pages)
+        cat_names = [
+            c.get("category") for c in (signals.get("categories_flagged") or [])
+        ]
+        coverage_gaps = [
+            cat for cat in cat_names if cat and cat not in slug_blob
+        ]
+        return {
             "published_pages": len(all_pages),
             "coverage_gaps": coverage_gaps,
         }
-    except Exception as exc:
-        signals["wiki_error"] = str(exc)
 
-    # --- Recent agent decisions — narrative for the LLM ---
-    try:
+    _safe(signals, "wiki", _wiki_coverage)
+
+    def _recent_events():
         events = list_events(limit=recent_events_limit)
-        signals["recent_events"] = [
+        return [
             {
                 "ts": e.get("ts"),
                 "agent": e.get("agent"),
@@ -223,32 +219,25 @@ def gather_signals(
             }
             for e in events
         ]
-    except Exception as exc:
-        signals["events_error"] = str(exc)
 
-    # --- Integration mode ---
-    try:
+    _safe(signals, "recent_events", _recent_events)
+
+    def _integrations():
         from app.integrations import registry as ireg
 
-        systems = ireg.list_systems()
-        signals["integrations"] = [
+        return [
             {
                 "system_id": s.get("system_id"),
                 "mode": s.get("mode"),
                 "configured": s.get("configured"),
                 "last_sync": s.get("last_sync_ts"),
             }
-            for s in systems
+            for s in ireg.list_systems()
         ]
-    except Exception as exc:
-        signals["integrations_error"] = str(exc)
+
+    _safe(signals, "integrations", _integrations)
 
     return signals
-
-
-# ---------------------------------------------------------------------------
-# Run lifecycle — store rows in improvement_runs / improvement_suggestions.
-# ---------------------------------------------------------------------------
 
 
 def create_run(run_id: str) -> dict:
@@ -393,11 +382,6 @@ def _row_to_suggestion(row) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# Agent — tool builder + prompt + driver.
-# ---------------------------------------------------------------------------
-
-
 _VALID_SEVERITIES = ("high", "medium", "low")
 _VALID_AREAS = (
     "pricing",
@@ -420,13 +404,22 @@ _VALID_ACTION_HINTS = (
 MAX_SUGGESTIONS_PER_RUN = 8
 
 
-def _build_record_suggestion_tool(run_id: str):
-    """Construct the agent's only tool. Closes over `run_id` so the
-    agent doesn't have to remember it on each call."""
-    counter = {"n": 0}
+class SuggestionRecorder:
+    """Per-run cap + validation + persistence for `record_suggestion`.
 
-    def _impl(args: dict) -> dict:
-        if counter["n"] >= MAX_SUGGESTIONS_PER_RUN:
+    Wraps the cap counter so the driver can read `count` without
+    reaching into a closure-over-dict. `run_id` isolates each audit
+    run and only one agent ever sees a given recorder, so a plain
+    in-process counter is sufficient — this is *not* the wiki-curator
+    pattern (which counts via the spine event log because concurrent
+    `/api/chat` turns share state)."""
+
+    def __init__(self, run_id: str):
+        self.run_id = run_id
+        self.count = 0
+
+    def record(self, args: dict) -> dict:
+        if self.count >= MAX_SUGGESTIONS_PER_RUN:
             return {
                 "error": (
                     f"max {MAX_SUGGESTIONS_PER_RUN} suggestions per run reached"
@@ -454,7 +447,7 @@ def _build_record_suggestion_tool(run_id: str):
             return {"error": "title and body_md are required"}
 
         suggestion = record_suggestion(
-            run_id=run_id,
+            run_id=self.run_id,
             area=area,
             severity=severity,
             title=title,
@@ -462,55 +455,54 @@ def _build_record_suggestion_tool(run_id: str):
             action_hint=action_hint,
             refs=[str(r) for r in refs if isinstance(r, (str, int))],
         )
-        counter["n"] += 1
+        self.count += 1
         return {
             "suggestion_id": suggestion["id"],
-            "count_so_far": counter["n"],
-            "remaining_quota": MAX_SUGGESTIONS_PER_RUN - counter["n"],
+            "count_so_far": self.count,
+            "remaining_quota": MAX_SUGGESTIONS_PER_RUN - self.count,
         }
 
-    tool = Tool(
-        name="record_suggestion",
-        description=(
-            "Persist one improvement suggestion for the current audit "
-            "run. The cockpit's [IMPROVE] tab will surface it for the "
-            "operator. Title is one line; body_md is 3-6 bullets with "
-            "concrete numbers from the signals snapshot. `refs` is an "
-            "optional list of spine event ids / artifact ids that "
-            "ground the suggestion."
-        ),
-        input_schema={
-            "type": "object",
-            "properties": {
-                "area": {"type": "string", "enum": list(_VALID_AREAS)},
-                "severity": {"type": "string", "enum": list(_VALID_SEVERITIES)},
-                "title": {"type": "string"},
-                "body_md": {"type": "string"},
-                "action_hint": {
-                    "type": "string",
-                    "enum": list(_VALID_ACTION_HINTS),
-                },
-                "refs": {"type": "array", "items": {"type": "string"}},
+
+_RECORD_SUGGESTION_TOOL = Tool(
+    name="record_suggestion",
+    description=(
+        "Persist one improvement suggestion for the current audit "
+        "run. The cockpit's [IMPROVE] tab will surface it for the "
+        "operator. Title is one line; body_md is 3-6 bullets with "
+        "concrete numbers from the signals snapshot. `refs` is an "
+        "optional list of spine event ids / artifact ids that "
+        "ground the suggestion."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "area": {"type": "string", "enum": list(_VALID_AREAS)},
+            "severity": {"type": "string", "enum": list(_VALID_SEVERITIES)},
+            "title": {"type": "string"},
+            "body_md": {"type": "string"},
+            "action_hint": {
+                "type": "string",
+                "enum": list(_VALID_ACTION_HINTS),
             },
-            "required": ["area", "severity", "title", "body_md"],
+            "refs": {"type": "array", "items": {"type": "string"}},
         },
-    )
-    return tool, _impl, counter
+        "required": ["area", "severity", "title", "body_md"],
+    },
+)
 
 
-def build_agent(run_id: str) -> tuple[Agent, dict]:
-    """Build the audit agent. Returns the agent + the counter dict so
-    the driver can read final emission count without parsing the LLM
-    output."""
-    tool, impl, counter = _build_record_suggestion_tool(run_id)
+def build_agent(run_id: str) -> tuple[Agent, SuggestionRecorder]:
+    """Build the audit agent + its suggestion recorder. The recorder's
+    `.count` is the source of truth for how many suggestions landed."""
+    recorder = SuggestionRecorder(run_id)
     agent = Agent(
         name=NAME,
         system_prompt=resolve_prompt(NAME, SYSTEM),
-        tools=[tool],
-        tool_impls={"record_suggestion": impl},
+        tools=[_RECORD_SUGGESTION_TOOL],
+        tool_impls={"record_suggestion": recorder.record},
         max_iters=12,
     )
-    return agent, counter
+    return agent, recorder
 
 
 def run_audit(run_id: str, llm: LLMProvider) -> dict:
@@ -525,7 +517,7 @@ def run_audit(run_id: str, llm: LLMProvider) -> dict:
         complete_run(run_id, {"phase": "gather_signals"}, error=str(exc))
         return {"status": "error", "error": str(exc)}
 
-    agent, counter = build_agent(run_id)
+    agent, recorder = build_agent(run_id)
     task = (
         "The cockpit just collected the following signals. Walk them, "
         "pick 3-8 concrete improvements worth surfacing, and emit one "
@@ -548,7 +540,7 @@ def run_audit(run_id: str, llm: LLMProvider) -> dict:
 
     elapsed_s = round(time.monotonic() - t0, 2)
     summary = {
-        "suggestions": counter["n"],
+        "suggestions": recorder.count,
         "elapsed_s": elapsed_s,
         "agent_final_text": final_text[:200],
         "signals_keys": sorted(signals.keys()),

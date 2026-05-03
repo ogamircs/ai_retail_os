@@ -503,9 +503,10 @@ export async function listImprovementSuggestions(
 export async function acceptImprovementSuggestion(
   id: number,
 ): Promise<ImprovementSuggestion> {
-  const r = await fetch(`/api/improvements/suggestions/${id}/accept`, {
-    method: "POST",
-  });
+  const r = await fetch(
+    `/api/improvements/suggestions/${encodeURIComponent(id)}/accept`,
+    { method: "POST" },
+  );
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
@@ -513,9 +514,10 @@ export async function acceptImprovementSuggestion(
 export async function dismissImprovementSuggestion(
   id: number,
 ): Promise<ImprovementSuggestion> {
-  const r = await fetch(`/api/improvements/suggestions/${id}/dismiss`, {
-    method: "POST",
-  });
+  const r = await fetch(
+    `/api/improvements/suggestions/${encodeURIComponent(id)}/dismiss`,
+    { method: "POST" },
+  );
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
