@@ -401,18 +401,18 @@ class DspyApiRoutesTest(unittest.TestCase):
 
     def test_compile_route_kicks_off_background_job(self):
         # Patch the worker so the test doesn't need dspy-ai.
-        from app import main as main_mod
+        from app.routes import dspy as dspy_route
 
         called: dict = {}
 
         def _fake_worker(job_id: str, agent_slug: str, auto_promote: bool):
             called["job_id"] = job_id
-            with main_mod._DSPY_JOBS_LOCK:
-                main_mod._DSPY_JOBS[job_id].update(
+            with dspy_route._DSPY_JOBS_LOCK:
+                dspy_route._DSPY_JOBS[job_id].update(
                     {"status": "ok", "summary": {"version": "v9"}}
                 )
 
-        with mock.patch.object(main_mod, "_run_dspy_compile_job", _fake_worker):
+        with mock.patch.object(dspy_route, "_run_dspy_compile_job", _fake_worker):
             r = self.client.post("/api/dspy/optimize/analyst")
         self.assertEqual(r.status_code, 200)
         body = r.json()
