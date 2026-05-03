@@ -1669,6 +1669,76 @@ class IntegrationLayerTest(unittest.TestCase):
         recovered_skus = {r.get("local_id") for r in prod_bundle["external_refs"]}
         self.assertIn("sku-linen-short", recovered_skus)
 
+    def test_shopify_live_sync_paginates_nested_inventory_levels(self):
+        """Items stocked in >100 locations expose a second page via
+        `inventoryLevels.pageInfo.hasNextPage`; the live sync must walk
+        that nested connection (not silently truncate) so multi-location
+        stores end up with every (item × location) row in record_cache.
+        """
+        from app.integrations import store as adapter_store
+        from app.integrations.systems import ShopifyAdapter
+
+        os.environ["SHOPIFY_SHOP_DOMAIN"] = "demo.myshopify.com"
+        os.environ["SHOPIFY_ADMIN_TOKEN"] = "shpat_demo"
+
+        adapter = ShopifyAdapter()
+
+        first_page_node = {
+            "id": "gid://shopify/InventoryItem/55",
+            "sku": "sku-multi-loc",
+            "inventoryLevels": {
+                "edges": [
+                    {
+                        "node": {
+                            "location": {"id": "gid://shopify/Location/91"},
+                            "quantities": [{"name": "available", "quantity": 5}],
+                        }
+                    }
+                ],
+                "pageInfo": {"hasNextPage": True, "endCursor": "ic-cursor"},
+            },
+        }
+
+        def _stub_gql_list(query: str, root_key: str, variables=None, max_rows=None):
+            if root_key == "inventoryItems":
+                return ([first_page_node], False)
+            return ([], False)
+
+        gql_calls: list[dict] = []
+
+        def _stub_gql(query: str, variables=None):
+            gql_calls.append({"query": query, "variables": variables})
+            return {
+                "inventoryItem": {
+                    "inventoryLevels": {
+                        "edges": [
+                            {
+                                "node": {
+                                    "location": {"id": "gid://shopify/Location/92"},
+                                    "quantities": [{"name": "available", "quantity": 3}],
+                                }
+                            }
+                        ],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    }
+                }
+            }
+
+        adapter._gql_list = _stub_gql_list  # type: ignore[method-assign]
+        adapter._gql = _stub_gql  # type: ignore[method-assign]
+        result = adapter._live_sync()
+
+        self.assertEqual(result.status, "success")
+        self.assertEqual(result.summary["domains"]["Inventory Level"], 2)
+        self.assertEqual(len(gql_calls), 1)
+        self.assertEqual(gql_calls[0]["variables"]["id"], "gid://shopify/InventoryItem/55")
+        self.assertEqual(gql_calls[0]["variables"]["cursor"], "ic-cursor")
+
+        bundle = adapter_store.list_records(system_id="shopify", domain="Inventory Level", limit=20)
+        external_ids = {r.get("external_id") for r in bundle["records"]}
+        self.assertIn("55:91", external_ids)
+        self.assertIn("55:92", external_ids)
+
     def test_shopify_apply_promotion_creates_automatic_discount(self):
         """promotion → discountAutomaticBasicCreate; external_id is the
         numeric tail of the returned automatic-discount gid.

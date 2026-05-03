@@ -434,7 +434,7 @@ def upsert_inventory(
             msg = (e.get("message") or "").lower()
             if "already" not in msg and "exists" not in msg:
                 raise RuntimeError(f"inventoryActivate userErrors: {json.dumps(errs)}")
-        gql(
+        set_result = gql(
             INVENTORY_SET_QTY,
             {
                 "input": {
@@ -447,6 +447,7 @@ def upsert_inventory(
                 }
             },
         )
+        _user_errors(set_result.get("inventorySetQuantities"), "inventorySetQuantities")
         set_count += 1
     print(f"== inventory levels set: {set_count}")
     return set_count

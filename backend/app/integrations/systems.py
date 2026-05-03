@@ -2754,17 +2754,34 @@ class ShopifyAdapter(IntegrationAdapter):
           node {
             id
             sku
-            inventoryLevels(first: 20) {
+            inventoryLevels(first: 100) {
               edges {
                 node {
                   location { id name }
                   quantities(names: ["available"]) { name quantity }
                 }
               }
+              pageInfo { hasNextPage endCursor }
             }
           }
         }
         pageInfo { hasNextPage endCursor }
+      }
+    }
+    """
+
+    INVENTORY_LEVELS_Q = """
+    query ShopifyInventoryLevels($id: ID!, $cursor: String) {
+      inventoryItem(id: $id) {
+        inventoryLevels(first: 100, after: $cursor) {
+          edges {
+            node {
+              location { id name }
+              quantities(names: ["available"]) { name quantity }
+            }
+          }
+          pageInfo { hasNextPage endCursor }
+        }
       }
     }
     """
@@ -2833,26 +2850,45 @@ class ShopifyAdapter(IntegrationAdapter):
         # pair; local_id is the SKU so the cockpit drawer can drill from a
         # substrate SKU to every per-location row.
         inv_items, inv_trunc = self._gql_list(self.INVENTORY_Q, "inventoryItems", max_rows=max_rows)
+
+        def _ingest_level_node(node: dict[str, Any], item_id: str, sku: str | None) -> None:
+            nonlocal records_written, records_read
+            loc_id = _shopify_gid_tail(((node.get("location") or {}).get("id")))
+            qty_rows = node.get("quantities") or []
+            qty = next(
+                (q.get("quantity") for q in qty_rows if (q or {}).get("name") == "available"),
+                None,
+            )
+            external_id = f"{item_id}:{loc_id}"
+            payload = {"inventory_item_id": item_id, "location_id": loc_id, "available": qty, "sku": sku}
+            self._cache("Inventory Level", external_id, payload, sku)
+            domains["Inventory Level"] = domains.get("Inventory Level", 0) + 1
+            records_written += 1
+            records_read += 1
+
         for item in inv_items:
             sku = item.get("sku")
             item_id = _shopify_gid_tail(item.get("id"))
             if not item_id:
                 continue
-            level_edges = ((item.get("inventoryLevels") or {}).get("edges") or [])
-            for edge in level_edges:
+            levels_conn = item.get("inventoryLevels") or {}
+            for edge in levels_conn.get("edges") or []:
                 node = edge.get("node") or {}
-                loc_id = _shopify_gid_tail(((node.get("location") or {}).get("id")))
-                qty_rows = node.get("quantities") or []
-                qty = next(
-                    (q.get("quantity") for q in qty_rows if (q or {}).get("name") == "available"),
-                    None,
+                _ingest_level_node(node, item_id, sku)
+            # Walk additional pages for items stocked in >100 locations.
+            page_info = levels_conn.get("pageInfo") or {}
+            cursor = page_info.get("endCursor") if page_info.get("hasNextPage") else None
+            while cursor:
+                data = self._gql(
+                    self.INVENTORY_LEVELS_Q,
+                    {"id": item.get("id"), "cursor": cursor},
                 )
-                external_id = f"{item_id}:{loc_id}"
-                payload = {"inventory_item_id": item_id, "location_id": loc_id, "available": qty, "sku": sku}
-                self._cache("Inventory Level", external_id, payload, sku)
-                domains["Inventory Level"] = domains.get("Inventory Level", 0) + 1
-                records_written += 1
-                records_read += 1
+                next_conn = ((data or {}).get("inventoryItem") or {}).get("inventoryLevels") or {}
+                for edge in next_conn.get("edges") or []:
+                    node = edge.get("node") or {}
+                    _ingest_level_node(node, item_id, sku)
+                next_page = next_conn.get("pageInfo") or {}
+                cursor = next_page.get("endCursor") if next_page.get("hasNextPage") else None
         if inv_trunc:
             truncated_domains.append("Inventory Level")
 
