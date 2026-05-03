@@ -140,3 +140,34 @@
   color: var(--warn);
   margin-left: auto;
 }
+
+/* Track 8 — Improvement Auditor controls. */
+.improve-run-button {
+  background: var(--amber);
+  color: var(--bg);
+  border: none;
+  padding: 4px 12px;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 600;
+}
+.improve-run-button:hover:not(:disabled) { filter: brightness(1.1); }
+.improve-run-button:disabled {
+  background: var(--ink-mute);
+  cursor: wait;
+}
+.improve-actions {
+  display: flex;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-top: 1px dashed var(--line);
+}
+.improve-actions button {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--ink);
+  padding: 4px 12px;
+  cursor: pointer;
+  font: inherit;
+}
+.improve-actions button:hover { border-color: var(--amber); color: var(--amber); }
