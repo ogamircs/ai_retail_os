@@ -28,7 +28,8 @@ MLFLOW_COMPOSE := docker compose -p ai-retail-mlflow -f $(MLFLOW_DIR)/docker-com
         openboxes-up openboxes-down openboxes-bootstrap openboxes-seed openboxes-logs openboxes-status openboxes-nuke openboxes-config \
         akeneo-up akeneo-down akeneo-bootstrap akeneo-seed akeneo-logs akeneo-status akeneo-nuke \
         superset-up superset-down superset-bootstrap superset-seed superset-logs superset-status superset-nuke \
-        mlflow-up mlflow-down mlflow-logs mlflow-status mlflow-nuke
+        mlflow-up mlflow-down mlflow-logs mlflow-status mlflow-nuke \
+        shopify-seed
 
 help:
 	@echo "ERPNext:"
@@ -91,6 +92,9 @@ help:
 	@echo "  mlflow-logs           tail logs from the stack"
 	@echo "  mlflow-down           stop the stack (volumes preserved)"
 	@echo "  mlflow-nuke           stop and wipe volumes (full reset)"
+	@echo ""
+	@echo "Shopify Plus (cloud-hosted, no local stack):"
+	@echo "  shopify-seed          project the spine demo data into a Shopify dev store (idempotent)"
 
 erpnext-up:
 	$(ERPNEXT_COMPOSE) up -d
@@ -235,6 +239,9 @@ mlflow-status:
 
 mlflow-logs:
 	$(MLFLOW_COMPOSE) logs -f --tail=50
+
+shopify-seed:
+	python3 infra/shopify/seed.py
 
 # Track 6 — GBrain. Not a docker-compose stack — GBrain is a Bun-native
 # CLI installed via `git clone + bun install + bun link`. These targets
