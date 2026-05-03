@@ -1,6 +1,7 @@
 import contextvars
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+
 from app.spine.db import conn
 
 # Per-turn id propagated through every append_event call inside a
@@ -21,7 +22,7 @@ def append_event(
     sku: str | None = None,
     artifact_id: str | None = None,
 ) -> int:
-    ts = datetime.now(timezone.utc).isoformat()
+    ts = datetime.now(UTC).isoformat()
     # Auto-stamp the active turn id into the payload so per-turn
     # walkers (auto-publish, curator) can filter their event windows
     # without disturbing the rest of the runtime.

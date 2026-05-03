@@ -1,11 +1,12 @@
 """Populate spine.db with mock SKUs, inventory, sales. Run as `python -m app.substrate.seed`."""
 
-import random
-from datetime import datetime, timedelta, timezone
 import json
-from app.spine.db import conn, init_db
-from app.spine.kg import upsert_node, upsert_edge
+import random
+from datetime import UTC, datetime, timedelta
+
 from app.integrations import registry as integration_registry
+from app.spine.db import conn, init_db
+from app.spine.kg import upsert_edge, upsert_node
 
 random.seed(42)
 
@@ -223,8 +224,8 @@ def seed() -> None:
                 )
 
         # 90 days sales — summer apparel sales taper (overstock signal)
-        now = datetime.now(timezone.utc)
-        for sku, name, category, vendor, price in all_skus:
+        now = datetime.now(UTC)
+        for sku, _name, category, _vendor, price in all_skus:
             base = random.randint(1, 8)
             for d in range(90, 0, -1):
                 ts = (now - timedelta(days=d)).isoformat()

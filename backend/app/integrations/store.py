@@ -4,8 +4,8 @@ import hashlib
 import json
 from typing import Any
 
-from app.spine.db import conn
 from app.integrations.base import utc_now
+from app.spine.db import conn
 
 
 def _json(data: Any) -> str:

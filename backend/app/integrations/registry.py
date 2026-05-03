@@ -3,10 +3,8 @@ from __future__ import annotations
 from typing import Any
 
 from app.integrations import store
-from app.integrations.base import IntegrationResult
 from app.integrations.systems import ADAPTERS
 from app.spine.events import append_event
-
 
 ADAPTER_BY_ID = {adapter.definition.system_id: adapter for adapter in ADAPTERS}
 ADAPTER_ORDER = {adapter.definition.system_id: index for index, adapter in enumerate(ADAPTERS)}

@@ -20,19 +20,19 @@ from __future__ import annotations
 import os
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
-from app.agents.base import Agent
 from app.agents._mesh_tools import (
     build_read_artifact_tool,
     build_wiki_propose_edit_tool,
     build_wiki_read_tool,
     build_wiki_search_tool,
 )
-from app.llm.base import LLMProvider, Tool
+from app.agents.base import Agent
+from app.llm.base import LLMProvider
 from app.llm.prompts import resolve_prompt
-from app.spine.events import append_event, events_for_turn, events_since_ts
 from app.spine.artifacts import read_artifact
+from app.spine.events import append_event, events_for_turn, events_since_ts
 
 NAME = "Wiki Curator"
 
@@ -77,7 +77,7 @@ def _check_rate_limit(slug: str) -> bool:
     Walks recent wiki_edit events and rejects if any was authored by
     the Curator within the rate-limit window for this slug.
     """
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=PER_SLUG_RATE_LIMIT_HOURS)).isoformat()
+    cutoff = (datetime.now(UTC) - timedelta(hours=PER_SLUG_RATE_LIMIT_HOURS)).isoformat()
     recent = events_since_ts(cutoff)
     for ev in recent:
         if ev.get("kind") != "wiki_edit":
@@ -180,7 +180,7 @@ def build_agent(
     `turn_id` (optional) further scopes counters to a specific turn so
     concurrent /api/chat requests don't share the cap."""
     if turn_start_iso is None:
-        turn_start_iso = datetime.now(timezone.utc).isoformat()
+        turn_start_iso = datetime.now(UTC).isoformat()
     impls = {
         "read_artifact": _read_artifact_impl,
         "wiki_search": _wiki_search_impl,

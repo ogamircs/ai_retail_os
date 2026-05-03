@@ -17,21 +17,12 @@ Track 2 A2-A6 wires the agent mesh:
 
 from __future__ import annotations
 
-import json
 import re
 import time
 import uuid
 from collections.abc import Iterator
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from app.agents.base import Agent, AgentEvent
-from app.config import mesh as mesh_settings
-from app.llm.base import LLMProvider, Tool
-from app.llm.prompts import resolve_prompt
-from app.llm import tracing as mesh_tracing
-from app.spine.events import append_event, events_for_turn, events_since_ts, current_turn_id
-from app.spine.artifacts import read_artifact, update_artifact_stage, write_artifact
-from app.spine import wiki as wiki_store
 from app.agents import (
     analyst,
     critic,
@@ -43,6 +34,14 @@ from app.agents import (
     store_manager,
 )
 from app.agents._mesh_tools import peer_review_task_for, revise_task_for
+from app.agents.base import Agent, AgentEvent
+from app.config import mesh as mesh_settings
+from app.llm import tracing as mesh_tracing
+from app.llm.base import LLMProvider, Tool
+from app.llm.prompts import resolve_prompt
+from app.spine import wiki as wiki_store
+from app.spine.artifacts import read_artifact, update_artifact_stage, write_artifact
+from app.spine.events import append_event, current_turn_id, events_for_turn, events_since_ts
 
 NAME = "Chief of Staff"
 
@@ -784,7 +783,7 @@ def run_chief(user_input: str, llm: LLMProvider) -> Iterator[AgentEvent]:
     # would share a wall-clock window and cross-contaminate (one
     # operator's clean Critic could auto-publish another operator's
     # wiki drafts).
-    turn_start_iso = datetime.now(timezone.utc).isoformat()
+    turn_start_iso = datetime.now(UTC).isoformat()
     turn_id = uuid.uuid4().hex
     _turn_id_token = current_turn_id.set(turn_id)
     # Outer try/finally ensures the contextvar resets even when

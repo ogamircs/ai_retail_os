@@ -36,16 +36,17 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import datetime, timezone
-from typing import Any, Callable
+from collections.abc import Callable
+from datetime import UTC, datetime
+from typing import Any
 
 from app.agents.base import Agent
 from app.llm.base import LLMProvider, Tool
 from app.llm.prompts import resolve_prompt
-from app.spine import db, wiki as wiki_store
+from app.spine import db
+from app.spine import wiki as wiki_store
 from app.spine.events import append_event, list_events
 from app.substrate import omnichannel
-
 
 NAME = "Improvement Auditor"
 
@@ -92,7 +93,7 @@ Output exactly:
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _safe(signals: dict[str, Any], key: str, fn: Callable[[], Any]) -> None:

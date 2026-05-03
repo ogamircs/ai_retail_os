@@ -16,7 +16,6 @@ from urllib.request import Request, urlopen
 
 from tests._live_gate import load_env, skip_reason
 
-
 load_env()
 
 REQUIRED_ENV = ("SHOPIFY_SHOP_DOMAIN", "SHOPIFY_ADMIN_TOKEN")

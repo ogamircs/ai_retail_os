@@ -35,7 +35,6 @@ import os
 from pathlib import Path
 from typing import Any
 
-
 FEW_SHOT_HEADING = "## Few-shot demos"
 
 

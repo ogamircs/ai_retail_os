@@ -16,7 +16,6 @@ from urllib.request import Request, urlopen
 
 from tests._live_gate import load_env, skip_reason
 
-
 load_env()
 
 REQUIRED_ENV = ("MAUTIC_BASE_URL", "MAUTIC_USERNAME", "MAUTIC_PASSWORD")
@@ -116,9 +115,7 @@ class MauticLiveApplyTest(unittest.TestCase):
 
     def test_campaign_launch_creates_draft_in_mautic(self) -> None:
         from app.integrations import registry, store
-        from app.integrations.systems import MauticAdapter
 
-        adapter = MauticAdapter()
         row = store.create_outbox_action(
             system_id="mautic",
             action_queue_id=None,

@@ -5,7 +5,7 @@ its native tool-use shape (Anthropic blocks, OpenAI tool_calls, Google function_
 """
 
 from dataclasses import dataclass, field
-from typing import Protocol, Any, Literal
+from typing import Literal, Protocol
 
 
 @dataclass

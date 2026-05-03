@@ -6,9 +6,9 @@ Storage layer (W1), tool builders (W2/W3), Critic-gated auto-publish
 
 from __future__ import annotations
 
-import os
 import tempfile
 import unittest
+from datetime import UTC
 from pathlib import Path
 
 from app.agents._mesh_tools import (
@@ -16,7 +16,8 @@ from app.agents._mesh_tools import (
     build_wiki_read_tool,
     build_wiki_search_tool,
 )
-from app.spine import db, wiki, events as ev_store
+from app.spine import db, wiki
+from app.spine import events as ev_store
 from app.spine.artifacts import write_artifact
 from app.substrate import seed
 
@@ -119,7 +120,6 @@ class WikiStorageTest(unittest.TestCase):
         """Two writers race to v2 of the same slug. UNIQUE(slug, version)
         rejects the loser; retry must re-read existing.version, bump
         again, and succeed at v3 instead of crashing."""
-        from unittest import mock
 
         wiki.propose_edit("x/y", "T", "v1", "A")  # version 1
         # Simulate a racing writer that committed v2 between our SELECT
@@ -162,6 +162,7 @@ class WikiStorageTest(unittest.TestCase):
         published-only filter so the cockpit's 'all stages' toggle
         actually returns drafts + deprecated."""
         from fastapi.testclient import TestClient
+
         from app.main import app
 
         wiki.propose_edit("d/x", "Draft only", "b", "A")  # draft, never published
@@ -182,6 +183,7 @@ class WikiStorageTest(unittest.TestCase):
     def test_api_search_honours_status_filter(self):
         """Searching with status=draft must hide published matches."""
         from fastapi.testclient import TestClient
+
         from app.main import app
 
         wiki.propose_edit("d/foo", "FOOTITLE", "body about FOO", "A")  # draft
@@ -317,11 +319,12 @@ class WikiAutoPublishTest(unittest.TestCase):
         → auto-publish runs → wiki page is published because Pricing's
         own draft was the reviewed-clean target.
         """
+        from datetime import datetime
+
         from app.agents.chief_of_staff import _wiki_auto_publish_clean_drafts
-        from datetime import datetime, timezone
         from app.spine.events import append_event
 
-        turn_start = datetime.now(timezone.utc).isoformat()
+        turn_start = datetime.now(UTC).isoformat()
         # Pricing's draft (the artifact being audited)
         pricing_draft_id = write_artifact(
             agent="Pricing & Promo", kind="plan", title="Markdown",
@@ -353,11 +356,12 @@ class WikiAutoPublishTest(unittest.TestCase):
         self.assertEqual(page.status, "published")
 
     def test_dirty_critique_leaves_draft_untouched(self):
+        from datetime import datetime
+
         from app.agents.chief_of_staff import _wiki_auto_publish_clean_drafts
         from app.spine.events import append_event
-        from datetime import datetime, timezone
 
-        turn_start = datetime.now(timezone.utc).isoformat()
+        turn_start = datetime.now(UTC).isoformat()
         wiki.propose_edit("x/y", "T", "BODY", "Wiki Curator")
         critique_id = write_artifact(
             agent="Critic",
@@ -388,11 +392,12 @@ class WikiAutoPublishTest(unittest.TestCase):
         Auto-publish must hold the wiki draft — a single dirty
         critique anywhere in the turn signals an unvetted draft.
         """
+        from datetime import datetime
+
         from app.agents.chief_of_staff import _wiki_auto_publish_clean_drafts
         from app.spine.events import append_event
-        from datetime import datetime, timezone
 
-        turn_start = datetime.now(timezone.utc).isoformat()
+        turn_start = datetime.now(UTC).isoformat()
         wiki.propose_edit("x/y", "T", "BODY", "Wiki Curator")
 
         clean_id = write_artifact(
@@ -429,11 +434,12 @@ class WikiAutoPublishTest(unittest.TestCase):
         artifact id and treat that as reviewed-proof. Without this,
         citing only event ids forced manual approval even when the
         linked artifact had been critiqued."""
+        from datetime import datetime
+
         from app.agents.chief_of_staff import _wiki_auto_publish_clean_drafts
         from app.spine.events import append_event, current_turn_id
-        from datetime import datetime, timezone
 
-        turn_start = datetime.now(timezone.utc).isoformat()
+        turn_start = datetime.now(UTC).isoformat()
         token = current_turn_id.set("turn-evtref")
         try:
             pricing_draft_id = write_artifact(
@@ -479,11 +485,12 @@ class WikiAutoPublishTest(unittest.TestCase):
         Auto-publish must NOT publish the page — the body the
         operator would see is the unreviewed v2.
         """
+        from datetime import datetime
+
         from app.agents.chief_of_staff import _wiki_auto_publish_clean_drafts
         from app.spine.events import append_event, current_turn_id
-        from datetime import datetime, timezone
 
-        turn_start = datetime.now(timezone.utc).isoformat()
+        turn_start = datetime.now(UTC).isoformat()
         token = current_turn_id.set("turn-reedit")
         try:
             pricing_draft_id = write_artifact(
@@ -560,12 +567,13 @@ class WikiAutoPublishTest(unittest.TestCase):
         turn-A's auto-publish must not flip turn-B's draft to
         published.
         """
-        from app.agents.chief_of_staff import _wiki_auto_publish_clean_drafts
-        from app.spine.events import append_event, current_turn_id
-        from app.spine.artifacts import write_artifact
-        from datetime import datetime, timezone
+        from datetime import datetime
 
-        turn_start_a = datetime.now(timezone.utc).isoformat()
+        from app.agents.chief_of_staff import _wiki_auto_publish_clean_drafts
+        from app.spine.artifacts import write_artifact
+        from app.spine.events import append_event, current_turn_id
+
+        turn_start_a = datetime.now(UTC).isoformat()
         turn_a_id = "turn-a-uuid"
         turn_b_id = "turn-b-uuid"
 
@@ -616,11 +624,12 @@ class WikiAutoPublishTest(unittest.TestCase):
         Per-draft gate must match wiki_edit.agent against the set of
         agents whose drafts were actually reviewed this turn.
         """
+        from datetime import datetime
+
         from app.agents.chief_of_staff import _wiki_auto_publish_clean_drafts
         from app.spine.events import append_event
-        from datetime import datetime, timezone
 
-        turn_start = datetime.now(timezone.utc).isoformat()
+        turn_start = datetime.now(UTC).isoformat()
         # Pricing's draft lands + gets a clean critique
         pricing_draft_id = write_artifact(
             agent="Pricing & Promo", kind="plan", title="Pricing draft",
@@ -664,6 +673,7 @@ class WikiAutoPublishTest(unittest.TestCase):
         source — only one _wiki_auto_publish_clean_drafts call site
         exists (pre-curator); the post-curator pass was removed."""
         import inspect
+
         from app.agents import chief_of_staff
 
         src = inspect.getsource(chief_of_staff.run_chief)
@@ -692,10 +702,11 @@ class WikiAutoPublishTest(unittest.TestCase):
         """A turn without any Critic involvement (e.g. plain Analyst
         question, no review loop) must not auto-publish wiki drafts.
         """
-        from app.agents.chief_of_staff import _wiki_auto_publish_clean_drafts
-        from datetime import datetime, timezone
+        from datetime import datetime
 
-        turn_start = datetime.now(timezone.utc).isoformat()
+        from app.agents.chief_of_staff import _wiki_auto_publish_clean_drafts
+
+        turn_start = datetime.now(UTC).isoformat()
         wiki.propose_edit("x/y", "T", "BODY", "Wiki Curator")
         _wiki_auto_publish_clean_drafts(turn_start, llm=None)
         page = wiki.get_page("x/y")
@@ -717,10 +728,11 @@ class WikiCuratorCapsTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_per_turn_cap_blocks_fourth_proposal(self):
-        from app.agents.wiki_curator import _wiki_propose_with_caps, MAX_PROPOSALS_PER_TURN
-        from datetime import datetime, timezone
+        from datetime import datetime
 
-        turn_start = datetime.now(timezone.utc).isoformat()
+        from app.agents.wiki_curator import MAX_PROPOSALS_PER_TURN, _wiki_propose_with_caps
+
+        turn_start = datetime.now(UTC).isoformat()
         impl = _wiki_propose_with_caps(turn_start)
         out = []
         for i in range(MAX_PROPOSALS_PER_TURN + 2):
@@ -737,11 +749,12 @@ class WikiCuratorCapsTest(unittest.TestCase):
         self.assertIn("per-turn cap", errs[0]["error"])
 
     def test_per_slug_rate_limit_blocks_repeat(self):
-        from app.agents.wiki_curator import _wiki_propose_with_caps, NAME
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime
+
+        from app.agents.wiki_curator import NAME, _wiki_propose_with_caps
 
         # Pretend the Curator already proposed this slug 1h ago.
-        recent_ts = datetime.now(timezone.utc).isoformat()
+        recent_ts = datetime.now(UTC).isoformat()
         ev_store.append_event(
             agent=NAME,
             kind="wiki_edit",
@@ -764,10 +777,11 @@ class WikiCuratorCapsTest(unittest.TestCase):
         the first succeeds and the second hits the rate-limit error —
         no duplicate wiki_edit row inside the cooldown window."""
         import threading
-        from app.agents.wiki_curator import _wiki_propose_with_caps
-        from datetime import datetime, timezone
+        from datetime import datetime
 
-        turn_start = datetime.now(timezone.utc).isoformat()
+        from app.agents.wiki_curator import _wiki_propose_with_caps
+
+        turn_start = datetime.now(UTC).isoformat()
         # Each thread gets its own per-turn impl (matches real wiring
         # where every turn builds its own). Per-slug lock is process-
         # global so they still serialize on the same slug.

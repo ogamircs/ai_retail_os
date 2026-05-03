@@ -26,12 +26,11 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from app.spine.db import conn
 from app.spine.events import append_event
-
 
 WIKI_STATUSES = ("draft", "published", "deprecated")
 
@@ -77,7 +76,7 @@ def _row_to_page(row) -> WikiPage:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def get_page(slug: str) -> WikiPage | None:
@@ -185,7 +184,6 @@ def propose_edit(
     # winner's commit and bumps version one higher. Three attempts is
     # enough; in 30M+ years of operator turns we have not yet seen a
     # 3-way concurrent write to the same slug.
-    last_err: Exception | None = None
     for attempt in range(3):
         try:
             with conn() as c:
@@ -212,17 +210,15 @@ def propose_edit(
                     (slug, new_version, title, body_md, author_agent, refs_json, now),
                 )
             break
-        except _sqlite3.IntegrityError as e:
+        except _sqlite3.IntegrityError:
             # UNIQUE(slug, version) tripped — another writer beat us
             # to this version number. Retry; the next SELECT sees
             # their commit and bumps version one higher.
-            last_err = e
             if attempt == 2:
                 raise
-        except _sqlite3.OperationalError as e:
+        except _sqlite3.OperationalError:
             # Database is locked (BEGIN IMMEDIATE contention). Same
             # retry strategy.
-            last_err = e
             if attempt == 2:
                 raise
     append_event(

@@ -16,7 +16,6 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from typing import Any
 from urllib import error as urlerror
 from urllib.request import Request, urlopen
 
@@ -28,7 +27,7 @@ class GBrainConfig:
     timeout_s: float = 4.0
 
     @classmethod
-    def from_env(cls) -> "GBrainConfig":
+    def from_env(cls) -> GBrainConfig:
         return cls(
             base_url=(os.getenv("GBRAIN_BASE_URL") or "").strip() or None,
             bearer=(os.getenv("GBRAIN_BEARER") or "").strip() or None,

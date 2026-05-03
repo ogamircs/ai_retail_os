@@ -1,9 +1,10 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
+
 from app.spine.db import conn
 
 
 def query_sales(sku: str | None = None, days: int = 30, category: str | None = None) -> dict:
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
     with conn() as c:
         if sku:
             row = c.execute(
@@ -41,7 +42,7 @@ def query_sales(sku: str | None = None, days: int = 30, category: str | None = N
 
 
 def aggregate_by_category(days: int = 30) -> dict:
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
     with conn() as c:
         rows = c.execute(
             "SELECT s.category, COALESCE(SUM(x.units), 0) AS units, "
@@ -60,7 +61,7 @@ def aggregate_by_category(days: int = 30) -> dict:
 
 
 def daily_sales(sku: str, days: int = 30) -> list[dict]:
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
     with conn() as c:
         rows = c.execute(
             "SELECT substr(ts, 1, 10) AS day, SUM(units) AS units, SUM(revenue) AS revenue "

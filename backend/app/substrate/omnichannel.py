@@ -9,17 +9,17 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
+from app.integrations import registry as integration_registry
+from app.spine.artifacts import write_artifact
 from app.spine.db import conn
 from app.spine.events import append_event
-from app.spine.artifacts import write_artifact
 from app.spine.kg import upsert_edge, upsert_node
-from app.integrations import registry as integration_registry
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _cutoff(days: int) -> str:

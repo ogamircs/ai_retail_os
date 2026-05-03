@@ -116,6 +116,21 @@ Supported adapter IDs:
 
 Optional env vars are listed in `backend/.env.example`. Leave them blank for mock mode.
 
+### Quality gate
+
+One command runs lint + typecheck + python tests + frontend build + frontend tsc:
+
+```bash
+# First-time setup
+cd backend && pip install -e '.[dev]'   # ruff + pyright
+cd ../frontend && npm install
+
+# Anytime
+make check
+```
+
+Individual targets: `make lint` (ruff), `make typecheck` (pyright), `make frontend-check` (tsc + vite build), `make test` (mock-only suite). Pyright is intentionally in non-invasive basic mode for now — strict typechecking is queued for after the `systems.py` / `main.py` splits land and modules can be type-cleaned in isolation.
+
 ### Backend test suite (mock vs. live)
 
 Default `python -m unittest discover -s tests` runs **mock-only**. Every live-path suite (`test_integrations_<system>_live.py`) is opt-in via the gate in `backend/tests/_live_gate.py` and skips unless explicitly switched on, so a credential lying around in `.env` or external-system drift can't break the default suite.

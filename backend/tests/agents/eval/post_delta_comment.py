@@ -42,13 +42,13 @@ def _threshold() -> float:
 
 def _format_table(summary: dict[str, Any]) -> str:
     lines: list[str] = []
-    lines.append(f"## Track 2 / Track 4 eval gate")
+    lines.append("## Track 2 / Track 4 eval gate")
     lines.append("")
     lines.append(
         f"**Multi-pass strict-win scenarios:** {summary['scenarios_with_strict_win']} / "
         f"{len(summary['scenarios'])} (target ≥ {summary['target_scenarios']})"
     )
-    lines.append(f"**Per-dimension multi-pass wins:**")
+    lines.append("**Per-dimension multi-pass wins:**")
     for d, n in summary["wins_by_dimension"].items():
         lines.append(f"  - `{d}`: {n} / {len(summary['scenarios'])}")
     lines.append("")

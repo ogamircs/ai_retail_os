@@ -14,16 +14,15 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest import mock
 
-from app.agents import chief_of_staff
 from app.agents.chief_of_staff import (
-    _MeshState,
     _critique_is_clean,
+    _MeshState,
     build_orchestrator,
 )
 from app.config import mesh as mesh_settings
-from app.spine import db, events as ev_store
+from app.spine import db
+from app.spine import events as ev_store
 from app.spine.artifacts import (
     KNOWN_STAGES,
     read_artifact,
@@ -301,7 +300,7 @@ class ReviewLoopIntegrationTest(unittest.TestCase):
             refs=[draft_id, critique_id],
             stage="revision",
         )
-        clean_critique = write_artifact(
+        _clean_critique = write_artifact(  # noqa: F841 — fixture: second critique row in db
             agent="Critic",
             kind="critique",
             title="Critique 2",
@@ -314,43 +313,6 @@ class ReviewLoopIntegrationTest(unittest.TestCase):
             refs=[revision_id],
             stage="critique",
         )
-
-        sink = _StubSink()
-        orch = build_orchestrator(_NullLLM(), sink)
-        impl = orch.tool_impls["delegate_to_pricing"]
-
-        # Drive the helpers so the real loop body runs but with predictable
-        # specialist outputs.
-        run_calls: list[str] = []
-
-        def fake_run_specialist(agent, task):
-            run_calls.append(f"{agent.name}::{task[:20]}")
-            if "Revise" in task:
-                return {"specialist": agent.name, "summary": "revised", "artifacts": [revision_id]}
-            return {"specialist": agent.name, "summary": "drafted", "artifacts": [draft_id]}
-
-        critic_calls: list[str] = []
-
-        def fake_run_critic(target_id, scope):
-            critic_calls.append(target_id)
-            cid = critique_id if target_id == draft_id else clean_critique
-            return {"specialist": "Critic", "summary": "critiqued", "artifacts": [cid]}
-
-        # Patch through the closure references in the impl. The loop calls
-        # _run_specialist and _run_critic via the closure, so we reach in
-        # through the orchestrator's tool_impls and replace them.
-        with mock.patch.object(chief_of_staff, "_critique_is_clean", side_effect=lambda cid: cid == clean_critique):
-            # Monkey-patch the closure helpers directly on the impl. The
-            # neatest path is to reach the closure cells via __closure__ —
-            # but since both helpers are referenced by name in the loop
-            # body, simplest to patch on the orchestrator builder level by
-            # rebuilding it with controlled closures.
-            #
-            # Instead, we re-implement the loop minimally and assert the
-            # final-stage flip + ref chain — which is what the loop is
-            # *for*. The closure-cell approach is brittle across Python
-            # versions.
-            pass
 
         # The loop's helpers (_run_specialist / _run_critic) are closure-
         # bound inside build_orchestrator and aren't safely patchable from

@@ -15,12 +15,11 @@ import unittest
 from pathlib import Path
 
 from app.llm import tracing as mesh_tracing
-from app.llm.base import AssistantTurn, Message, Tool
+from app.llm.base import AssistantTurn, Message
 from app.llm.prompts import (
     active_version,
     list_versions,
     resolve_prompt,
-    _PROMPTS_ROOT,
 )
 from app.spine import db, telemetry
 from app.spine.events import append_event
@@ -481,6 +480,7 @@ class MlflowStatusEndpointTest(unittest.TestCase):
 
     def setUp(self):
         from fastapi.testclient import TestClient
+
         from app.main import app
 
         self.client = TestClient(app)

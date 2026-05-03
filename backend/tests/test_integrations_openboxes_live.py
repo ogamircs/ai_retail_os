@@ -9,14 +9,12 @@ Opt-in only — see `backend/tests/_live_gate.py`. Skipped unless:
 
 from __future__ import annotations
 
-import json
 import os
 import unittest
 from urllib.error import URLError
 from urllib.request import urlopen
 
 from tests._live_gate import load_env, opt_in
-
 
 load_env()
 

@@ -1,18 +1,18 @@
-from app.agents.base import Agent
 from app.agents._mesh_tools import (
-    build_wiki_search_tool,
-    build_wiki_read_tool,
-    build_wiki_propose_edit_tool,
+    build_brain_query_tool,
+    build_brain_read_tool,
+    build_brain_search_tool,
     build_read_artifact_tool,
     build_stage_write_artifact_tool,
-    build_brain_search_tool,
-    build_brain_read_tool,
-    build_brain_query_tool,
+    build_wiki_propose_edit_tool,
+    build_wiki_read_tool,
+    build_wiki_search_tool,
 )
+from app.agents.base import Agent
 from app.llm.base import Tool
 from app.llm.prompts import resolve_prompt
-from app.spine.events import append_event, events_since_ts
-from app.substrate import pos, omnichannel
+from app.spine.events import events_since_ts
+from app.substrate import omnichannel, pos
 
 NAME = "Analyst"
 

@@ -30,6 +30,11 @@ mlflow = [
 dspy = [
     "dspy-ai>=2.5",
 ]
+# Lint + typecheck. `pip install -e .[dev]` enables `make check`.
+dev = [
+    "ruff>=0.7",
+    "pyright>=1.1.380",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -37,3 +42,54 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
+
+# ---- Ruff -----------------------------------------------------------------
+# Non-invasive baseline. Catches real bugs (F: undefined names, B: bug-prone
+# patterns, UP: stale Python idioms) without churning style. Line length is
+# left ignored — code is dense by design and we don't want noise reflows.
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = [".venv", "data", "artifacts"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes (undefined / unused)
+    "B",    # flake8-bugbear (mutable defaults, except-pass, …)
+    "UP",   # pyupgrade
+    "I",    # import sorting
+]
+ignore = [
+    "E501",   # line length — see above
+    "E402",   # module-level import not at top (load_env hooks rely on order)
+    "B008",   # FastAPI's Depends() pattern lives in argument defaults
+    "UP007",  # `X | None` is fine; don't churn ` Optional[X]` either way
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B011", "B017"]  # `assert False` / broad-exception checks are fine in tests
+"scripts/**" = ["E402"]
+
+# ---- Pyright --------------------------------------------------------------
+# Non-invasive baseline. Strict mode surfaces 1000+ findings against the
+# current codebase (lots of sqlite Row -> dict, FastAPI optional kwargs,
+# implicit Any in agent tool dispatch). Reporting categories below are
+# silenced so the gate goes green; tighten after the systems.py / main.py
+# splits land and modules can be type-cleaned in isolation.
+[tool.pyright]
+include = ["app", "tests"]
+exclude = [".venv", "**/__pycache__", "data", "artifacts"]
+typeCheckingMode = "basic"
+useLibraryCodeForTypes = true
+pythonVersion = "3.11"
+
+# Silenced — too noisy without full annotations.
+reportArgumentType = "none"
+reportOptionalSubscript = "none"
+reportOptionalMemberAccess = "none"
+reportReturnType = "none"
+reportAttributeAccessIssue = "none"
+# Surfaces but does not fail the gate.
+reportMissingImports = "warning"
+reportGeneralTypeIssues = "warning"

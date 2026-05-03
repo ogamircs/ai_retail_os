@@ -1,15 +1,15 @@
-from app.agents.base import Agent
 from app.agents._mesh_tools import (
-    build_wiki_search_tool,
-    build_wiki_read_tool,
-    build_wiki_propose_edit_tool,
     build_read_artifact_tool,
     build_stage_write_artifact_tool,
+    build_wiki_propose_edit_tool,
+    build_wiki_read_tool,
+    build_wiki_search_tool,
 )
+from app.agents.base import Agent
 from app.llm.base import Tool
 from app.llm.prompts import resolve_prompt
 from app.spine.events import append_event
-from app.substrate import inventory, pos, omnichannel
+from app.substrate import inventory, omnichannel, pos
 
 NAME = "Pricing & Promo"
 

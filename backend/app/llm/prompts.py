@@ -30,7 +30,6 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Optional
 
 _BACKEND = Path(__file__).resolve().parent.parent.parent
 _PROMPTS_ROOT = _BACKEND.parent / "prompts"
@@ -68,7 +67,7 @@ def _read_aliases(agent: str) -> dict[str, str]:
     return {str(k): str(v) for k, v in parsed.items() if isinstance(v, (str, int, float))}
 
 
-def _read_version(agent: str, version: str) -> Optional[str]:
+def _read_version(agent: str, version: str) -> str | None:
     """Read `prompts/<agent>/<version>.md` if present; else None."""
     p = _agent_dir(agent) / f"{version}.md"
     if not p.exists():
@@ -79,7 +78,7 @@ def _read_version(agent: str, version: str) -> Optional[str]:
         return None
 
 
-def _env_for(agent: str, suffix: str) -> Optional[str]:
+def _env_for(agent: str, suffix: str) -> str | None:
     """Per-agent env var lookup. `Pricing & Promo` + `_PROMPT_ALIAS` →
     `PRICING_PROMO_PROMPT_ALIAS`. Reading both an upper-snake-case and a
     plain-snake-case form covers operator typos.

@@ -22,10 +22,8 @@ from typing import Any
 from app.agents.chief_of_staff import run_chief
 from app.llm import get_provider
 from app.spine.artifacts import read_artifact
-
 from tests.agents.eval.judge import JudgeScore, compare_modes, score_transcript
 from tests.agents.eval.scenarios import SCENARIOS, by_name
-
 
 HERE = Path(__file__).resolve().parent
 LAST_RUN_PATH = HERE / "last_run.json"
