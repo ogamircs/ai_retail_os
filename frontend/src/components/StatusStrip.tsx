@@ -1,5 +1,16 @@
 import { useEffect, useState } from "react";
-import { ConfigInfo, getConfig, getMeshStatus, MeshStatus, setProvider, Kpi, listPinnedWikiPages, WikiPage } from "../lib/api";
+import {
+  ConfigInfo,
+  getConfig,
+  getMeshStatus,
+  MeshStatus,
+  setProvider,
+  Kpi,
+  listPinnedWikiPages,
+  WikiPage,
+  getBrainStatus,
+  BrainStatus,
+} from "../lib/api";
 import { useDashboardData } from "../lib/data";
 import { useDrawer } from "../lib/drawerContext";
 import { requestApprovalPushPermission } from "../lib/pushNotifier";
@@ -73,6 +84,7 @@ export default function StatusStrip() {
     return Notification.permission;
   });
   const [pinnedWiki, setPinnedWiki] = useState<WikiPage[]>([]);
+  const [brain, setBrain] = useState<BrainStatus | null>(null);
 
   useEffect(() => {
     getConfig().then(setCfg).catch(() => {});
@@ -100,6 +112,15 @@ export default function StatusStrip() {
       listPinnedWikiPages()
         .then((p) => {
           if (!cancelled) setPinnedWiki(p);
+        })
+        .catch(() => {});
+      // Track 6 G5: brain status chip — 'mock' when no GBRAIN_BEARER,
+      // 'brain N pages' when the live endpoint is reachable, hidden
+      // when the env says GBrain is configured but the endpoint is
+      // down (so the operator notices via the absent chip).
+      getBrainStatus()
+        .then((s) => {
+          if (!cancelled) setBrain(s);
         })
         .catch(() => {});
     };
@@ -168,6 +189,19 @@ export default function StatusStrip() {
           title={pinnedWiki.map((p) => `${p.slug} · ${p.title}`).join("\n")}
         >
           ★ wiki {pinnedWiki.length}
+        </span>
+      )}
+      {brain && (brain.mock || brain.reachable) && (
+        <span
+          className="wiki-pinned"
+          data-testid="brain-status-chip"
+          title={
+            brain.mock
+              ? "GBrain mock mode — no GBRAIN_BEARER set; brain tools route to wiki fallback."
+              : `GBrain live · ${brain.endpoint ?? ""}`
+          }
+        >
+          {brain.mock ? "brain mock" : `brain ${brain.pages_count} pages`}
         </span>
       )}
       {mesh?.recent_downgrade && (

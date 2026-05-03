@@ -409,6 +409,95 @@ def mlflow_status(limit_runs: int = 10):
     }
 
 
+@app.get("/api/brain/status")
+def brain_status():
+    """Track 6 G5 — cockpit-side surface for the GBrain integration.
+
+    Returns:
+      * `configured`     — whether `GBRAIN_BEARER` is set.
+      * `reachable`      — whether the gbrain HTTP endpoint answered
+                           a `search('')` probe (None when not
+                           configured — mock mode is always 'reachable'
+                           but flagged via `mock=true`).
+      * `mock`           — true when the cockpit is using the
+                           substrate-backed mock client.
+      * `pages_count`    — count of recent pages surfaced by an empty
+                           search (cheap probe for the status strip
+                           chip).
+
+    The cockpit's status strip polls this every ~5s; the BrainTab
+    polls more aggressively while the operator types in the search
+    box.
+    """
+    from app.llm.mcp import get_client
+
+    client = get_client()
+    if not client.config.configured:
+        # Mock mode — surface what the wiki-backed client returns so
+        # the cockpit chip shows a non-zero count (and the operator
+        # gets a glimpse of what the brain WOULD look like with a
+        # real GBrain instance).
+        try:
+            probe = client.search("", limit=20)
+            results = probe.get("results") or []
+        except Exception:
+            results = []
+        return {
+            "configured": False,
+            "reachable": True,
+            "mock": True,
+            "pages_count": len(results),
+            "endpoint": None,
+        }
+    try:
+        probe = client.search("", limit=20)
+    except Exception as e:
+        return {
+            "configured": True,
+            "reachable": False,
+            "mock": False,
+            "pages_count": 0,
+            "endpoint": client.config.base_url,
+            "error": str(e),
+        }
+    results = probe.get("results") or []
+    return {
+        "configured": True,
+        "reachable": "error" not in probe,
+        "mock": False,
+        "pages_count": len(results),
+        "endpoint": client.config.base_url,
+        "error": probe.get("error"),
+    }
+
+
+@app.get("/api/brain/search")
+def brain_search(q: str = "", limit: int = 20):
+    from app.llm.mcp import get_client
+
+    return get_client().search(q, limit=limit)
+
+
+@app.get("/api/brain/pages/{slug:path}")
+def brain_page(slug: str):
+    from app.llm.mcp import get_client
+
+    page = get_client().get(slug)
+    if isinstance(page, dict) and page.get("error"):
+        raise HTTPException(404, page["error"])
+    return page
+
+
+@app.get("/api/brain/recent")
+def brain_recent(limit: int = 20):
+    """Empty-query search returns the most recently updated pages —
+    the BrainTab's default landing list when the operator hasn't
+    typed anything yet."""
+    from app.llm.mcp import get_client
+
+    return get_client().search("", limit=limit)
+
+
 @app.get("/api/dspy/agents")
 def dspy_list_agents():
     """List the agents the DSPy optimizer can compile + their current
@@ -418,7 +507,7 @@ def dspy_list_agents():
 
     # Keep the registry in lockstep with scripts/dspy_optimize.py —
     # only agents wired up there can actually be compiled.
-    registered_slugs = ("analyst",)
+    registered_slugs = ("analyst", "pricing_promo")
     out: list[dict] = []
     for slug in registered_slugs:
         aliases = _read_aliases(slug)
@@ -488,7 +577,7 @@ def dspy_optimize_route(agent_slug: str, auto_promote: bool = False):
     import threading
     import uuid
 
-    valid_slugs = {"analyst"}
+    valid_slugs = {"analyst", "pricing_promo"}
     if agent_slug not in valid_slugs:
         raise HTTPException(404, f"unknown agent slug '{agent_slug}'")
     job_id = uuid.uuid4().hex[:12]

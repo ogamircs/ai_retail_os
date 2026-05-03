@@ -44,7 +44,16 @@ if str(BACKEND_ROOT) not in sys.path:
 # is one row — the script's wiring stays generic.
 def _agent_registry() -> dict[str, dict]:
     from app.agents.dspy_signatures import analyst as analyst_sig
-    from app.agents.dspy_dataset import load_analyst_dataset
+    from app.agents.dspy_signatures import pricing as pricing_sig
+    from app.agents.dspy_dataset import (
+        load_analyst_dataset,
+        load_jsonl,
+        to_examples,
+    )
+
+    def _load_pricing_dataset():
+        rows = load_jsonl(PROMPTS_ROOT / "training" / "pricing_promo.jsonl")
+        return to_examples(rows, input_keys=("operator_question", "category_snapshot"))
 
     return {
         "analyst": {
@@ -52,6 +61,12 @@ def _agent_registry() -> dict[str, dict]:
             "make_module": analyst_sig.make_module,
             "load_dataset": lambda: load_analyst_dataset(PROMPTS_ROOT),
             "input_keys": ("operator_question", "spine_snapshot"),
+        },
+        "pricing_promo": {
+            "policy_path": PROMPTS_ROOT / "pricing_promo" / "v1.md",
+            "make_module": pricing_sig.make_module,
+            "load_dataset": _load_pricing_dataset,
+            "input_keys": ("operator_question", "category_snapshot"),
         },
     }
 
@@ -189,9 +204,20 @@ def compile_agent(
     agent_slug: str,
     max_demos: int = 4,
     auto_promote: bool = False,
+    optimizer: str = "bootstrap",
 ) -> dict:
     """Compile + render. Returns a small summary dict for logging /
-    cockpit display."""
+    cockpit display.
+
+    `optimizer` ∈ {"bootstrap", "mipro"}:
+      * "bootstrap" (default) — `BootstrapFewShot`. Cheap; selects
+        few-shot demos. Ships compiled as v<n+1>.md.
+      * "mipro" — `MIPROv2`. Bigger search, optimizer-rewritten
+        instructions + demos. Capped at `MIPRO_MAX_BOOTSTRAPPED_DEMOS`
+        (default 8) to keep compilation under ~$5/agent. Use for the
+        action specialists (Pricing / Marketing / Replenishment) where
+        the eval-harness scores plateau on bootstrap alone.
+    """
     registry = _agent_registry()
     if agent_slug not in registry:
         raise ValueError(
@@ -218,11 +244,35 @@ def compile_agent(
         )
 
     metric = _structural_metric()
-    optimizer = BootstrapFewShot(
-        metric=metric,
-        max_bootstrapped_demos=max_demos,
-        max_labeled_demos=max_demos,
-    )
+    if optimizer == "mipro":
+        # MIPROv2 — bigger search, instruction rewriting + demo
+        # selection. Capped via `MIPRO_MAX_BOOTSTRAPPED_DEMOS` so
+        # compilation cost stays bounded (default 8). The cap is read
+        # from env so operators can tune without touching code.
+        try:
+            from dspy.teleprompt import MIPROv2  # type: ignore
+        except ImportError as exc:
+            raise RuntimeError(
+                "MIPROv2 is not available in this dspy-ai install. "
+                "Upgrade with `pip install -U dspy-ai`."
+            ) from exc
+        cap = int(os.getenv("MIPRO_MAX_BOOTSTRAPPED_DEMOS", "8"))
+        teleprompter = MIPROv2(
+            metric=metric,
+            max_bootstrapped_demos=min(max_demos, cap),
+            max_labeled_demos=min(max_demos, cap),
+            num_candidates=int(os.getenv("MIPRO_NUM_CANDIDATES", "5")),
+        )
+    elif optimizer == "bootstrap":
+        teleprompter = BootstrapFewShot(
+            metric=metric,
+            max_bootstrapped_demos=max_demos,
+            max_labeled_demos=max_demos,
+        )
+    else:
+        raise ValueError(
+            f"unknown optimizer '{optimizer}' — expected 'bootstrap' or 'mipro'"
+        )
     mlflow = _try_mlflow()
     t0 = time.monotonic()
     if mlflow is not None:
@@ -230,7 +280,7 @@ def compile_agent(
     else:
         run_ctx = None
     try:
-        compiled = optimizer.compile(module, trainset=trainset)
+        compiled = teleprompter.compile(module, trainset=trainset)
     except Exception as exc:
         if run_ctx is not None:
             mlflow.set_tag("status", "failed")  # type: ignore
@@ -267,6 +317,7 @@ def compile_agent(
         "elapsed_s": elapsed_s,
         "model": getattr(lm, "model", None),
         "trainset_size": len(trainset),
+        "optimizer": optimizer,
         "auto_promote_requested": auto_promote,
         "promoted": promoted,
         "gate_verdict": gate_verdict,
@@ -288,19 +339,27 @@ def compile_agent(
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("agent", help="Agent slug (e.g. 'analyst')")
+    p.add_argument("agent", help="Agent slug (e.g. 'analyst', 'pricing_promo')")
     p.add_argument(
         "--max-demos",
         type=int,
         default=4,
-        help="BootstrapFewShot.max_bootstrapped_demos (default 4)",
+        help="max_bootstrapped_demos cap (default 4)",
     )
     p.add_argument(
         "--auto-promote",
         action="store_true",
-        help="Flip prod alias to the new version unconditionally. "
+        help="Flip prod alias when the eval-harness A/B gate passes. "
         "By default only staging is bumped — D4's eval gate is the "
         "promotion path.",
+    )
+    p.add_argument(
+        "--optimizer",
+        choices=("bootstrap", "mipro"),
+        default="bootstrap",
+        help="DSPy teleprompter (default bootstrap). Use 'mipro' for "
+        "action specialists where multi-step optimization (instructions "
+        "+ demos + tool calls) is worth the bigger search budget.",
     )
     args = p.parse_args()
 
@@ -309,6 +368,7 @@ def main() -> int:
             agent_slug=args.agent,
             max_demos=args.max_demos,
             auto_promote=args.auto_promote,
+            optimizer=args.optimizer,
         )
     except Exception as exc:
         print(f"[dspy_optimize] FAILED: {exc}", file=sys.stderr)

@@ -347,3 +347,146 @@ def build_wiki_propose_edit_tool(
         },
     )
     return tool, _impl
+
+
+# ---------------------------------------------------------------------------
+# Track 6 — GBrain MCP tools (G2). Read-only specialists (Analyst, Critic)
+# get brain_search / brain_read / brain_query so they can quote prior
+# decisions, vendor history, code call-graph context. The Critic also picks
+# up code_callers / code_def / code_refs (G4).
+#
+# All four tools route through `app.llm.mcp.get_client()` which falls back
+# to a substrate-backed mock when GBRAIN_BEARER isn't set — same pattern as
+# Track 1 integration adapters. Agents see a uniform tool surface either
+# way.
+# ---------------------------------------------------------------------------
+
+
+def build_brain_search_tool() -> tuple[Tool, Callable[[dict], dict]]:
+    from app.llm.mcp import get_client
+
+    def _impl(args: dict) -> dict:
+        q = (args.get("query") or "").strip()
+        if not q:
+            return {"error": "brain_search requires non-empty query"}
+        limit = max(1, min(int(args.get("limit", 10)), 50))
+        return get_client().search(q, limit=limit)
+
+    tool = Tool(
+        name="brain_search",
+        description=(
+            "Search the operator's persistent brain (GBrain) for prior "
+            "decisions, vendor notes, policy snippets. Returns up to "
+            "`limit` matching pages with slug + title + 240-char "
+            "snippet; call brain_read for the full body. Mock-mode "
+            "fallback when no GBRAIN_BEARER is configured — surfaces "
+            "the cockpit's wiki pages so the agent's tool surface is "
+            "consistent."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "limit": {"type": "integer"},
+            },
+            "required": ["query"],
+        },
+    )
+    return tool, _impl
+
+
+def build_brain_read_tool() -> tuple[Tool, Callable[[dict], dict]]:
+    from app.llm.mcp import get_client
+
+    def _impl(args: dict) -> dict:
+        slug = (args.get("slug") or "").strip()
+        if not slug:
+            return {"error": "brain_read requires non-empty slug"}
+        return get_client().get(slug)
+
+    tool = Tool(
+        name="brain_read",
+        description=(
+            "Fetch the full body + metadata of one brain page by slug. "
+            "Use after brain_search when you want the full text to "
+            "quote, or when you already know the slug from a prior "
+            "turn."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {"slug": {"type": "string"}},
+            "required": ["slug"],
+        },
+    )
+    return tool, _impl
+
+
+def build_brain_query_tool() -> tuple[Tool, Callable[[dict], dict]]:
+    from app.llm.mcp import get_client
+
+    def _impl(args: dict) -> dict:
+        q = (args.get("query") or "").strip()
+        if not q:
+            return {"error": "brain_query requires non-empty query"}
+        limit = max(1, min(int(args.get("limit", 5)), 20))
+        return get_client().query(q, limit=limit)
+
+    tool = Tool(
+        name="brain_query",
+        description=(
+            "Ask the brain a natural-language question. Returns "
+            "`{answer, citations: [{slug, title, snippet}]}`. The "
+            "citations are what the agent should quote — answer alone "
+            "is unverified. Mock-mode synthesises from the wiki."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "limit": {"type": "integer"},
+            },
+            "required": ["query"],
+        },
+    )
+    return tool, _impl
+
+
+_CODE_LOOKUP_KINDS = ("callers", "callees", "def", "refs")
+
+
+def build_code_lookup_tool(kind: str) -> tuple[Tool, Callable[[dict], dict]]:
+    """Track 6 G4 — Critic-only code-graph tools. `kind` ∈ {callers,
+    callees, def, refs}. Each returns the GBrain code-graph response
+    for `symbol`. Mock-mode returns an empty result with `mock=True`
+    so the Critic surfaces the gap rather than hallucinating."""
+    if kind not in _CODE_LOOKUP_KINDS:
+        raise ValueError(f"unknown code-lookup kind: {kind}")
+    from app.llm.mcp import get_client
+
+    def _impl(args: dict) -> dict:
+        symbol = (args.get("symbol") or "").strip()
+        if not symbol:
+            return {"error": f"code_{kind} requires non-empty symbol"}
+        return get_client().code_lookup(kind, symbol)
+
+    desc_map = {
+        "callers": "List call sites that invoke `symbol`. Use when the "
+        "Critic wants to verify how a policy / helper is actually used.",
+        "callees": "List functions called BY `symbol`. Useful when "
+        "asking 'does this draft's recommended helper actually do what "
+        "the draft says it does?'",
+        "def": "Locate the definition of `symbol` (file + line + "
+        "snippet). Use to ground a citation in the actual source.",
+        "refs": "All references to `symbol` (definitions + call sites + "
+        "imports). The broadest variant.",
+    }
+    tool = Tool(
+        name=f"code_{kind}",
+        description=desc_map[kind],
+        input_schema={
+            "type": "object",
+            "properties": {"symbol": {"type": "string"}},
+            "required": ["symbol"],
+        },
+    )
+    return tool, _impl

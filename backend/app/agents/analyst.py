@@ -5,6 +5,9 @@ from app.agents._mesh_tools import (
     build_wiki_propose_edit_tool,
     build_read_artifact_tool,
     build_stage_write_artifact_tool,
+    build_brain_search_tool,
+    build_brain_read_tool,
+    build_brain_query_tool,
 )
 from app.llm.base import Tool
 from app.llm.prompts import resolve_prompt
@@ -75,6 +78,9 @@ _WRITE_ARTIFACT_TOOL, _write_artifact_impl = build_stage_write_artifact_tool(
 _WIKI_SEARCH_TOOL, _wiki_search_impl = build_wiki_search_tool()
 _WIKI_READ_TOOL, _wiki_read_impl = build_wiki_read_tool()
 _WIKI_PROPOSE_TOOL, _wiki_propose_impl = build_wiki_propose_edit_tool(NAME)
+_BRAIN_SEARCH_TOOL, _brain_search_impl = build_brain_search_tool()
+_BRAIN_READ_TOOL, _brain_read_impl = build_brain_read_tool()
+_BRAIN_QUERY_TOOL, _brain_query_impl = build_brain_query_tool()
 
 
 TOOLS = [
@@ -154,6 +160,9 @@ TOOLS = [
     _WIKI_SEARCH_TOOL,
     _WIKI_READ_TOOL,
     _WIKI_PROPOSE_TOOL,
+    _BRAIN_SEARCH_TOOL,
+    _BRAIN_READ_TOOL,
+    _BRAIN_QUERY_TOOL,
 ]
 
 IMPLS = {
@@ -171,6 +180,9 @@ IMPLS = {
     "wiki_search": _wiki_search_impl,
     "wiki_read": _wiki_read_impl,
     "wiki_propose_edit": _wiki_propose_impl,
+    "brain_search": _brain_search_impl,
+    "brain_read": _brain_read_impl,
+    "brain_query": _brain_query_impl,
 }
 
 

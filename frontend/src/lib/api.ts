@@ -441,6 +441,50 @@ export async function applyIntegrationAction(
   return r.json();
 }
 
+// Track 6 G5 — GBrain cockpit surface.
+
+export type BrainStatus = {
+  configured: boolean;
+  reachable: boolean;
+  mock: boolean;
+  pages_count: number;
+  endpoint?: string | null;
+  error?: string | null;
+};
+
+export type BrainPage = {
+  slug: string;
+  title: string;
+  body?: string;
+  tier?: string;
+  updated_ts?: string;
+  citations?: string[];
+  snippet?: string;
+};
+
+export async function getBrainStatus(): Promise<BrainStatus> {
+  const r = await fetch("/api/brain/status");
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function searchBrainPages(
+  q: string,
+  limit = 20,
+): Promise<{ results: BrainPage[]; mock?: boolean }> {
+  const params = new URLSearchParams({ q, limit: String(limit) });
+  const r = await fetch(`/api/brain/search?${params}`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const j = await r.json();
+  return { results: j.results ?? [], mock: !!j.mock };
+}
+
+export async function getBrainPage(slug: string): Promise<BrainPage> {
+  const r = await fetch(`/api/brain/pages/${encodeURIComponent(slug)}`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
 // Track 7 D6 — DSPy optimizer cockpit surface.
 
 export type DspyAgent = {
