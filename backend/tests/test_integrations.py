@@ -30,6 +30,10 @@ INTEGRATION_ENV_KEYS = [
     "AKENEO_USERNAME",
     "AKENEO_PASSWORD",
     "SUPERSET_BASE_URL",
+    "SHOPIFY_SHOP_DOMAIN",
+    "SHOPIFY_ADMIN_TOKEN",
+    "SHOPIFY_API_VERSION",
+    "KLAVIYO_API_KEY",
 ]
 
 
@@ -54,8 +58,10 @@ class IntegrationLayerTest(unittest.TestCase):
 
     def test_system_registry_defaults_to_mock_mode(self):
         systems = registry.list_systems()
-        self.assertEqual(len(systems), 6)
-        self.assertIn("erpnext", {system["system_id"] for system in systems})
+        self.assertEqual(len(systems), 7)
+        ids = {system["system_id"] for system in systems}
+        self.assertIn("erpnext", ids)
+        self.assertIn("shopify", ids)
         self.assertTrue(all(system["mode"] == "mock" for system in systems))
         self.assertTrue(all(system["configured"] is False for system in systems))
 
@@ -1506,6 +1512,550 @@ class IntegrationLayerTest(unittest.TestCase):
         self.assertEqual(response.json()["status"], "accepted")
         self.assertEqual(records.status_code, 200)
         self.assertEqual(records.json()["records"][0]["payload"]["event"], "email.open")
+
+    # --- Shopify (Track 8 P3) ---------------------------------------------
+
+    def test_shopify_configured_requires_domain_and_token(self):
+        from app.integrations.systems import ShopifyAdapter
+
+        os.environ.pop("SHOPIFY_SHOP_DOMAIN", None)
+        os.environ.pop("SHOPIFY_ADMIN_TOKEN", None)
+        self.assertFalse(ShopifyAdapter().configured())
+
+        os.environ["SHOPIFY_SHOP_DOMAIN"] = "demo.myshopify.com"
+        self.assertFalse(ShopifyAdapter().configured())  # missing token
+
+        os.environ["SHOPIFY_ADMIN_TOKEN"] = "shpat_demo"
+        self.assertTrue(ShopifyAdapter().configured())
+
+    def test_shopify_gid_tail_extracts_numeric_id(self):
+        from app.integrations.systems import _shopify_gid_tail
+
+        self.assertEqual(_shopify_gid_tail("gid://shopify/Product/12345"), "12345")
+        self.assertEqual(_shopify_gid_tail("12345"), "12345")
+        self.assertIsNone(_shopify_gid_tail(None))
+        self.assertIsNone(_shopify_gid_tail(""))
+
+    def test_shopify_gql_list_walks_until_hasNextPage_false(self):
+        """`_gql_list` must follow `pageInfo.endCursor` until exhausted —
+        a single Shopify connection with more rows than a page would
+        otherwise be silently truncated.
+        """
+        from app.integrations.systems import ShopifyAdapter
+
+        os.environ["SHOPIFY_SHOP_DOMAIN"] = "demo.myshopify.com"
+        os.environ["SHOPIFY_ADMIN_TOKEN"] = "shpat_demo"
+
+        adapter = ShopifyAdapter()
+        pages = [
+            {
+                "products": {
+                    "edges": [{"node": {"id": "gid://shopify/Product/1"}}, {"node": {"id": "gid://shopify/Product/2"}}],
+                    "pageInfo": {"hasNextPage": True, "endCursor": "c1"},
+                }
+            },
+            {
+                "products": {
+                    "edges": [{"node": {"id": "gid://shopify/Product/3"}}],
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                }
+            },
+        ]
+        seen_cursors: list[str | None] = []
+
+        def _stub_gql(query: str, variables: dict | None = None):
+            seen_cursors.append((variables or {}).get("cursor"))
+            return pages[len(seen_cursors) - 1]
+
+        adapter._gql = _stub_gql  # type: ignore[method-assign]
+        out, truncated = adapter._gql_list("query", "products")
+        self.assertEqual([n["id"] for n in out], ["gid://shopify/Product/1", "gid://shopify/Product/2", "gid://shopify/Product/3"])
+        self.assertFalse(truncated)
+        self.assertEqual(seen_cursors, [None, "c1"])
+
+    def test_shopify_gql_list_flags_truncation_when_max_rows_hit(self):
+        from app.integrations.systems import ShopifyAdapter
+
+        os.environ["SHOPIFY_SHOP_DOMAIN"] = "demo.myshopify.com"
+        os.environ["SHOPIFY_ADMIN_TOKEN"] = "shpat_demo"
+
+        adapter = ShopifyAdapter()
+        adapter._gql = lambda q, v=None: {  # type: ignore[method-assign]
+            "products": {
+                "edges": [
+                    {"node": {"id": "gid://shopify/Product/1"}},
+                    {"node": {"id": "gid://shopify/Product/2"}},
+                    {"node": {"id": "gid://shopify/Product/3"}},
+                ],
+                "pageInfo": {"hasNextPage": True, "endCursor": "c1"},
+            }
+        }
+        out, truncated = adapter._gql_list("query", "products", max_rows=2)
+        self.assertEqual(len(out), 2)
+        self.assertTrue(truncated)
+
+    def test_shopify_live_sync_round_trips_metafield_to_external_ref(self):
+        """Locations + Products with `retail_os.spine_sku` / `store_id`
+        metafields must land an external_ref keyed by the substrate id so
+        the cockpit drawer can drill from the substrate row to Shopify.
+        """
+        from app.integrations import store as adapter_store
+        from app.integrations.systems import ShopifyAdapter
+
+        os.environ["SHOPIFY_SHOP_DOMAIN"] = "demo.myshopify.com"
+        os.environ["SHOPIFY_ADMIN_TOKEN"] = "shpat_demo"
+
+        adapter = ShopifyAdapter()
+
+        def _stub_gql_list(query: str, root_key: str, variables=None, max_rows=None):
+            if root_key == "locations":
+                return (
+                    [
+                        {
+                            "id": "gid://shopify/Location/91",
+                            "name": "NYC store",
+                            "metafield": {"value": "sto-nyc"},
+                        }
+                    ],
+                    False,
+                )
+            if root_key == "products":
+                return (
+                    [
+                        {
+                            "id": "gid://shopify/Product/77",
+                            "title": "Linen short",
+                            "variants": {"edges": [{"node": {"id": "gid://shopify/ProductVariant/770", "sku": "sku-linen-short"}}]},
+                            "metafield": {"value": None},
+                        }
+                    ],
+                    False,
+                )
+            if root_key == "inventoryItems":
+                return (
+                    [
+                        {
+                            "id": "gid://shopify/InventoryItem/55",
+                            "sku": "sku-linen-short",
+                            "inventoryLevels": {
+                                "edges": [
+                                    {
+                                        "node": {
+                                            "location": {"id": "gid://shopify/Location/91"},
+                                            "quantities": [{"name": "available", "quantity": 12}],
+                                        }
+                                    }
+                                ]
+                            },
+                        }
+                    ],
+                    False,
+                )
+            if root_key == "orders":
+                return ([{"id": "gid://shopify/Order/1001", "name": "#1001"}], False)
+            return ([], False)
+
+        adapter._gql_list = _stub_gql_list  # type: ignore[method-assign]
+        result = adapter._live_sync()
+        self.assertEqual(result.status, "success")
+        self.assertEqual(result.summary["domains"]["Location"], 1)
+        self.assertEqual(result.summary["domains"]["Product"], 1)
+
+        bundle = adapter_store.list_records(system_id="shopify", domain="Location", limit=10)
+        recovered = {r.get("local_id") for r in bundle["external_refs"]}
+        self.assertIn("sto-nyc", recovered)
+
+        prod_bundle = adapter_store.list_records(system_id="shopify", domain="Product", limit=10)
+        recovered_skus = {r.get("local_id") for r in prod_bundle["external_refs"]}
+        self.assertIn("sku-linen-short", recovered_skus)
+
+    def test_shopify_live_sync_paginates_nested_inventory_levels(self):
+        """Items stocked in >100 locations expose a second page via
+        `inventoryLevels.pageInfo.hasNextPage`; the live sync must walk
+        that nested connection (not silently truncate) so multi-location
+        stores end up with every (item × location) row in record_cache.
+        """
+        from app.integrations import store as adapter_store
+        from app.integrations.systems import ShopifyAdapter
+
+        os.environ["SHOPIFY_SHOP_DOMAIN"] = "demo.myshopify.com"
+        os.environ["SHOPIFY_ADMIN_TOKEN"] = "shpat_demo"
+
+        adapter = ShopifyAdapter()
+
+        first_page_node = {
+            "id": "gid://shopify/InventoryItem/55",
+            "sku": "sku-multi-loc",
+            "inventoryLevels": {
+                "edges": [
+                    {
+                        "node": {
+                            "location": {"id": "gid://shopify/Location/91"},
+                            "quantities": [{"name": "available", "quantity": 5}],
+                        }
+                    }
+                ],
+                "pageInfo": {"hasNextPage": True, "endCursor": "ic-cursor"},
+            },
+        }
+
+        def _stub_gql_list(query: str, root_key: str, variables=None, max_rows=None):
+            if root_key == "inventoryItems":
+                return ([first_page_node], False)
+            return ([], False)
+
+        gql_calls: list[dict] = []
+
+        def _stub_gql(query: str, variables=None):
+            gql_calls.append({"query": query, "variables": variables})
+            return {
+                "inventoryItem": {
+                    "inventoryLevels": {
+                        "edges": [
+                            {
+                                "node": {
+                                    "location": {"id": "gid://shopify/Location/92"},
+                                    "quantities": [{"name": "available", "quantity": 3}],
+                                }
+                            }
+                        ],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    }
+                }
+            }
+
+        adapter._gql_list = _stub_gql_list  # type: ignore[method-assign]
+        adapter._gql = _stub_gql  # type: ignore[method-assign]
+        result = adapter._live_sync()
+
+        self.assertEqual(result.status, "success")
+        self.assertEqual(result.summary["domains"]["Inventory Level"], 2)
+        self.assertEqual(len(gql_calls), 1)
+        self.assertEqual(gql_calls[0]["variables"]["id"], "gid://shopify/InventoryItem/55")
+        self.assertEqual(gql_calls[0]["variables"]["cursor"], "ic-cursor")
+
+        bundle = adapter_store.list_records(system_id="shopify", domain="Inventory Level", limit=20)
+        external_ids = {r.get("external_id") for r in bundle["records"]}
+        self.assertIn("55:91", external_ids)
+        self.assertIn("55:92", external_ids)
+
+    def test_shopify_apply_promotion_creates_automatic_discount(self):
+        """promotion → discountAutomaticBasicCreate; external_id is the
+        numeric tail of the returned automatic-discount gid.
+        """
+        from app.integrations import store as adapter_store
+        from app.integrations.systems import ShopifyAdapter
+
+        os.environ["SHOPIFY_SHOP_DOMAIN"] = "demo.myshopify.com"
+        os.environ["SHOPIFY_ADMIN_TOKEN"] = "shpat_demo"
+        adapter = ShopifyAdapter()
+
+        captured: dict = {}
+
+        def _stub_gql(query: str, variables=None):
+            captured["query"] = query
+            captured["variables"] = variables
+            return {
+                "discountAutomaticBasicCreate": {
+                    "automaticDiscountNode": {"id": "gid://shopify/DiscountAutomaticNode/9001"},
+                    "userErrors": [],
+                }
+            }
+
+        adapter._gql = _stub_gql  # type: ignore[method-assign]
+        row = adapter_store.create_outbox_action(
+            system_id="shopify",
+            action_queue_id=None,
+            agent="Pricing & Promo",
+            action_type="promotion",
+            title="Summer apparel 25% off",
+            external_domain="Discount",
+            payload={"category": "summer_apparel", "discount_pct": 0.25},
+            configured=True,
+        )
+        result = adapter.apply_outbound(row["id"])
+        self.assertEqual(result["status"], "draft_created", msg=result)
+        self.assertEqual(result["external_id"], "9001")
+        # Hit the discount mutation, not anything else
+        self.assertIn("discountAutomaticBasicCreate", captured["query"])
+        # 0.25 → percentage 0.25 (already a fraction; not multiplied to 25)
+        pct = captured["variables"]["automaticBasicDiscount"]["customerGets"]["value"]["percentage"]
+        self.assertAlmostEqual(pct, 0.25, places=4)
+
+    def test_shopify_apply_promotion_reads_discount_percent_field(self):
+        """The agent/improvement_auditor flow emits `discount_percent` (not
+        `discount_pct`). Adapter must honour that key, otherwise approved
+        promotions silently fall back to the 20% default.
+        """
+        from app.integrations import store as adapter_store
+        from app.integrations.systems import ShopifyAdapter
+
+        os.environ["SHOPIFY_SHOP_DOMAIN"] = "demo.myshopify.com"
+        os.environ["SHOPIFY_ADMIN_TOKEN"] = "shpat_demo"
+        adapter = ShopifyAdapter()
+
+        captured: dict = {}
+
+        def _stub_gql(query: str, variables=None):
+            captured["variables"] = variables
+            return {
+                "discountAutomaticBasicCreate": {
+                    "automaticDiscountNode": {"id": "gid://shopify/DiscountAutomaticNode/9002"},
+                    "userErrors": [],
+                }
+            }
+
+        adapter._gql = _stub_gql  # type: ignore[method-assign]
+        row = adapter_store.create_outbox_action(
+            system_id="shopify",
+            action_queue_id=None,
+            agent="Pricing & Promo",
+            action_type="promotion",
+            title="Winter outerwear 35% off",
+            external_domain="Discount",
+            payload={"category": "outerwear", "discount_percent": 0.35},
+            configured=True,
+        )
+        result = adapter.apply_outbound(row["id"])
+        self.assertEqual(result["status"], "draft_created", msg=result)
+        pct = captured["variables"]["automaticBasicDiscount"]["customerGets"]["value"]["percentage"]
+        self.assertAlmostEqual(pct, 0.35, places=4)
+
+    def test_shopify_gql_list_flags_truncation_when_cap_hits_mid_page(self):
+        """`max_rows` reached mid-page must yield truncated=True even if
+        the current page is the last one (`hasNextPage=false`); otherwise
+        `_live_sync` reports `success` despite dropping rows.
+        """
+        from app.integrations.systems import ShopifyAdapter
+
+        os.environ["SHOPIFY_SHOP_DOMAIN"] = "demo.myshopify.com"
+        os.environ["SHOPIFY_ADMIN_TOKEN"] = "shpat_demo"
+
+        adapter = ShopifyAdapter()
+        adapter._gql = lambda q, v=None: {  # type: ignore[method-assign]
+            "products": {
+                "edges": [
+                    {"node": {"id": "gid://shopify/Product/1"}},
+                    {"node": {"id": "gid://shopify/Product/2"}},
+                    {"node": {"id": "gid://shopify/Product/3"}},
+                ],
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+            }
+        }
+        out, truncated = adapter._gql_list("query", "products", max_rows=2)
+        self.assertEqual(len(out), 2)
+        self.assertTrue(truncated, "must flag truncation when rows dropped from current page")
+
+    def test_shopify_apply_fulfillment_routing_stashes_metafield(self):
+        """fulfillment_routing → find location by retail_os.store_id metafield,
+        append routing entry to retail_os.routing_log, return location external_id.
+        """
+        from app.integrations import store as adapter_store
+        from app.integrations.systems import ShopifyAdapter
+
+        os.environ["SHOPIFY_SHOP_DOMAIN"] = "demo.myshopify.com"
+        os.environ["SHOPIFY_ADMIN_TOKEN"] = "shpat_demo"
+        adapter = ShopifyAdapter()
+
+        gql_calls: list[tuple[str, dict | None]] = []
+
+        def _stub_gql(query: str, variables=None):
+            gql_calls.append((query, variables))
+            if "LocationByStoreId" in query:
+                return {
+                    "locations": {
+                        "edges": [
+                            {
+                                "node": {
+                                    "id": "gid://shopify/Location/91",
+                                    "metafield": {"value": "sto-mia"},
+                                    "routingMf": {"value": None},
+                                }
+                            }
+                        ],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    }
+                }
+            if "MetafieldsSet" in query or "metafieldsSet" in query:
+                return {"metafieldsSet": {"metafields": [{"id": "gid://shopify/Metafield/7"}], "userErrors": []}}
+            return {}
+
+        adapter._gql = _stub_gql  # type: ignore[method-assign]
+        row = adapter_store.create_outbox_action(
+            system_id="shopify",
+            action_queue_id=None,
+            agent="Fulfillment",
+            action_type="fulfillment_routing",
+            title="Route Miami BOPIS",
+            external_domain="Fulfillment",
+            payload={"category": "summer_apparel", "recommended_store": "sto-mia", "guardrail": "uat"},
+            configured=True,
+        )
+        result = adapter.apply_outbound(row["id"])
+        self.assertEqual(result["status"], "draft_created", msg=result)
+        self.assertEqual(result["external_id"], "91")
+        # Should have looked up the location and then set the metafield
+        kinds = [q for q, _ in gql_calls]
+        self.assertTrue(any("LocationByStoreId" in q for q in kinds))
+        self.assertTrue(any("metafieldsSet" in q for q in kinds))
+
+    def test_shopify_apply_fulfillment_routing_missing_store_lands_in_error(self):
+        from app.integrations import store as adapter_store
+        from app.integrations.systems import ShopifyAdapter
+
+        os.environ["SHOPIFY_SHOP_DOMAIN"] = "demo.myshopify.com"
+        os.environ["SHOPIFY_ADMIN_TOKEN"] = "shpat_demo"
+        adapter = ShopifyAdapter()
+        adapter._gql = lambda q, v=None: {}  # type: ignore[method-assign]
+
+        row = adapter_store.create_outbox_action(
+            system_id="shopify",
+            action_queue_id=None,
+            agent="Fulfillment",
+            action_type="fulfillment_routing",
+            title="No target store",
+            external_domain="Fulfillment",
+            payload={"category": "summer_apparel"},  # no recommended_store
+            configured=True,
+        )
+        result = adapter.apply_outbound(row["id"])
+        self.assertEqual(result["status"], "error", msg=result)
+        self.assertIn("recommended_store", (result.get("result") or {}).get("message", ""))
+
+    def test_shopify_apply_campaign_brief_stashes_on_shop_metafield(self):
+        """Without KLAVIYO_API_KEY the brief lands on a Shop-level metafield.
+        external_id is the payload-hash marker so re-apply is a no-op.
+        """
+        from app.integrations import store as adapter_store
+        from app.integrations.systems import ShopifyAdapter
+
+        os.environ.pop("KLAVIYO_API_KEY", None)
+        os.environ["SHOPIFY_SHOP_DOMAIN"] = "demo.myshopify.com"
+        os.environ["SHOPIFY_ADMIN_TOKEN"] = "shpat_demo"
+        adapter = ShopifyAdapter()
+
+        def _stub_gql(query: str, variables=None):
+            if "ShopId" in query:
+                return {"shop": {"id": "gid://shopify/Shop/1"}}
+            if "ShopBriefs" in query:
+                return {"shop": {"id": "gid://shopify/Shop/1", "metafield": None}}
+            if "MetafieldsSet" in query or "metafieldsSet" in query:
+                return {"metafieldsSet": {"metafields": [{"id": "gid://shopify/Metafield/8"}], "userErrors": []}}
+            return {}
+
+        adapter._gql = _stub_gql  # type: ignore[method-assign]
+        row = adapter_store.create_outbox_action(
+            system_id="shopify",
+            action_queue_id=None,
+            agent="Marketing",
+            action_type="campaign_brief",
+            title="Weekend heatwave",
+            external_domain="Campaign",
+            payload={"category": "summer_apparel", "segment_id": "seg_vacation"},
+            configured=True,
+        )
+        result = adapter.apply_outbound(row["id"])
+        self.assertEqual(result["status"], "draft_created", msg=result)
+        # external_id is the payload-hash marker
+        self.assertTrue(result["external_id"].startswith("p"))
+        details = (result.get("result") or {}).get("details") or {}
+        self.assertEqual(details.get("channel"), "shopify-shop-metafield")
+
+    def test_shopify_apply_campaign_brief_klaviyo_passthrough(self):
+        """With KLAVIYO_API_KEY set the brief POSTs to Klaviyo instead of
+        landing on a Shop metafield.
+        """
+        from app.integrations import store as adapter_store
+        from app.integrations.systems import ShopifyAdapter
+
+        os.environ["KLAVIYO_API_KEY"] = "pk_demo"
+        os.environ["SHOPIFY_SHOP_DOMAIN"] = "demo.myshopify.com"
+        os.environ["SHOPIFY_ADMIN_TOKEN"] = "shpat_demo"
+        adapter = ShopifyAdapter()
+
+        captured_klaviyo: dict = {}
+
+        class _StubKlaviyo:
+            def request(self, path: str, method: str = "GET", payload=None):
+                captured_klaviyo["path"] = path
+                captured_klaviyo["method"] = method
+                captured_klaviyo["payload"] = payload
+                return {"data": {"id": "klv_camp_42", "type": "campaign"}}
+
+        # The Klaviyo path doesn't go through _gql; it constructs a JsonHttpClient.
+        # Patch the JsonHttpClient symbol the module imports.
+        from app.integrations import systems as systems_mod
+
+        old_client = systems_mod.JsonHttpClient
+        systems_mod.JsonHttpClient = lambda *a, **k: _StubKlaviyo()  # type: ignore[assignment]
+        try:
+            row = adapter_store.create_outbox_action(
+                system_id="shopify",
+                action_queue_id=None,
+                agent="Marketing",
+                action_type="campaign_brief",
+                title="Weekend heatwave",
+                external_domain="Campaign",
+                payload={"category": "summer_apparel"},
+                configured=True,
+            )
+            result = adapter.apply_outbound(row["id"])
+        finally:
+            systems_mod.JsonHttpClient = old_client
+            os.environ.pop("KLAVIYO_API_KEY", None)
+        self.assertEqual(result["status"], "draft_created", msg=result)
+        self.assertEqual(result["external_id"], "klv_camp_42")
+        self.assertEqual(captured_klaviyo["path"], "/api/campaigns/")
+        self.assertEqual(captured_klaviyo["method"], "POST")
+        self.assertEqual((result["result"]["details"] or {}).get("channel"), "klaviyo")
+
+    def test_shopify_apply_unsupported_action_falls_back_to_base(self):
+        """store_transfer is not in Shopify's LIVE_ACTION_TYPES; configured
+        adapter must hand off to the base mock-apply (draft_created stub
+        with no HTTP call) instead of raising.
+        """
+        from app.integrations import store as adapter_store
+        from app.integrations.systems import ShopifyAdapter
+
+        os.environ["SHOPIFY_SHOP_DOMAIN"] = "demo.myshopify.com"
+        os.environ["SHOPIFY_ADMIN_TOKEN"] = "shpat_demo"
+        adapter = ShopifyAdapter()
+
+        def _explode(*a, **k):
+            raise AssertionError("base fallback should not invoke _gql")
+
+        adapter._gql = _explode  # type: ignore[method-assign]
+        row = adapter_store.create_outbox_action(
+            system_id="shopify",
+            action_queue_id=None,
+            agent="Merchandiser",
+            action_type="store_transfer",
+            title="Cross-store transfer",
+            external_domain="Transfer",
+            payload={"from_store": "sto-chi", "to_store": "sto-mia"},
+            configured=True,
+        )
+        result = adapter.apply_outbound(row["id"])
+        # Base class: configured + creds → draft_created (no HTTP call).
+        self.assertEqual(result["status"], "draft_created")
+
+    def test_shopify_mock_sync_caches_substrate_skus(self):
+        """Without creds the adapter must still produce a useful Records
+        payload by mirroring substrate rows — same shape as the other
+        adapters' mock paths.
+        """
+        from app.integrations import store as adapter_store
+        from app.integrations.systems import ShopifyAdapter
+
+        os.environ.pop("SHOPIFY_SHOP_DOMAIN", None)
+        os.environ.pop("SHOPIFY_ADMIN_TOKEN", None)
+        adapter = ShopifyAdapter()
+        result = adapter.sync_inbound()
+        self.assertEqual(result.status, "success")
+        self.assertEqual(result.summary["mode"], "mock")
+        self.assertGreater(result.summary["domains"].get("Product", 0), 0)
+        bundle = adapter_store.list_records(system_id="shopify", domain="Product", limit=5)
+        self.assertGreater(len(bundle["records"]), 0)
 
 
 if __name__ == "__main__":

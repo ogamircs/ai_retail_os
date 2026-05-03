@@ -563,6 +563,74 @@ If a future Analyst agent ever needs to auto-create dashboards (e.g. one-shot in
 
 `backend/tests/test_integrations_superset_live.py` exercises live sync against a real Superset. Skipped automatically when `SUPERSET_*` creds aren't set or the login round-trip fails, so CI stays mock-only.
 
+## Running with real Shopify Plus
+
+Shopify is **hosted by Shopify** — there's no Docker stack to run locally. You provision a free Partner dev store and point the cockpit at it. Full setup in `infra/shopify/README.md`; quick path:
+
+```bash
+# 1. Sign up: https://partners.shopify.com/signup
+# 2. Partner Dashboard → Stores → Add store → Create development store
+#    Plan: Developer Preview (gives all Plus features for free during build)
+# 3. Dev store admin → Settings → Apps and sales channels → Develop apps
+#    → Allow custom app development → Create an app "AI Retail OS"
+# 4. Configure Admin API access scopes (see infra/shopify/README.md for the list)
+#    → Install app → reveal token (shpat_…)
+
+# 5. Wire backend/.env:
+#    SHOPIFY_SHOP_DOMAIN=ai-retail-os-demo.myshopify.com
+#    SHOPIFY_ADMIN_TOKEN=shpat_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+#    SHOPIFY_API_VERSION=2025-01
+#    # Optional Marketing passthrough:
+#    # KLAVIYO_API_KEY=pk_demo_xxxxxxxxxxxx
+
+# 6. Project the spine demo into the dev store (idempotent):
+make shopify-seed
+
+# 7. (Re)start the backend so it picks up the new env:
+cd backend && uvicorn app.main:app --reload
+```
+
+Sanity-check the credentials before seeding:
+
+```bash
+curl -sS -H "X-Shopify-Access-Token: $SHOPIFY_ADMIN_TOKEN" \
+  "https://$SHOPIFY_SHOP_DOMAIN/admin/api/$SHOPIFY_API_VERSION/shop.json" | head
+# → 200 + {"shop":{"id":...,"name":"...", ...}}
+```
+
+In the cockpit's Integrations tab the `shopify` row will show a green `connected` chip. Click `sync` to pull live Locations / Products / InventoryLevels / Orders into `record_cache` + `external_refs`. Locations and Products that carry the seed's `retail_os.store_id` / `retail_os.spine_sku` metafields round-trip back to the substrate `store_id` / `sku` so the cockpit's drawer can drill from a substrate row to the matching Shopify entity.
+
+A walkthrough lives in [`docs/uat/2026-05-03-shopify-p5-promo-demo.md`](docs/uat/2026-05-03-shopify-p5-promo-demo.md).
+
+### What lands in Shopify per action type
+
+| `action_type` | Shopify target | What happens |
+|---|---|---|
+| `promotion` | `Discounts → Automatic` | `discountAutomaticBasicCreate` mutation creates a percent-off automatic discount, store-wide, 30-day window. Title carries the category for audit. `external_id` is the numeric tail of the returned automatic-discount gid. |
+| `fulfillment_routing` | Location metafield | Looks up the Shopify location by its `retail_os.store_id` metafield (matching `payload.recommended_store`) and appends the routing intent to `retail_os.routing_log` (JSON list). Idempotent via payload-hash marker — re-applying the same payload reuses the existing entry. Shopify's `fulfillmentOrderMove` requires a concrete order id which the cockpit payloads don't carry; the metafield stash is the auditable equivalent. |
+| `campaign_brief` | Shop metafield (default) **or** Klaviyo (when `KLAVIYO_API_KEY` set) | Without Klaviyo: appends to `retail_os.campaign_briefs` JSON metafield on the **Shop** entity, idempotent via marker. With Klaviyo: POSTs to `https://a.klaviyo.com/api/campaigns/` and lands a draft campaign — `external_id` is the Klaviyo `campaign.id`. `details.channel` reads `klaviyo` instead of `shopify-shop-metafield`. |
+| anything else | (none) | Falls back to base `IntegrationAdapter.apply_outbound`: configured → `draft_created` (marker only, no HTTP call); unconfigured → `applied_mock`. No mutation in Shopify. |
+
+### Troubleshooting
+
+| Symptom | What to check |
+|---|---|
+| `shop.json` returns 401 | Token revoked or scope mismatch. Reinstall the custom app from the dev store admin to mint a fresh `shpat_…`; update `.env`. |
+| Sync returns `THROTTLED` errors | Shopify GraphQL has a leaky-bucket cost limit. The seed retries with exponential backoff (1s → 2s → 4s). For sustained throttling, lower the page sizes in `ShopifyAdapter.PRODUCTS_Q` / `INVENTORY_Q` from 100 → 50. |
+| `truncated_domains` shows up in sync summary | An explicit `max_rows` cap was hit. Default sync runs uncapped — only an explicit `max_rows` arg to `_live_sync` will set this flag. |
+| Metafield round-trip mismatch | Re-run `make shopify-seed` to refresh `retail_os.store_id` / `retail_os.spine_sku` metafields. The seed is idempotent — existing entities aren't recreated, only the metafield is re-set. |
+| Promotion lands store-wide instead of category-scoped | By design — the seed doesn't create Shopify Collections, so the discount targets `customerGets.items.all=true`. The category sits in the discount title for audit; operator can scope it manually in Shopify Admin if desired. |
+| `campaign_brief` apply lands as Shop metafield instead of Klaviyo draft | `KLAVIYO_API_KEY` not set or empty. Set it in `backend/.env` and restart uvicorn. |
+| Draft Klaviyo campaign creation returns no id | Check the Klaviyo API key has campaigns:write scope. The adapter doesn't dedupe at the Klaviyo end — repeated outbox rows with the same payload create separate drafts (the cockpit's outbox status guards against double-application via `action_id`). |
+| Apple Silicon | N/A — Shopify is cloud-hosted; nothing runs locally. |
+| Want a clean slate | Delete the dev store from Partner Dashboard → recreate from `infra/shopify/README.md` quick start. Faster than scripting cleanup since Shopify has no bulk-delete API for products + orders + locations together. |
+
+### Live-path tests
+
+`backend/tests/test_integrations_shopify_live.py` exercises live sync + apply against a real Shopify dev store. Skipped automatically when `SHOPIFY_SHOP_DOMAIN` / `SHOPIFY_ADMIN_TOKEN` aren't set or the dev store isn't reachable, so CI stays mock-only.
+
+> **Heads-up:** `ShopifyLiveApplyTest::test_promotion_creates_draft_discount_in_dev_store` creates a *real* automatic discount in the dev store. It's not destructive — Shopify Plus dev stores have no real customers — but you'll see the row in `Discounts → Automatic` after the test runs. Delete it from Shopify Admin (or `make` a clean reset) when you're done.
+
 ## Running with real GBrain
 
 GBrain (Track 6) is the cockpit's optional persistent agent memory layer — a Bun-native HTTP MCP server installed locally per the upstream pattern (`git clone + bun install + bun link`, no Docker). The cockpit runs in **mock mode by default** — without `GBRAIN_BEARER` set, the Critic's and Analyst's `brain_search` / `brain_read` / `brain_query` tools and the cockpit's `[BRAIN]` tab fall back to a substrate-backed view of `wiki_pages`, so the demo path is coherent without any external dependency.
