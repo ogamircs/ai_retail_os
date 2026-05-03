@@ -21,7 +21,6 @@ import os
 from collections.abc import Callable
 from pathlib import Path
 
-
 _TRUTHY = {"1", "true", "yes", "on"}
 
 

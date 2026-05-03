@@ -1,9 +1,9 @@
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+
 from app.config import ARTIFACTS_DIR
 from app.spine.db import conn
-
 
 # Stage values flowing through the agent mesh (Track 2 A2-A4).
 # `draft`     = first emission by an action specialist
@@ -25,7 +25,7 @@ def write_artifact(
     stage: str = "draft",
 ) -> str:
     aid = uuid.uuid4().hex[:12]
-    ts = datetime.now(timezone.utc).isoformat()
+    ts = datetime.now(UTC).isoformat()
     if stage not in KNOWN_STAGES:
         # Quietly normalise so a stale model can't poison the store, but
         # don't silently drop it — log via meta.original_stage for audit.

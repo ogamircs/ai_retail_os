@@ -5,11 +5,10 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from app.integrations import registry
 from app.main import app
 from app.spine import db
-from app.integrations import registry
 from app.substrate import omnichannel, seed
-
 
 INTEGRATION_ENV_KEYS = [
     "ERPNEXT_BASE_URL",
@@ -164,8 +163,8 @@ class IntegrationLayerTest(unittest.TestCase):
         """`campaign_launch` apply path POSTs /api/campaigns/new and writes
         the returned id back to outbox_actions as draft_created.
         """
-        from app.integrations.systems import MauticAdapter
         from app.integrations import store
+        from app.integrations.systems import MauticAdapter
 
         os.environ["MAUTIC_BASE_URL"] = "http://stub"
         os.environ["MAUTIC_USERNAME"] = "admin"
@@ -217,8 +216,8 @@ class IntegrationLayerTest(unittest.TestCase):
         """`campaign_brief` apply path is idempotent — if a segment with the
         derived alias exists, return its id rather than POSTing /new.
         """
-        from app.integrations.systems import MauticAdapter
         from app.integrations import store
+        from app.integrations.systems import MauticAdapter
 
         os.environ["MAUTIC_BASE_URL"] = "http://stub"
         os.environ["MAUTIC_USERNAME"] = "admin"
@@ -265,8 +264,8 @@ class IntegrationLayerTest(unittest.TestCase):
         """Action types not in LIVE_ACTION_TYPES should fall through to the
         base mock-apply behaviour even when the adapter is configured.
         """
-        from app.integrations.systems import MauticAdapter
         from app.integrations import store
+        from app.integrations.systems import MauticAdapter
 
         os.environ["MAUTIC_BASE_URL"] = "http://stub"
         os.environ["MAUTIC_USERNAME"] = "admin"
@@ -296,8 +295,8 @@ class IntegrationLayerTest(unittest.TestCase):
         outcome carries no external_id, so the row must land in `error`,
         not `draft_created`.
         """
-        from app.integrations.systems import MauticAdapter
         from app.integrations import store
+        from app.integrations.systems import MauticAdapter
 
         os.environ["MAUTIC_BASE_URL"] = "http://stub"
         os.environ["MAUTIC_USERNAME"] = "admin"
@@ -324,8 +323,8 @@ class IntegrationLayerTest(unittest.TestCase):
         """`store_transfer` apply → appends to the from-store stock_location's
         `metadata.retail_os_pending_transfers` and writes draft_created.
         """
-        from app.integrations.systems import MedusaAdapter
         from app.integrations import store
+        from app.integrations.systems import MedusaAdapter
 
         os.environ["MEDUSA_BASE_URL"] = "http://stub"
         os.environ["MEDUSA_ADMIN_EMAIL"] = "admin@retail.local"
@@ -384,8 +383,8 @@ class IntegrationLayerTest(unittest.TestCase):
         """Re-applying the same payload (same marker) should not duplicate
         the log entry. The second call returns reused=True.
         """
-        from app.integrations.systems import MedusaAdapter
         from app.integrations import store
+        from app.integrations.systems import MedusaAdapter
 
         os.environ["MEDUSA_BASE_URL"] = "http://stub"
         os.environ["MEDUSA_ADMIN_EMAIL"] = "admin@retail.local"
@@ -446,8 +445,8 @@ class IntegrationLayerTest(unittest.TestCase):
         self.assertEqual(posts, [])
 
     def test_medusa_apply_fulfillment_routing_records_on_sales_channel(self):
-        from app.integrations.systems import MedusaAdapter
         from app.integrations import store
+        from app.integrations.systems import MedusaAdapter
 
         os.environ["MEDUSA_BASE_URL"] = "http://stub"
         os.environ["MEDUSA_ADMIN_EMAIL"] = "admin@retail.local"
@@ -498,8 +497,8 @@ class IntegrationLayerTest(unittest.TestCase):
         self.assertEqual(log[0]["strategy"], "favor BOPIS")
 
     def test_medusa_apply_missing_from_store_lands_in_error(self):
-        from app.integrations.systems import MedusaAdapter
         from app.integrations import store
+        from app.integrations.systems import MedusaAdapter
 
         os.environ["MEDUSA_BASE_URL"] = "http://stub"
         os.environ["MEDUSA_ADMIN_EMAIL"] = "admin@retail.local"
@@ -526,8 +525,8 @@ class IntegrationLayerTest(unittest.TestCase):
 
     def test_medusa_apply_unsupported_action_falls_back_to_mock(self):
         """Action types not in LIVE_ACTION_TYPES fall through to base mock-apply."""
-        from app.integrations.systems import MedusaAdapter
         from app.integrations import store
+        from app.integrations.systems import MedusaAdapter
 
         os.environ["MEDUSA_BASE_URL"] = "http://stub"
         os.environ["MEDUSA_ADMIN_EMAIL"] = "admin@retail.local"
@@ -609,6 +608,7 @@ class IntegrationLayerTest(unittest.TestCase):
         drops the cached token on 401, re-logins, retries once.
         """
         from urllib.error import HTTPError
+
         from app.integrations.systems import MedusaAdapter
 
         os.environ["MEDUSA_BASE_URL"] = "http://stub"
@@ -663,6 +663,7 @@ class IntegrationLayerTest(unittest.TestCase):
         and would mask real upstream errors.
         """
         from urllib.error import HTTPError
+
         from app.integrations.systems import MedusaAdapter
 
         os.environ["MEDUSA_BASE_URL"] = "http://stub"
@@ -727,6 +728,7 @@ class IntegrationLayerTest(unittest.TestCase):
         stale token → drop, re-login, retry once.
         """
         from urllib.error import HTTPError
+
         from app.integrations.systems import OpenBoxesAdapter
 
         os.environ["OPENBOXES_BASE_URL"] = "http://stub"
@@ -775,8 +777,8 @@ class IntegrationLayerTest(unittest.TestCase):
         name; helper POSTs a comment per match and returns the first
         shipment id.
         """
-        from app.integrations.systems import OpenBoxesAdapter
         from app.integrations import store
+        from app.integrations.systems import OpenBoxesAdapter
 
         os.environ["OPENBOXES_BASE_URL"] = "http://stub"
         os.environ["OPENBOXES_API_TOKEN"] = "tok"
@@ -824,8 +826,8 @@ class IntegrationLayerTest(unittest.TestCase):
         """payload.pos[*].po_id with no matching shipment → no external_id
         → row lands in `error` (not `draft_created`).
         """
-        from app.integrations.systems import OpenBoxesAdapter
         from app.integrations import store
+        from app.integrations.systems import OpenBoxesAdapter
 
         os.environ["OPENBOXES_BASE_URL"] = "http://stub"
         os.environ["OPENBOXES_API_TOKEN"] = "tok"
@@ -862,8 +864,8 @@ class IntegrationLayerTest(unittest.TestCase):
         must still resolve. Indexing on `name OR shipmentNumber` would
         silently miss this case.
         """
-        from app.integrations.systems import OpenBoxesAdapter
         from app.integrations import store
+        from app.integrations.systems import OpenBoxesAdapter
 
         os.environ["OPENBOXES_BASE_URL"] = "http://stub"
         os.environ["OPENBOXES_API_TOKEN"] = "tok"
@@ -915,8 +917,8 @@ class IntegrationLayerTest(unittest.TestCase):
         shipmentNumber collision. Helper must keep the empty list
         and land the row in `error`.
         """
-        from app.integrations.systems import OpenBoxesAdapter
         from app.integrations import store
+        from app.integrations.systems import OpenBoxesAdapter
 
         os.environ["OPENBOXES_BASE_URL"] = "http://stub"
         os.environ["OPENBOXES_API_TOKEN"] = "tok"
@@ -1061,8 +1063,8 @@ class IntegrationLayerTest(unittest.TestCase):
         /api/rest/v1/products-uuid. Sync must query both and dedupe so
         UUID-only products land in record_cache.
         """
-        from app.integrations.systems import AkeneoAdapter
         from app.integrations import store
+        from app.integrations.systems import AkeneoAdapter
 
         os.environ["AKENEO_BASE_URL"] = "http://stub"
         os.environ["AKENEO_CLIENT_ID"] = "cid"
@@ -1113,6 +1115,7 @@ class IntegrationLayerTest(unittest.TestCase):
         whole run.
         """
         from urllib.error import HTTPError
+
         from app.integrations.systems import AkeneoAdapter
 
         os.environ["AKENEO_BASE_URL"] = "http://stub"
@@ -1146,8 +1149,8 @@ class IntegrationLayerTest(unittest.TestCase):
         [retail-os:<sku>] description marker. Dropping such rows would
         silently truncate the cache.
         """
-        from app.integrations.systems import AkeneoAdapter
         from app.integrations import store
+        from app.integrations.systems import AkeneoAdapter
 
         os.environ["AKENEO_BASE_URL"] = "http://stub"
         os.environ["AKENEO_CLIENT_ID"] = "cid"
@@ -1194,8 +1197,8 @@ class IntegrationLayerTest(unittest.TestCase):
         self.assertEqual(ext_ids, {"SKU-A", "uuid-b-1234", "SKU-C"})
 
     def test_akeneo_apply_pim_enrich_patches_product(self):
-        from app.integrations.systems import AkeneoAdapter
         from app.integrations import store
+        from app.integrations.systems import AkeneoAdapter
 
         os.environ["AKENEO_BASE_URL"] = "http://stub"
         os.environ["AKENEO_CLIENT_ID"] = "cid"
@@ -1241,8 +1244,8 @@ class IntegrationLayerTest(unittest.TestCase):
         self.assertEqual(captured["payload"]["identifier"], "SKU-001")
 
     def test_akeneo_apply_missing_sku_lands_in_error(self):
-        from app.integrations.systems import AkeneoAdapter
         from app.integrations import store
+        from app.integrations.systems import AkeneoAdapter
 
         os.environ["AKENEO_BASE_URL"] = "http://stub"
         os.environ["AKENEO_CLIENT_ID"] = "cid"
@@ -1272,8 +1275,8 @@ class IntegrationLayerTest(unittest.TestCase):
         """`store_transfer` (declared in outbound_domain but NOT in
         LIVE_ACTION_TYPES for OpenBoxes) falls back to base mock-apply.
         """
-        from app.integrations.systems import OpenBoxesAdapter
         from app.integrations import store
+        from app.integrations.systems import OpenBoxesAdapter
 
         os.environ["OPENBOXES_BASE_URL"] = "http://stub"
         os.environ["OPENBOXES_API_TOKEN"] = "tok"
@@ -1390,8 +1393,9 @@ class IntegrationLayerTest(unittest.TestCase):
         token, re-login, and retry once. Mirror of Akeneo / Medusa /
         OpenBoxes shared behaviour.
         """
-        from app.integrations.systems import SupersetAdapter
         from urllib.error import HTTPError
+
+        from app.integrations.systems import SupersetAdapter
 
         os.environ["SUPERSET_BASE_URL"] = "http://stub"
         os.environ["SUPERSET_USERNAME"] = "admin"
@@ -1437,8 +1441,8 @@ class IntegrationLayerTest(unittest.TestCase):
 
     def test_superset_live_sync_caches_dashboard_with_slug_local_id(self):
         """Dashboards round-trip with slug as local_id (preferred over title)."""
-        from app.integrations.systems import SupersetAdapter
         from app.integrations import store
+        from app.integrations.systems import SupersetAdapter
 
         os.environ["SUPERSET_BASE_URL"] = "http://stub"
         os.environ["SUPERSET_USERNAME"] = "admin"
@@ -1480,8 +1484,8 @@ class IntegrationLayerTest(unittest.TestCase):
         """Superset is read-only: any action_type must hit the base
         adapter (LIVE_ACTION_TYPES is empty by design).
         """
-        from app.integrations.systems import SupersetAdapter
         from app.integrations import store
+        from app.integrations.systems import SupersetAdapter
 
         os.environ["SUPERSET_BASE_URL"] = "http://stub"
         os.environ["SUPERSET_USERNAME"] = "admin"

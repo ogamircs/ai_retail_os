@@ -23,12 +23,12 @@ about this?").
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
 
 from app.llm.base import Tool
+from app.spine import wiki as wiki_store
 from app.spine.artifacts import read_artifact, write_artifact
 from app.spine.events import append_event
-from app.spine import wiki as wiki_store
 
 
 def build_read_artifact_tool() -> tuple[Tool, Callable[[dict], dict]]:

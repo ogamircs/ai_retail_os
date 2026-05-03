@@ -1,5 +1,6 @@
 import sqlite3
 from contextlib import contextmanager
+
 from app.config import DB_PATH
 
 SCHEMA = """

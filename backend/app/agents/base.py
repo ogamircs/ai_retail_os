@@ -2,10 +2,10 @@
 loop call_llm → execute tool calls → feed results back until stop."""
 
 import json
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from typing import Callable
-from app.llm.base import LLMProvider, Tool, Message, ToolCall
+
+from app.llm.base import LLMProvider, Message, Tool
 
 
 @dataclass

@@ -125,6 +125,7 @@ class WriteCompiledPromptTest(unittest.TestCase):
         means the loser of the v(n+1) slot rescans and bumps to
         v(n+2), instead of silently overwriting the winner."""
         import threading
+
         from app.agents.dspy_compile import write_compiled_prompt
 
         class _M:

@@ -26,7 +26,7 @@ from __future__ import annotations
 import json
 import os
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app.spine.artifacts import write_artifact
@@ -53,7 +53,7 @@ def _format_table(rows: list[tuple[str, ...]], headers: tuple[str, ...]) -> str:
 def aggregate(window_hours: int = 24) -> dict[str, Any]:
     """Compute the raw aggregates without writing an artifact. Useful
     for unit tests + the cockpit's M5 Reports rendering."""
-    since = (datetime.now(timezone.utc) - timedelta(hours=window_hours)).isoformat()
+    since = (datetime.now(UTC) - timedelta(hours=window_hours)).isoformat()
     events = events_since_ts(since)
 
     agent_counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))

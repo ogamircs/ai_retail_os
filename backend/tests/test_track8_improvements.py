@@ -95,7 +95,7 @@ class RunLifecycleTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_create_then_complete_run(self):
-        from app.agents.improvement_auditor import create_run, complete_run, get_run
+        from app.agents.improvement_auditor import complete_run, create_run, get_run
 
         create_run("r1")
         run = get_run("r1")
@@ -109,7 +109,7 @@ class RunLifecycleTest(unittest.TestCase):
         self.assertEqual(run["summary"]["suggestions"], 3)
 
     def test_complete_run_with_error_marks_status(self):
-        from app.agents.improvement_auditor import create_run, complete_run, get_run
+        from app.agents.improvement_auditor import complete_run, create_run, get_run
 
         create_run("r2")
         complete_run("r2", {"phase": "agent"}, error="LLM failed")

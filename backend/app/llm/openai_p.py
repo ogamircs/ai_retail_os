@@ -1,7 +1,8 @@
 import json
-import uuid
+
 from openai import OpenAI
-from app.llm.base import LLMProvider, Tool, Message, AssistantTurn, ToolCall
+
+from app.llm.base import AssistantTurn, Message, Tool, ToolCall
 
 
 class OpenAIProvider:

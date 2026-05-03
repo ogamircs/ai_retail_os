@@ -1,17 +1,17 @@
 from __future__ import annotations
 
-from base64 import b64encode
-from datetime import datetime, timezone
 import json
 import os
 import re
+from base64 import b64encode
+from datetime import UTC, datetime
 from typing import Any
 from urllib.error import HTTPError
 from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
-from app.integrations.base import IntegrationAdapter, IntegrationDefinition, IntegrationResult
 from app.integrations import store
+from app.integrations.base import IntegrationAdapter, IntegrationDefinition, IntegrationResult
 from app.spine.db import conn
 
 
@@ -468,7 +468,8 @@ class ERPNextAdapter(IntegrationAdapter):
                 "message": f"No purchase-order rows in payload for {action_type}.",
                 "details": {"payload_keys": list(payload.keys())},
             }
-        from datetime import date, datetime as _dt, timedelta
+        from datetime import datetime as _dt
+        from datetime import timedelta
 
         annotated: list[str] = []
         bumped: list[dict[str, str]] = []
@@ -2856,7 +2857,7 @@ class ShopifyAdapter(IntegrationAdapter):
 
         def _ingest_level_node(node: dict[str, Any], item_id: str, sku: str | None) -> None:
             nonlocal records_written, records_read
-            loc_id = _shopify_gid_tail(((node.get("location") or {}).get("id")))
+            loc_id = _shopify_gid_tail((node.get("location") or {}).get("id"))
             qty_rows = node.get("quantities") or []
             qty = next(
                 (q.get("quantity") for q in qty_rows if (q or {}).get("name") == "available"),
@@ -3093,7 +3094,7 @@ class ShopifyAdapter(IntegrationAdapter):
         embedded in the title for audit. Operator can scope it manually if
         needed — the cockpit's job is to draft, not to enforce scope.
         """
-        from datetime import datetime, timedelta, timezone
+        from datetime import timedelta
 
         pct = float(
             payload.get("discount_pct")
@@ -3103,7 +3104,7 @@ class ShopifyAdapter(IntegrationAdapter):
         )
         if pct > 1:
             pct = pct / 100.0
-        starts = datetime.now(timezone.utc).replace(microsecond=0)
+        starts = datetime.now(UTC).replace(microsecond=0)
         ends = starts + timedelta(days=30)
         discount_title = f"AI Retail OS — {title} ({payload.get('category', 'all')})"
         result = self._gql(

@@ -30,7 +30,8 @@ MLFLOW_COMPOSE := docker compose -p ai-retail-mlflow -f $(MLFLOW_DIR)/docker-com
         superset-up superset-down superset-bootstrap superset-seed superset-logs superset-status superset-nuke \
         mlflow-up mlflow-down mlflow-logs mlflow-status mlflow-nuke \
         shopify-seed \
-        test test-live test-live-erpnext test-live-mautic test-live-medusa test-live-openboxes test-live-akeneo test-live-superset test-live-shopify
+        test test-live test-live-erpnext test-live-mautic test-live-medusa test-live-openboxes test-live-akeneo test-live-superset test-live-shopify \
+        check lint typecheck frontend-check
 
 help:
 	@echo "ERPNext:"
@@ -107,6 +108,12 @@ help:
 	@echo "  test-live-akeneo      run only the Akeneo live suite (RUN_AKENEO_LIVE=1)"
 	@echo "  test-live-superset    run only the Superset live suite (RUN_SUPERSET_LIVE=1)"
 	@echo "  test-live-shopify     run only the Shopify live suite (RUN_SHOPIFY_LIVE=1)"
+	@echo ""
+	@echo "Quality gate (one-command repo health check):"
+	@echo "  check                 run lint + typecheck + python tests + frontend build + tsc"
+	@echo "  lint                  ruff (backend) only"
+	@echo "  typecheck             pyright (backend) only"
+	@echo "  frontend-check        vite build + tsc --noEmit (frontend) only"
 
 erpnext-up:
 	$(ERPNEXT_COMPOSE) up -d
@@ -288,6 +295,27 @@ test-live-superset:
 
 test-live-shopify:
 	cd backend && RUN_SHOPIFY_LIVE=1 ./.venv/bin/python -m unittest tests.test_integrations_shopify_live
+
+# ---- Quality gate ---------------------------------------------------------
+# `make check` is the single command operators (and CI, eventually) run to
+# verify repo health. It chains every fast check we have. Add new checks here,
+# not as ad-hoc one-offs in PR descriptions.
+#
+# Requirements: backend `pip install -e '.[dev]'` (ruff + pyright) and
+# `npm install` in frontend.
+
+lint:
+	cd backend && ./.venv/bin/ruff check app tests
+
+typecheck:
+	cd backend && ./.venv/bin/pyright
+
+frontend-check:
+	cd frontend && npm run typecheck && npm run build
+
+check: lint typecheck test frontend-check
+	@echo ""
+	@echo "✓ check passed — lint clean, types green, tests pass, frontend builds"
 
 # Track 6 — GBrain. Not a docker-compose stack — GBrain is a Bun-native
 # CLI installed via `git clone + bun install + bun link`. These targets

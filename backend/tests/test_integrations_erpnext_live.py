@@ -17,7 +17,6 @@ from urllib.request import Request, urlopen
 
 from tests._live_gate import load_env, skip_reason
 
-
 load_env()
 
 REQUIRED_ENV = ("ERPNEXT_BASE_URL", "ERPNEXT_API_KEY", "ERPNEXT_API_SECRET")
@@ -285,7 +284,7 @@ class ERPNextLiveApplyTest(unittest.TestCase):
         """Action types ERPNext doesn't know about (e.g. campaign_brief) must
         not break the apply flow — they fall back to the base adapter's
         `draft_created` path."""
-        from app.integrations import registry, store
+        from app.integrations import registry
         from app.integrations.systems import ADAPTERS
 
         adapter = next(a for a in ADAPTERS if a.definition.system_id == "erpnext")

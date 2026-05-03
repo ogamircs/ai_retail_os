@@ -34,11 +34,11 @@ import contextvars
 import json
 import os
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Any, Iterator
+from typing import Any
 
 from app.llm.base import AssistantTurn, LLMProvider, Message, Tool
-
 
 # ----------------------------------------------------------------------
 # Optional mlflow loader

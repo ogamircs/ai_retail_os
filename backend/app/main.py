@@ -1,19 +1,21 @@
-import json
 import asyncio
+import json
+from datetime import UTC
+
 from fastapi import Body, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
+
+from app.agents.chief_of_staff import run_chief
 from app.config import settings
-from app.spine.db import init_db
-from app.spine import events as ev_store
-from app.spine import artifacts as art_store
-from app.spine import kg as kg_store
-from app.substrate import omnichannel
 from app.integrations import registry as integration_registry
 from app.llm import get_provider
-from app.agents.chief_of_staff import run_chief
 from app.schemas import ChatRequest, ConfigOut, ConfigSet
-
+from app.spine import artifacts as art_store
+from app.spine import events as ev_store
+from app.spine import kg as kg_store
+from app.spine.db import init_db
+from app.substrate import omnichannel
 
 app = FastAPI(title="AI Retail OS")
 app.add_middleware(
@@ -176,10 +178,11 @@ def mesh_status(window_seconds: int = 300):
     can render a chip + tooltip without hitting the events endpoint
     directly.
     """
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
+
     from app.config import mesh as mesh_settings
 
-    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=window_seconds)).isoformat()
+    cutoff = (datetime.now(UTC) - timedelta(seconds=window_seconds)).isoformat()
     recent = [e for e in ev_store.events_since_ts(cutoff) if e["kind"] == "mesh_downgrade"]
     last = recent[-1] if recent else None
     return {
@@ -301,8 +304,8 @@ def mlflow_status(limit_runs: int = 10):
     `urllib.request` against MLflow's public `/ajax-api/2.0` JSON
     endpoints is enough.
     """
-    import os
     import json
+    import os
     from urllib.error import HTTPError, URLError
     from urllib.request import Request, urlopen
 
@@ -427,7 +430,7 @@ def improvements_run():
     try:
         llm = get_provider()
     except RuntimeError as e:
-        raise HTTPException(500, str(e))
+        raise HTTPException(500, str(e)) from e
 
     run_id = uuid.uuid4().hex[:12]
     ia.create_run(run_id)
@@ -662,9 +665,9 @@ def _run_dspy_compile_job(job_id: str, agent_slug: str, auto_promote: bool) -> N
 
 
 def _now_iso() -> str:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 @app.post("/api/dspy/optimize/{agent_slug}")
@@ -725,7 +728,7 @@ async def chat(req: ChatRequest):
     try:
         llm = get_provider()
     except RuntimeError as e:
-        raise HTTPException(500, str(e))
+        raise HTTPException(500, str(e)) from e
 
     async def event_gen():
         loop = asyncio.get_running_loop()

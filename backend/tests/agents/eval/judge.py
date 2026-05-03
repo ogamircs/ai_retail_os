@@ -24,7 +24,6 @@ from dataclasses import dataclass
 
 from app.llm import get_provider
 from app.llm.base import Message, Tool
-
 from tests.agents.eval.scenarios import EvalScenario
 
 

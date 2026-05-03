@@ -11,21 +11,20 @@ read the critique and revise.
 
 from __future__ import annotations
 
-from app.agents.base import Agent
 from app.agents._mesh_tools import (
+    build_brain_query_tool,
+    build_brain_read_tool,
+    build_brain_search_tool,
+    build_code_lookup_tool,
     build_wiki_read_tool,
     build_wiki_search_tool,
-    build_brain_search_tool,
-    build_brain_read_tool,
-    build_brain_query_tool,
-    build_code_lookup_tool,
 )
+from app.agents.base import Agent
 from app.llm.base import Tool
 from app.llm.prompts import resolve_prompt
-from app.spine.events import append_event, events_since_ts
 from app.spine.artifacts import read_artifact, write_artifact
+from app.spine.events import append_event, events_since_ts
 from app.substrate import omnichannel, pos
-
 
 NAME = "Critic"
 
