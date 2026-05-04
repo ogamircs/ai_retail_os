@@ -15,6 +15,35 @@ current_turn_id: contextvars.ContextVar[str] = contextvars.ContextVar(
 )
 
 
+# Closed set of event kinds. The architecture doc and the Analyst's
+# measurement queries both depend on this vocabulary being stable, so
+# `append_event` rejects anything outside the set rather than silently
+# admitting a typo into the audit log. To add a new kind: append it
+# here, document the producer/consumer in the architecture doc, and
+# update tests.
+EVENT_KINDS: frozenset[str] = frozenset({
+    # Operator + agent decision trail
+    "decision",
+    "action",
+    "observation",
+    "proposal",
+    # Approval / outbound flow
+    "approval_required",
+    "rollback",
+    "measurement",
+    # Marketing telemetry
+    "campaign_launch",
+    # Mesh guardrail telemetry (Track 2 A6)
+    "mesh_downgrade",
+    # Wiki audit (Track 5)
+    "wiki_edit",
+    "wiki_publish",
+    "wiki_deprecate",
+    # GBrain ingest pings (Track 6)
+    "brain_ingest",
+})
+
+
 def append_event(
     agent: str,
     kind: str,
@@ -22,6 +51,10 @@ def append_event(
     sku: str | None = None,
     artifact_id: str | None = None,
 ) -> int:
+    if kind not in EVENT_KINDS:
+        raise ValueError(
+            f"unknown event kind {kind!r}; allowed: {sorted(EVENT_KINDS)}"
+        )
     ts = datetime.now(UTC).isoformat()
     # Auto-stamp the active turn id into the payload so per-turn
     # walkers (auto-publish, curator) can filter their event windows
