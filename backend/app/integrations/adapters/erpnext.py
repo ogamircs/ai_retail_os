@@ -288,72 +288,6 @@ class ERPNextAdapter(IntegrationAdapter):
         "fulfillment_routing",
     }
 
-    def apply_outbound(self, action_id: int) -> dict[str, Any]:
-        from app.integrations import store
-
-        action = store.get_outbox_action(action_id, system_id=self.definition.system_id)
-        if not action:
-            return {"error": f"unknown outbox action: {action_id}"}
-        if action["status"] in {"applied", "applied_mock", "draft_created"}:
-            return action
-
-        # Mock-mode and unsupported action types fall back to the base flow,
-        # which records `applied_mock` / `draft_created` without external I/O.
-        if not self.configured() or action["action_type"] not in self.LIVE_ACTION_TYPES:
-            return super().apply_outbound(action_id)
-
-        try:
-            outcome = self._dispatch_outbound(action)
-        except Exception as exc:  # pragma: no cover - exercised only with live ERPNext
-            return store.update_outbox_action(
-                action_id,
-                status="error",
-                result={
-                    "error": str(exc),
-                    "system_id": self.definition.system_id,
-                    "external_domain": action["external_domain"],
-                    "message": (
-                        "ERPNext rejected the apply. The outbox action is left in "
-                        "error state — fix the upstream payload and retry."
-                    ),
-                },
-            )
-
-        # `external_id is None` means the helper ran cleanly but couldn't
-        # actually create / annotate anything in ERPNext — e.g. po_held with
-        # an empty payload, or no Purchase Order matched (supplier, schedule_date).
-        # Marking that as `draft_created` would lie about the outcome and
-        # pre-empt a retry. Land the row in `error` instead so the operator
-        # sees a red chip and the queue keeps the action open.
-        if not outcome.get("external_id"):
-            return store.update_outbox_action(
-                action_id,
-                status="error",
-                result={
-                    "error": outcome.get("message", "ERPNext apply produced no external_id"),
-                    "system_id": self.definition.system_id,
-                    "external_domain": action["external_domain"],
-                    "message": outcome.get(
-                        "message",
-                        "ERPNext returned no external_id — nothing was written. Check the outbox payload and retry.",
-                    ),
-                    "details": outcome.get("details", {}),
-                },
-            )
-
-        return store.update_outbox_action(
-            action_id,
-            status="draft_created",
-            external_id=outcome["external_id"],
-            result={
-                "message": outcome.get("message", "Draft created in ERPNext."),
-                "system_id": self.definition.system_id,
-                "external_domain": action["external_domain"],
-                "external_id": outcome["external_id"],
-                "details": outcome.get("details", {}),
-            },
-        )
-
     def _dispatch_outbound(self, action: dict[str, Any]) -> dict[str, Any]:
         action_type = action["action_type"]
         payload = action.get("payload") or {}
@@ -436,22 +370,61 @@ class ERPNextAdapter(IntegrationAdapter):
         annotated: list[str] = []
         bumped: list[dict[str, str]] = []
         unmatched: list[dict[str, str]] = []
+        match_strategy: dict[str, str] = {}
         reason = payload.get("reason") or ""
         for po in pos:
+            po_id = po.get("po_id")
             vendor = po.get("vendor")
             eta = (po.get("eta") or "").split("T")[0]
-            if not vendor or not eta:
-                unmatched.append({"po_id": po.get("po_id"), "reason": "missing vendor or eta"})
-                continue
-            filters = json.dumps([["supplier", "=", vendor], ["schedule_date", "=", eta]])
-            body = self._client().request(
-                f"/api/resource/{quote('Purchase Order')}?filters={quote(filters)}&limit_page_length=1"
-            )
-            rows = body.get("data") or []
-            if not rows:
-                unmatched.append({"po_id": po.get("po_id"), "vendor": vendor, "eta": eta})
-                continue
-            po_name = rows[0]["name"]
+
+            # Preferred path: look up by external_ref so we hit the
+            # exact ERPNext PO that mirrors our substrate row, immune
+            # to vendor / schedule_date drift.
+            po_name: str | None = None
+            if po_id:
+                ref = store.find_external_ref(
+                    system_id=self.definition.system_id,
+                    domain="Purchase Order",
+                    local_id=str(po_id),
+                )
+                if ref:
+                    po_name = ref["external_id"]
+                    match_strategy[str(po_id)] = "external_ref"
+
+            # Fallback: vendor + schedule_date filter. Brittle (any
+            # operator-side reschedule on the desk side breaks it),
+            # but covers POs created in ERPNext outside our sync.
+            if not po_name:
+                if not vendor or not eta:
+                    unmatched.append({
+                        "po_id": po_id,
+                        "reason": (
+                            "no external_ref and missing vendor/eta — re-sync "
+                            "ERPNext or include both fields in the payload"
+                        ),
+                    })
+                    continue
+                filters = json.dumps([["supplier", "=", vendor], ["schedule_date", "=", eta]])
+                body = self._client().request(
+                    f"/api/resource/{quote('Purchase Order')}?filters={quote(filters)}&limit_page_length=1"
+                )
+                rows = body.get("data") or []
+                if not rows:
+                    unmatched.append({
+                        "po_id": po_id,
+                        "vendor": vendor,
+                        "eta": eta,
+                        "reason": (
+                            "no PO matched supplier+schedule_date — vendor renamed "
+                            "or schedule_date changed in ERPNext; re-sync to refresh "
+                            "external_refs and retry"
+                        ),
+                    })
+                    continue
+                po_name = rows[0]["name"]
+                if po_id:
+                    match_strategy[str(po_id)] = "vendor+schedule_date"
+            assert po_name is not None  # narrowed by both branches above
             content = f"AI Retail OS · {action_type.replace('_', ' ')}"
             if reason:
                 content += f" — {reason}"
@@ -496,7 +469,12 @@ class ERPNextAdapter(IntegrationAdapter):
                 + (f"; bumped {len(bumped)} schedule_date(s)" if bumped else "")
                 + "."
             ),
-            "details": {"annotated": annotated, "bumped": bumped, "unmatched": unmatched},
+            "details": {
+                "annotated": annotated,
+                "bumped": bumped,
+                "unmatched": unmatched,
+                "match_strategy": match_strategy,
+            },
         }
 
     def _erp_create_stock_entry(self, title: str, payload: dict[str, Any]) -> dict[str, Any]:

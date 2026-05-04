@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Body, HTTPException
 
+from app.schemas import WikiPagesResponse
 from app.spine import wiki as wiki_store
 
 router = APIRouter()
@@ -75,6 +76,6 @@ def wiki_pin(slug: str, body: dict | None = Body(default=None)):
     return {"page": page.to_dict()}
 
 
-@router.get("/api/wiki/pinned")
+@router.get("/api/wiki/pinned", response_model=WikiPagesResponse)
 def wiki_pinned():
     return {"pages": [p.to_dict() for p in wiki_store.list_pinned()]}

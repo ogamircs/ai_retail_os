@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException
 
 from app.agents import improvement_auditor as ia
 from app.llm import get_provider
+from app.schemas import ImprovementRunsResponse, ImprovementSuggestionsResponse
 
 router = APIRouter()
 
@@ -51,12 +52,12 @@ def improvements_run_status(run_id: str):
     return run
 
 
-@router.get("/api/improvements/runs")
+@router.get("/api/improvements/runs", response_model=ImprovementRunsResponse)
 def improvements_runs_list(limit: int = 20):
     return {"runs": ia.list_runs(limit=limit)}
 
 
-@router.get("/api/improvements/suggestions")
+@router.get("/api/improvements/suggestions", response_model=ImprovementSuggestionsResponse)
 def improvements_suggestions(
     status: str | None = "open",
     run_id: str | None = None,

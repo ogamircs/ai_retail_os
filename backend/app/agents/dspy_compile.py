@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -80,7 +81,7 @@ def _collect_demos(compiled_module: Any) -> list[dict]:
     """
     out: list[dict] = []
     seen: set[int] = set()
-    queue = [compiled_module]
+    queue: list[Any] = [compiled_module]
     while queue:
         node = queue.pop(0)
         nid = id(node)
@@ -97,10 +98,13 @@ def _collect_demos(compiled_module: Any) -> list[dict]:
         named = getattr(node, "named_predictors", None)
         if callable(named):
             try:
-                for _, child in named():
-                    queue.append(child)
+                children = named()
             except Exception:
-                pass
+                children = None
+            if isinstance(children, Iterable):
+                for child_entry in children:
+                    if isinstance(child_entry, tuple) and len(child_entry) == 2:
+                        queue.append(child_entry[1])
         for v in vars(node).values():
             # Avoid sucking in strings, numbers, or lists of demos
             # we already harvested.

@@ -303,64 +303,6 @@ class MedusaAdapter(IntegrationAdapter):
     # directly from the Medusa admin UI.
     LIVE_ACTION_TYPES = {"store_transfer", "fulfillment_routing"}
 
-    def apply_outbound(self, action_id: int) -> dict[str, Any]:
-        from app.integrations import store
-
-        action = store.get_outbox_action(action_id, system_id=self.definition.system_id)
-        if not action:
-            return {"error": f"unknown outbox action: {action_id}"}
-        if action["status"] in {"applied", "applied_mock", "draft_created"}:
-            return action
-
-        if not self.configured() or action["action_type"] not in self.LIVE_ACTION_TYPES:
-            return super().apply_outbound(action_id)
-
-        try:
-            outcome = self._dispatch_outbound(action)
-        except Exception as exc:  # pragma: no cover - exercised only with live Medusa
-            return store.update_outbox_action(
-                action_id,
-                status="error",
-                result={
-                    "error": str(exc),
-                    "system_id": self.definition.system_id,
-                    "external_domain": action["external_domain"],
-                    "message": (
-                        "Medusa rejected the apply. The outbox action is left "
-                        "in error state — fix the upstream payload and retry."
-                    ),
-                },
-            )
-
-        if not outcome.get("external_id"):
-            return store.update_outbox_action(
-                action_id,
-                status="error",
-                result={
-                    "error": outcome.get("message", "Medusa apply produced no external_id"),
-                    "system_id": self.definition.system_id,
-                    "external_domain": action["external_domain"],
-                    "message": outcome.get(
-                        "message",
-                        "Medusa returned no external_id — nothing was written. Check the outbox payload and retry.",
-                    ),
-                    "details": outcome.get("details", {}),
-                },
-            )
-
-        return store.update_outbox_action(
-            action_id,
-            status="draft_created",
-            external_id=outcome["external_id"],
-            result={
-                "message": outcome.get("message", "Recorded action in Medusa."),
-                "system_id": self.definition.system_id,
-                "external_domain": action["external_domain"],
-                "external_id": outcome["external_id"],
-                "details": outcome.get("details", {}),
-            },
-        )
-
     def _dispatch_outbound(self, action: dict[str, Any]) -> dict[str, Any]:
         action_type = action["action_type"]
         payload = action.get("payload") or {}

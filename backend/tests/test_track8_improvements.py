@@ -316,7 +316,10 @@ class ImprovementsApiRoutesTest(unittest.TestCase):
         # Patch survives the duration of the background thread —
         # exiting the `with` before the thread finishes would let the
         # real (LLM-driven) run_audit fire and break the test.
-        with mock.patch.object(ia, "run_audit", _fake_audit):
+        with (
+            mock.patch("app.routes.improvements.get_provider", return_value=object()),
+            mock.patch.object(ia, "run_audit", _fake_audit),
+        ):
             r = self.client.post("/api/improvements/run")
             self.assertEqual(r.status_code, 200)
             body = r.json()
