@@ -313,11 +313,34 @@ CREATE INDEX IF NOT EXISTS idx_improvement_suggestions_open ON improvement_sugge
 """
 
 
+# v2 — durable background jobs. Replaces in-memory `_DSPY_JOBS` dict
+# in `app/routes/dspy.py` so terminal status survives backend restarts.
+# Every job has a kind ('dspy_compile' for now; reserved for future
+# 'brain_reindex' / 'auditor' unification). metadata_json holds
+# kind-specific payload (e.g. agent_slug + auto_promote flag).
+BACKGROUND_JOBS_SQL = """
+CREATE TABLE IF NOT EXISTS background_jobs (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,           -- e.g. 'dspy_compile'
+    title TEXT NOT NULL,
+    status TEXT NOT NULL,         -- 'running' | 'ok' | 'error' | 'cancelled'
+    started_at TEXT NOT NULL,
+    ended_at TEXT,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    summary_json TEXT NOT NULL DEFAULT '{}',
+    error TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_background_jobs_kind ON background_jobs(kind, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_background_jobs_status ON background_jobs(status, started_at DESC);
+"""
+
+
 # Append-only. To add a new migration: bump version, append a tuple.
 # Never edit a row above — older databases are out there with these
 # exact strings already applied.
 MIGRATIONS: list[tuple[int, str, str]] = [
     (1, "Initial schema baseline", BASELINE_SQL),
+    (2, "Durable background jobs (DSPy compiles, future brain_reindex/auditor)", BACKGROUND_JOBS_SQL),
 ]
 
 

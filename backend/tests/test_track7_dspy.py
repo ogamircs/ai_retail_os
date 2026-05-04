@@ -385,7 +385,12 @@ class DspyApiRoutesTest(unittest.TestCase):
         from fastapi.testclient import TestClient
 
         from app.main import app
+        from app.spine.db import init_db
 
+        # FastAPI startup runs on first request via the lifespan, but
+        # we hit `/api/dspy/jobs` immediately and need migrations applied
+        # against the real DB_PATH up front (background_jobs table).
+        init_db()
         self.client = TestClient(app)
 
     def test_list_agents_returns_aliases(self):
@@ -402,15 +407,13 @@ class DspyApiRoutesTest(unittest.TestCase):
     def test_compile_route_kicks_off_background_job(self):
         # Patch the worker so the test doesn't need dspy-ai.
         from app.routes import dspy as dspy_route
+        from app.spine import jobs as job_store
 
         called: dict = {}
 
         def _fake_worker(job_id: str, agent_slug: str, auto_promote: bool):
             called["job_id"] = job_id
-            with dspy_route._DSPY_JOBS_LOCK:
-                dspy_route._DSPY_JOBS[job_id].update(
-                    {"status": "ok", "summary": {"version": "v9"}}
-                )
+            job_store.complete_job(job_id, summary={"version": "v9"})
 
         with mock.patch.object(dspy_route, "_run_dspy_compile_job", _fake_worker):
             r = self.client.post("/api/dspy/optimize/analyst")

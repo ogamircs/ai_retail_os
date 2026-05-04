@@ -124,7 +124,7 @@ class MigrationTest(unittest.TestCase):
             v = c.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()[
                 "v"
             ]
-            self.assertEqual(v, 1)
+            self.assertEqual(v, latest_version())
             # Pre-existing data still there — adoption was non-destructive.
             row = c.execute(
                 "SELECT name FROM substrate_skus WHERE sku = ?", ("test-sku",)

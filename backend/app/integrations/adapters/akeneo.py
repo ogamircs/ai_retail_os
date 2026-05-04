@@ -283,54 +283,6 @@ class AkeneoAdapter(IntegrationAdapter):
     # agent that proposes copy / metadata edits can apply via PATCH
     # /api/rest/v1/products/{code} without further adapter work.
 
-    def apply_outbound(self, action_id: int) -> dict[str, Any]:
-        from app.integrations import store as _store
-
-        action = _store.get_outbox_action(action_id, system_id=self.definition.system_id)
-        if not action:
-            return {"error": f"unknown outbox action: {action_id}"}
-        if action["status"] in {"applied", "applied_mock", "draft_created"}:
-            return action
-        if not self.configured() or action["action_type"] not in self.LIVE_ACTION_TYPES:
-            return super().apply_outbound(action_id)
-        try:
-            outcome = self._dispatch_outbound(action)
-        except Exception as exc:  # pragma: no cover - live only
-            return _store.update_outbox_action(
-                action_id,
-                status="error",
-                result={
-                    "error": str(exc),
-                    "system_id": self.definition.system_id,
-                    "external_domain": action["external_domain"],
-                    "message": "Akeneo rejected the apply.",
-                },
-            )
-        if not outcome.get("external_id"):
-            return _store.update_outbox_action(
-                action_id,
-                status="error",
-                result={
-                    "error": outcome.get("message", "Akeneo apply produced no external_id"),
-                    "system_id": self.definition.system_id,
-                    "external_domain": action["external_domain"],
-                    "message": outcome.get("message", "Akeneo returned no external_id."),
-                    "details": outcome.get("details", {}),
-                },
-            )
-        return _store.update_outbox_action(
-            action_id,
-            status="draft_created",
-            external_id=outcome["external_id"],
-            result={
-                "message": outcome.get("message", "PIM enrichment applied."),
-                "system_id": self.definition.system_id,
-                "external_domain": action["external_domain"],
-                "external_id": outcome["external_id"],
-                "details": outcome.get("details", {}),
-            },
-        )
-
     def _dispatch_outbound(self, action: dict[str, Any]) -> dict[str, Any]:
         action_type = action["action_type"]
         payload = action.get("payload") or {}
