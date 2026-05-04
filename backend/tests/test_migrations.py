@@ -15,6 +15,8 @@ from __future__ import annotations
 import os
 import sqlite3
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -197,6 +199,81 @@ class MigrationTest(unittest.TestCase):
                 self.assertIsNone(row, msg="failed migration leaked partial DDL")
                 v = c.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()["v"]
                 self.assertEqual(v, migrations.latest_version() - 1)
+        finally:
+            migrations.MIGRATIONS[:] = original
+
+    def test_concurrent_init_skips_versions_applied_while_waiting(self) -> None:
+        """Two processes can both start from the same apparent version.
+
+        The second process must re-check after acquiring the write lock
+        and skip work already committed by the first, not fail on a
+        duplicate `schema_version` insert.
+        """
+        with self._connect() as c:
+            c.execute(
+                "CREATE TABLE IF NOT EXISTS schema_version ("
+                "version INTEGER PRIMARY KEY, "
+                "description TEXT NOT NULL, "
+                "applied_at TEXT NOT NULL"
+                ")"
+            )
+            c.commit()
+
+        original = list(migrations.MIGRATIONS)
+        migrations.MIGRATIONS[:] = [
+            (
+                1,
+                "slow synthetic migration",
+                "CREATE TABLE IF NOT EXISTS concurrent_canary (id INTEGER PRIMARY KEY);"
+                "SELECT sleep_ms(120);",
+            )
+        ]
+
+        first_inside_migration = threading.Event()
+        errors: list[BaseException] = []
+        results: dict[str, list[int]] = {}
+
+        def _worker(name: str, signal_sleep: bool) -> None:
+            raw = sqlite3.connect(self.db_path, timeout=5.0)
+            raw.row_factory = sqlite3.Row
+
+            def sleep_ms(ms: int) -> int:
+                if signal_sleep:
+                    first_inside_migration.set()
+                time.sleep(ms / 1000)
+                return 0
+
+            raw.create_function("sleep_ms", 1, sleep_ms)
+            try:
+                results[name] = migrations.apply_migrations(raw)
+                raw.commit()
+            except BaseException as exc:  # pragma: no cover - surfaced by assertion
+                errors.append(exc)
+                raw.rollback()
+            finally:
+                raw.close()
+
+        try:
+            first = threading.Thread(target=_worker, args=("first", True))
+            first.start()
+            self.assertTrue(first_inside_migration.wait(timeout=2.0))
+
+            second = threading.Thread(target=_worker, args=("second", False))
+            second.start()
+            first.join(timeout=2.0)
+            second.join(timeout=2.0)
+
+            self.assertFalse(first.is_alive())
+            self.assertFalse(second.is_alive())
+            self.assertEqual(errors, [])
+            self.assertEqual(results["first"], [1])
+            self.assertEqual(results["second"], [])
+            with self._connect() as c:
+                row = c.execute(
+                    "SELECT COUNT(*) AS n, MAX(version) AS v FROM schema_version"
+                ).fetchone()
+                self.assertEqual(row["n"], 1)
+                self.assertEqual(row["v"], 1)
         finally:
             migrations.MIGRATIONS[:] = original
 

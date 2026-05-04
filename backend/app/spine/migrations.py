@@ -394,11 +394,17 @@ def _split_statements(sql: str) -> list[str]:
 def apply_migrations(conn: sqlite3.Connection) -> list[int]:
     """Run every migration whose version is > current_version.
 
-    Each migration runs inside an explicit transaction: BEGIN, every
-    statement in the script, then the `schema_version` row, then COMMIT.
-    A failure mid-migration triggers ROLLBACK, so the DB never lands in
+    Each migration runs inside an explicit transaction: BEGIN IMMEDIATE,
+    re-check current version while holding the write lock, every statement
+    in the script, then the `schema_version` row, then COMMIT. A failure
+    mid-migration triggers ROLLBACK, so the DB never lands in
     "partially-applied but still reported as old" state — that's the
     failure mode `ALTER TABLE` migrations are most exposed to.
+
+    The in-transaction version re-check makes concurrent init idempotent:
+    if another process applies a version while this connection waits for
+    the lock, this connection observes the advanced version and skips it
+    instead of crashing on a duplicate `schema_version` insert.
 
     `executescript` is intentionally NOT used: per Python sqlite3 docs
     it issues an implicit COMMIT before running, which would defeat
@@ -407,14 +413,15 @@ def apply_migrations(conn: sqlite3.Connection) -> list[int]:
     from datetime import UTC, datetime
 
     _ensure_schema_version_table(conn)
-    current = _current_version(conn)
     applied: list[int] = []
     for version, description, sql in MIGRATIONS:
-        if version <= current:
-            continue
         statements = _split_statements(sql)
         try:
-            conn.execute("BEGIN")
+            conn.execute("BEGIN IMMEDIATE")
+            current = _current_version(conn)
+            if version <= current:
+                conn.execute("COMMIT")
+                continue
             for stmt in statements:
                 conn.execute(stmt)
             conn.execute(
