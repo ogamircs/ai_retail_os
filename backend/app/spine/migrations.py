@@ -349,14 +349,12 @@ def latest_version() -> int:
 
 
 def _ensure_schema_version_table(conn: sqlite3.Connection) -> None:
-    conn.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS schema_version (
-            version INTEGER PRIMARY KEY,
-            description TEXT NOT NULL,
-            applied_at TEXT NOT NULL
-        );
-        """
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS schema_version ("
+        "version INTEGER PRIMARY KEY, "
+        "description TEXT NOT NULL, "
+        "applied_at TEXT NOT NULL"
+        ")"
     )
 
 
@@ -370,15 +368,41 @@ def _current_version(conn: sqlite3.Connection) -> int:
     return int(val) if val is not None else 0
 
 
+def _split_statements(sql: str) -> list[str]:
+    """Split a migration script into individual statements.
+
+    `sqlite3.complete_statement` understands string literals + trigger
+    bodies, so we can split on `;` boundaries safely. Plain `str.split`
+    would shred any future migration that uses CREATE TRIGGER ... BEGIN
+    ... END; with embedded semicolons.
+    """
+    statements: list[str] = []
+    buf = ""
+    for ch in sql:
+        buf += ch
+        if ch == ";" and sqlite3.complete_statement(buf):
+            stmt = buf.strip()
+            if stmt:
+                statements.append(stmt)
+            buf = ""
+    tail = buf.strip()
+    if tail:
+        statements.append(tail)
+    return statements
+
+
 def apply_migrations(conn: sqlite3.Connection) -> list[int]:
     """Run every migration whose version is > current_version.
 
-    Returns the list of versions actually applied. We rely on the
-    caller's outer transaction (from `db.conn()`) for atomicity: if a
-    migration raises, the wrapping context manager won't commit, so
-    the partial schema + the schema_version row roll back together.
-    Every v1 statement uses `IF NOT EXISTS` so even a partially-applied
-    crash is recoverable on retry.
+    Each migration runs inside an explicit transaction: BEGIN, every
+    statement in the script, then the `schema_version` row, then COMMIT.
+    A failure mid-migration triggers ROLLBACK, so the DB never lands in
+    "partially-applied but still reported as old" state — that's the
+    failure mode `ALTER TABLE` migrations are most exposed to.
+
+    `executescript` is intentionally NOT used: per Python sqlite3 docs
+    it issues an implicit COMMIT before running, which would defeat
+    the transaction wrapper.
     """
     from datetime import UTC, datetime
 
@@ -388,11 +412,23 @@ def apply_migrations(conn: sqlite3.Connection) -> list[int]:
     for version, description, sql in MIGRATIONS:
         if version <= current:
             continue
-        conn.executescript(sql)
-        conn.execute(
-            "INSERT INTO schema_version (version, description, applied_at) "
-            "VALUES (?, ?, ?)",
-            (version, description, datetime.now(UTC).isoformat()),
-        )
+        statements = _split_statements(sql)
+        try:
+            conn.execute("BEGIN")
+            for stmt in statements:
+                conn.execute(stmt)
+            conn.execute(
+                "INSERT INTO schema_version (version, description, applied_at) "
+                "VALUES (?, ?, ?)",
+                (version, description, datetime.now(UTC).isoformat()),
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.OperationalError:
+                # No active transaction (e.g. error before BEGIN succeeded).
+                pass
+            raise
         applied.append(version)
     return applied

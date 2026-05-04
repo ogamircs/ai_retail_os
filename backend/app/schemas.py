@@ -62,6 +62,12 @@ class IntegrationSystem(_Lenient):
     last_error: str | None = None
     docs_url: str
     metadata: dict[str, Any] = {}
+    # Outbox roll-up — `store.list_systems()` joins this from
+    # `outbox_actions`. Frontend's `IntegrationSystem` type expects
+    # both fields; FastAPI's response_model would silently strip them
+    # if they weren't declared here.
+    pending_actions: int = 0
+    applied_actions: int = 0
 
 
 class IntegrationSystemsResponse(_Lenient):

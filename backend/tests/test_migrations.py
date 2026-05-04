@@ -166,6 +166,40 @@ class MigrationTest(unittest.TestCase):
         versions = [m[0] for m in migrations.MIGRATIONS]
         self.assertEqual(versions, list(range(1, len(versions) + 1)))
 
+    def test_failing_migration_rolls_back_atomically(self) -> None:
+        """A migration that fails midway must NOT commit any DDL — and
+        the schema_version row must NOT advance. Otherwise the next
+        retry runs against a partially-applied schema."""
+        # Bring the DB up to the latest baseline first.
+        db.init_db()
+
+        # Patch MIGRATIONS so a synthetic v(N+1) fails on its second
+        # statement. The first statement creates a table; if rollback
+        # works, that table must NOT survive.
+        next_version = migrations.latest_version() + 1
+        bad_sql = (
+            "CREATE TABLE atomic_canary (id INTEGER PRIMARY KEY);"
+            "BOGUS NOT VALID SQL;"
+        )
+        original = list(migrations.MIGRATIONS)
+        migrations.MIGRATIONS.append((next_version, "synthetic failure", bad_sql))
+        try:
+            with sqlite3.connect(self.db_path) as raw:
+                raw.row_factory = sqlite3.Row
+                with self.assertRaises(sqlite3.Error):
+                    migrations.apply_migrations(raw)
+                raw.commit()
+            # DDL from before the bad statement must have rolled back.
+            with self._connect() as c:
+                row = c.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='atomic_canary'"
+                ).fetchone()
+                self.assertIsNone(row, msg="failed migration leaked partial DDL")
+                v = c.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()["v"]
+                self.assertEqual(v, migrations.latest_version() - 1)
+        finally:
+            migrations.MIGRATIONS[:] = original
+
 
 if __name__ == "__main__":
     unittest.main()
