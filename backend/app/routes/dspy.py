@@ -11,6 +11,7 @@ import uuid
 
 from fastapi import APIRouter, HTTPException
 
+from app.schemas import DspyAgentsResponse, DspyJobsResponse
 from app.spine import jobs as job_store
 
 router = APIRouter()
@@ -43,7 +44,7 @@ def _run_dspy_compile_job(job_id: str, agent_slug: str, auto_promote: bool) -> N
         job_store.complete_job(job_id, error=str(exc))
 
 
-@router.get("/api/dspy/agents")
+@router.get("/api/dspy/agents", response_model=DspyAgentsResponse)
 def dspy_list_agents():
     """List the agents the DSPy optimizer can compile + their current
     `prod` / `staging` aliases. The cockpit's REPORTS tab uses this to
@@ -98,7 +99,7 @@ def dspy_job_status(job_id: str):
     return _legacy_shape(job)
 
 
-@router.get("/api/dspy/jobs")
+@router.get("/api/dspy/jobs", response_model=DspyJobsResponse)
 def dspy_jobs_list(limit: int = 20):
     """Recent compile jobs, newest first. Cockpit's REPORTS tab pulls
     this so the operator can see what's compiled vs what's running."""

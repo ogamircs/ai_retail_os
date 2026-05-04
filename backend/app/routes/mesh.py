@@ -7,12 +7,13 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter
 
+from app.schemas import MeshStatus
 from app.spine import events as ev_store
 
 router = APIRouter()
 
 
-@router.get("/api/mesh/status")
+@router.get("/api/mesh/status", response_model=MeshStatus)
 def mesh_status(window_seconds: int = 300):
     """Track 2 A6 — surface recent guardrail downgrades to the cockpit.
 

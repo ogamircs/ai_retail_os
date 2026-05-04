@@ -7,11 +7,12 @@ from __future__ import annotations
 from fastapi import APIRouter, Body, HTTPException
 
 from app.integrations import registry as integration_registry
+from app.schemas import IntegrationSystemsResponse, SyncRunsResponse
 
 router = APIRouter()
 
 
-@router.get("/api/integrations/systems")
+@router.get("/api/integrations/systems", response_model=IntegrationSystemsResponse)
 def get_integration_systems():
     return {"systems": integration_registry.list_systems()}
 
@@ -24,7 +25,7 @@ def sync_integration(system: str):
     return result
 
 
-@router.get("/api/integrations/sync-runs")
+@router.get("/api/integrations/sync-runs", response_model=SyncRunsResponse)
 def get_integration_sync_runs(limit: int = 30, system: str | None = None):
     return {"sync_runs": integration_registry.list_sync_runs(limit=limit, system_id=system)}
 

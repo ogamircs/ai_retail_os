@@ -186,6 +186,28 @@ def record_external_ref(
         )
 
 
+def find_external_ref(
+    system_id: str,
+    domain: str,
+    local_id: str,
+) -> dict[str, Any] | None:
+    """Look up the external row id for a given (system, domain, local_id).
+
+    Adapter outbound apply paths use this to bind a substrate-side id
+    (e.g. `po-123`) to the external system's row id (e.g. ERPNext's
+    `PO-2025-00042`). Returns the most recently synced ref when more
+    than one external_id maps to the same local_id.
+    """
+    with conn() as c:
+        row = c.execute(
+            "SELECT * FROM external_refs "
+            "WHERE system_id = ? AND domain = ? AND local_id = ? "
+            "ORDER BY synced_at DESC LIMIT 1",
+            (system_id, domain, local_id),
+        ).fetchone()
+    return _ref_dict(row) if row is not None else None
+
+
 def list_records(
     system_id: str | None = None,
     domain: str | None = None,
