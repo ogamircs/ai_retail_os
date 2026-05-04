@@ -61,13 +61,20 @@ def complete_job(
     summary: dict[str, Any] | None = None,
     error: str | None = None,
 ) -> dict[str, Any] | None:
-    """Mark a job terminal. Pass `error` to flip to 'error'; otherwise 'ok'."""
+    """Mark a job terminal. Pass `error` to flip to 'error'; otherwise 'ok'.
+
+    No-op if the job is already terminal (e.g. cancelled while the
+    worker was still running). The one-way transition contract
+    (`running` → `ok` / `error` / `cancelled`) is enforced via the
+    `status = 'running'` guard so a late-finishing worker can't
+    overwrite a `cancelled` row.
+    """
     status = "error" if error else "ok"
     summary_json = json.dumps(summary or {})
     with conn() as c:
         c.execute(
             "UPDATE background_jobs SET status = ?, ended_at = ?, "
-            "summary_json = ?, error = ? WHERE id = ?",
+            "summary_json = ?, error = ? WHERE id = ? AND status = 'running'",
             (status, _now_iso(), summary_json, error, job_id),
         )
     return _read(job_id)

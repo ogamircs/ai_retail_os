@@ -84,6 +84,32 @@ class JobsHelperTest(unittest.TestCase):
         rows = jobs.list_jobs(kind="dspy_compile")
         self.assertEqual([r["id"] for r in rows[:2]], ["second", "first"])
 
+    def test_complete_does_not_overwrite_cancelled(self) -> None:
+        """Race: worker thread finishes after cancel landed. The
+        late-arriving complete_job must NOT flip cancelled → ok/error,
+        otherwise the one-way transition contract is broken."""
+        jobs.create_job("c1", kind="dspy_compile", title="x")
+        jobs.cancel_job("c1", reason="user pressed cancel")
+        # Worker finishes the underlying compute and reports back.
+        jobs.complete_job("c1", summary={"version": "v9"})
+        row = jobs.get_job("c1")
+        self.assertEqual(row["status"], "cancelled")
+        self.assertEqual(row["error"], "user pressed cancel")
+        # The worker's summary did not land — we silently dropped it,
+        # which is the right call: the operator chose to cancel, the
+        # outcome is moot.
+        self.assertEqual(row["summary"], {})
+
+    def test_complete_does_not_overwrite_terminal_ok(self) -> None:
+        """Idempotency: re-calling complete_job on a finished row is
+        a no-op rather than re-stamping ended_at."""
+        jobs.create_job("o1", kind="dspy_compile", title="x")
+        jobs.complete_job("o1", summary={"version": "v1"})
+        first = jobs.get_job("o1")
+        jobs.complete_job("o1", summary={"version": "v2"})
+        second = jobs.get_job("o1")
+        self.assertEqual(first, second)
+
 
 if __name__ == "__main__":
     unittest.main()
