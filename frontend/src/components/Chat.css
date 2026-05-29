@@ -81,6 +81,7 @@
 .chat-trace .who { font-weight: 600; min-width: 7em; flex-shrink: 0; }
 .chat-trace .kind { color: var(--ink-dim); min-width: 8em; flex-shrink: 0; }
 .chat-trace .detail { color: var(--ink); }
+.chat-trace .detail.warn { color: var(--danger, #c0392b); font-weight: 600; }
 
 .chat-input {
   display: flex;
