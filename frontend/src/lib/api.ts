@@ -529,9 +529,9 @@ export async function startImprovementsRun(): Promise<{
   run_id: string;
   status: string;
 }> {
-  const r = await fetch("/api/improvements/run", { method: "POST" });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  return r.json();
+  // apiFetch surfaces the server's `detail` (e.g. the 429 "audit already
+  // running" message) instead of a bare status code.
+  return apiFetch("/api/improvements/run", { method: "POST" });
 }
 
 export async function getImprovementRun(runId: string): Promise<ImprovementRun> {

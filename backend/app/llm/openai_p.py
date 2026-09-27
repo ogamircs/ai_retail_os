@@ -8,8 +8,8 @@ from app.llm.base import AssistantTurn, Message, Tool, ToolCall
 class OpenAIProvider:
     name = "openai"
 
-    def __init__(self, api_key: str, model: str):
-        self.client = OpenAI(api_key=api_key)
+    def __init__(self, api_key: str, model: str, max_retries: int = 2):
+        self.client = OpenAI(api_key=api_key, max_retries=max_retries)
         self.model = model
 
     def _to_native_messages(self, system: str, messages: list[Message]) -> list[dict]:

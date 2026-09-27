@@ -10,8 +10,16 @@ from app.llm.base import AssistantTurn, Message, Tool, ToolCall
 class GoogleProvider:
     name = "google"
 
-    def __init__(self, api_key: str, model: str):
-        self.client = genai.Client(api_key=api_key)
+    def __init__(self, api_key: str, model: str, max_retries: int = 2):
+        # Unlike the Anthropic/OpenAI SDKs, google-genai never retries unless
+        # `retry_options` is set. `attempts` counts the original request too.
+        # Default retryable set: 408, 429, 5xx, and transient httpx errors.
+        self.client = genai.Client(
+            api_key=api_key,
+            http_options=gtypes.HttpOptions(
+                retry_options=gtypes.HttpRetryOptions(attempts=max_retries + 1)
+            ),
+        )
         self.model = model
 
     @staticmethod
