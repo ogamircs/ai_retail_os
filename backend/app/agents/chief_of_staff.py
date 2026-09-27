@@ -18,6 +18,7 @@ Track 2 A2-A6 wires the agent mesh:
 from __future__ import annotations
 
 import re
+import threading
 import time
 import uuid
 from collections.abc import Iterator
@@ -165,11 +166,24 @@ class _MeshState:
 
     def __init__(self):
         self.start = time.monotonic()
+        # Output tokens — what `turn_token_budget` gates on. Input tokens are
+        # tracked for visibility only: every loop iteration re-sends the full
+        # context, so an input budget needs real usage data to calibrate.
         self.tokens_used = 0
+        self.input_tokens_used = 0
         self.downgraded = False
 
     def add_tokens(self, n: int) -> None:
         self.tokens_used += n
+
+    def add_usage(self, usage: dict | None, fallback_text: str = "") -> None:
+        """Count a finished agent run's provider-reported usage. Falls back
+        to estimating from the final text when the provider reported no
+        output tokens (test stubs, or a provider without usage metadata)."""
+        usage = usage or {}
+        out = int(usage.get("output_tokens") or 0)
+        self.tokens_used += out if out else _approx_tokens(fallback_text)
+        self.input_tokens_used += int(usage.get("input_tokens") or 0)
 
     def should_downgrade(self) -> bool:
         if self.downgraded:
@@ -190,6 +204,7 @@ class _MeshState:
         payload = {
             "reason": reason,
             "tokens_used": self.tokens_used,
+            "input_tokens_used": self.input_tokens_used,
             "elapsed_s": round(time.monotonic() - self.start, 2),
             "budget_tokens": mesh_settings.turn_token_budget,
             "wallclock_s": mesh_settings.turn_wallclock_seconds,
@@ -201,16 +216,19 @@ class _MeshState:
 
 
 def _approx_tokens(text: str) -> int:
-    """Rough token count — words * 1.3. Good enough for guardrails; the
-    real provider counts arrive on agent_end events but only after a turn
-    completes, which is too late to gate the mid-turn loop.
-    """
+    """Rough token count — words * 1.3. Fallback only: the mesh budget
+    uses provider-reported usage from each specialist's `agent_end`, and
+    only estimates when a provider reports none."""
     if not text:
         return 0
     return int(len(text.split()) * 1.3)
 
 
-def build_orchestrator(llm: LLMProvider, event_sink: _EventBuffer) -> Agent:
+def build_orchestrator(
+    llm: LLMProvider,
+    event_sink: _EventBuffer,
+    cancel: threading.Event | None = None,
+) -> Agent:
     pricing_agent = pricing.build_agent()
     replen_agent = replenishment.build_agent()
     analyst_agent = analyst.build_agent()
@@ -234,11 +252,13 @@ def build_orchestrator(llm: LLMProvider, event_sink: _EventBuffer) -> Agent:
     def _run_specialist(specialist: Agent, task: str) -> dict:
         final_text = ""
         artifacts_seen: list[str] = []
-        for ev in specialist.run(task, llm):
+        for ev in specialist.run(task, llm, cancel=cancel):
             event_sink.add(ev)
             if ev.kind == "agent_end":
                 final_text = ev.data.get("text", "")
-                state.add_tokens(_approx_tokens(final_text))
+                state.add_usage(ev.data.get("usage"), final_text)
+            elif ev.kind == "error":
+                state.add_usage(ev.data.get("usage"))
             elif ev.kind == "tool_result":
                 result = ev.data.get("result", {})
                 if isinstance(result, dict) and "artifact_id" in result:
@@ -699,7 +719,6 @@ def _fire_brain_ingest(user_input: str, turn_start_iso: str, turn_id: str) -> No
     no bearer is configured). Live-mode runs in a daemon thread so a
     slow brain can't stall the operator-facing response.
     """
-    import threading
 
     from app.llm.mcp import get_client
     from app.spine.artifacts import read_artifact
@@ -768,15 +787,24 @@ def _fire_brain_ingest(user_input: str, turn_start_iso: str, turn_id: str) -> No
     threading.Thread(target=_do_ingest, daemon=True, name=f"brain-ingest-{turn_id[:8]}").start()
 
 
-def run_chief(user_input: str, llm: LLMProvider) -> Iterator[AgentEvent]:
-    """Run the orchestrator and stream events from CoS *and* delegated specialists."""
+def run_chief(
+    user_input: str,
+    llm: LLMProvider,
+    cancel: threading.Event | None = None,
+) -> Iterator[AgentEvent]:
+    """Run the orchestrator and stream events from CoS *and* delegated specialists.
+
+    `cancel` (set by the chat route when the SSE client disconnects) stops
+    the Chief and any specialist before their next LLM call, and skips the
+    post-turn wiki/curator/brain steps — a half-finished turn shouldn't
+    auto-publish drafts or spend curator tokens."""
     # Track 4 M2: open the parent MLflow run for this operator turn.
     # All delegate / critic / leaf-LLM runs nest underneath. No-op when
     # MLFLOW_TRACE_ENABLED is unset.
     provider_name = getattr(llm, "name", "unknown")
     provider_model = getattr(llm, "model", "unknown")
     sink = _EventBuffer()
-    chief = build_orchestrator(llm, sink)
+    chief = build_orchestrator(llm, sink, cancel=cancel)
     # Capture turn-start timestamp + mint a unique turn_id so the W4
     # auto-publisher and W6 Curator can scope to *this* turn's events
     # only. Without the per-turn id, two concurrent /api/chat requests
@@ -794,13 +822,15 @@ def run_chief(user_input: str, llm: LLMProvider) -> Iterator[AgentEvent]:
     # auto-publish + curator scoping across requests.
     try:
         with mesh_tracing.turn_run(user_input, provider_name, provider_model):
-            for ev in chief.run(user_input, llm):
+            for ev in chief.run(user_input, llm, cancel=cancel):
                 # Drain any specialist events buffered before this CoS event
                 for spec_ev in sink.drain():
                     yield spec_ev
                 yield ev
             for spec_ev in sink.drain():
                 yield spec_ev
+        if cancel is not None and cancel.is_set():
+            return
         # Track 5 W4 — fire auto-publish AFTER all events are streamed
         # so the post-turn wiki state reflects every draft + critique
         # that landed in the turn. Pass turn_id so concurrent turns

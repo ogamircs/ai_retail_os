@@ -2,6 +2,7 @@
 loop call_llm → execute tool calls → feed results back until stop."""
 
 import json
+import threading
 from collections import Counter
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -67,17 +68,43 @@ class Agent:
         # instead of burning every remaining iteration on a no-progress cycle.
         self.repeat_limit = repeat_limit
 
-    def run(self, user_input: str, llm: LLMProvider) -> Iterator[AgentEvent]:
+    def run(
+        self,
+        user_input: str,
+        llm: LLMProvider,
+        cancel: threading.Event | None = None,
+    ) -> Iterator[AgentEvent]:
+        """Run the loop. Every terminal event (`agent_end` / `error`) carries
+        `usage` — provider-reported tokens summed over this run's LLM calls.
+        If `cancel` is set (e.g. the SSE client disconnected), the run stops
+        before its next LLM call instead of spending tokens for nobody."""
         yield AgentEvent("agent_start", self.name, {"input": user_input})
         messages: list[Message] = [Message(role="user", content=user_input)]
         final_text = ""
         call_counts: Counter[str] = Counter()
+        usage = {"input_tokens": 0, "output_tokens": 0, "llm_calls": 0}
         for _ in range(self.max_iters):
+            if cancel is not None and cancel.is_set():
+                yield AgentEvent(
+                    "agent_end",
+                    self.name,
+                    {
+                        "text": final_text,
+                        "note": "stopped: cancelled (client disconnected)",
+                        "incomplete": True,
+                        "cancelled": True,
+                        "usage": usage,
+                    },
+                )
+                return
             try:
                 turn = llm.chat(self.system_prompt, messages, self.tools)
             except Exception as e:
-                yield AgentEvent("error", self.name, {"error": str(e)})
+                yield AgentEvent("error", self.name, {"error": str(e), "usage": usage})
                 return
+            usage["input_tokens"] += turn.input_tokens
+            usage["output_tokens"] += turn.output_tokens
+            usage["llm_calls"] += 1
 
             if turn.text:
                 yield AgentEvent("text", self.name, {"text": turn.text})
@@ -87,7 +114,7 @@ class Agent:
                 # The model is done calling tools. Whether this is a *complete*
                 # answer depends on why it stopped — a truncated or refused turn
                 # must not be presented as a clean final answer.
-                data: dict = {"text": final_text}
+                data: dict = {"text": final_text, "usage": usage}
                 reason = _classify_stop_reason(turn.stop_reason)
                 if reason == "max_tokens":
                     data["note"] = "stopped: response truncated (max tokens / context limit reached)"
@@ -141,8 +168,13 @@ class Agent:
                     {
                         "text": final_text,
                         "note": f"stopped: stuck loop (repeated identical call to '{stuck_tool}')",
+                        "usage": usage,
                     },
                 )
                 return
 
-        yield AgentEvent("agent_end", self.name, {"text": final_text, "note": "max iterations reached"})
+        yield AgentEvent(
+            "agent_end",
+            self.name,
+            {"text": final_text, "note": "max iterations reached", "usage": usage},
+        )
