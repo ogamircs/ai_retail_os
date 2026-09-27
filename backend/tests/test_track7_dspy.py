@@ -421,10 +421,19 @@ class DspyApiRoutesTest(unittest.TestCase):
         body = r.json()
         self.assertIn("job_id", body)
         self.assertEqual(body["status"], "running")
-        # Worker patched to land terminal state synchronously.
-        r2 = self.client.get(f"/api/dspy/jobs/{body['job_id']}")
-        self.assertEqual(r2.status_code, 200)
-        job = r2.json()
+        # The route runs the worker on a background thread, so the job can
+        # still read `running` right after the POST — poll up to ~2s rather
+        # than racing the thread (this flaked on slower CI runners).
+        import time
+
+        job: dict = {}
+        for _ in range(40):
+            r2 = self.client.get(f"/api/dspy/jobs/{body['job_id']}")
+            self.assertEqual(r2.status_code, 200)
+            job = r2.json()
+            if job["status"] != "running":
+                break
+            time.sleep(0.05)
         self.assertEqual(job["status"], "ok")
         self.assertEqual(job["summary"]["version"], "v9")
 

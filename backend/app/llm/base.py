@@ -44,6 +44,12 @@ class AssistantTurn:
     tool_calls: list[ToolCall] = field(default_factory=list)
     raw_blocks: list[dict] = field(default_factory=list)  # for echoing assistant turn back
     stop_reason: str = ""
+    # Provider-reported token usage for this single call. 0 means the
+    # provider didn't report it (e.g. test stubs) — callers fall back to an
+    # estimate. Input includes cached/cache-write tokens; output includes
+    # reasoning ("thinking") tokens, since both are billed.
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 class LLMProvider(Protocol):

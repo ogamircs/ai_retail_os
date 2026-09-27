@@ -70,4 +70,17 @@ class AnthropicProvider:
             tool_calls=tool_calls,
             raw_blocks=raw_blocks,
             stop_reason=resp.stop_reason or "",
+            input_tokens=_input_tokens(resp.usage),
+            output_tokens=getattr(resp.usage, "output_tokens", 0) or 0,
         )
+
+
+def _input_tokens(usage) -> int:
+    # `input_tokens` excludes prompt-cache reads/writes; count all three.
+    if usage is None:
+        return 0
+    return (
+        (getattr(usage, "input_tokens", 0) or 0)
+        + (getattr(usage, "cache_creation_input_tokens", 0) or 0)
+        + (getattr(usage, "cache_read_input_tokens", 0) or 0)
+    )

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 
 from fastapi import APIRouter, HTTPException
 from sse_starlette.sse import EventSourceResponse
@@ -29,10 +30,14 @@ async def chat(req: ChatRequest):
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue = asyncio.Queue()
         SENTINEL = object()
+        # Set when the client goes away (sse-starlette cancels this generator
+        # on disconnect). Without it the producer thread would run the whole
+        # multi-specialist turn to completion — tokens spent for nobody.
+        cancel = threading.Event()
 
         def producer():
             try:
-                for ev in run_chief(req.message, llm):
+                for ev in run_chief(req.message, llm, cancel=cancel):
                     payload = {
                         "kind": ev.kind,
                         "agent": ev.agent,
@@ -55,6 +60,9 @@ async def chat(req: ChatRequest):
                     break
                 yield {"event": "agent", "data": json.dumps(item)}
         finally:
+            # Stops the turn before its next LLM call; the in-flight call
+            # (if any) still completes, so this await is bounded by one call.
+            cancel.set()
             await task
 
     return EventSourceResponse(event_gen())

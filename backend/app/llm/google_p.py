@@ -143,4 +143,20 @@ class GoogleProvider:
             tool_calls=tool_calls,
             raw_blocks=raw_blocks,
             stop_reason=str(resp.candidates[0].finish_reason) if resp.candidates else "",
+            input_tokens=_input_tokens(resp.usage_metadata),
+            output_tokens=_output_tokens(resp.usage_metadata),
         )
+
+
+def _input_tokens(usage) -> int:
+    # prompt_token_count includes cached content; tool-use prompt tokens are separate.
+    if usage is None:
+        return 0
+    return (usage.prompt_token_count or 0) + (usage.tool_use_prompt_token_count or 0)
+
+
+def _output_tokens(usage) -> int:
+    # Thinking tokens are billed as output but not included in candidates_token_count.
+    if usage is None:
+        return 0
+    return (usage.candidates_token_count or 0) + (usage.thoughts_token_count or 0)

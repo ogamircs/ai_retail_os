@@ -111,4 +111,8 @@ class OpenAIProvider:
             tool_calls=tool_calls,
             raw_blocks=raw_blocks,
             stop_reason=choice.finish_reason or "",
+            # prompt_tokens already includes cached tokens; completion_tokens
+            # includes reasoning tokens.
+            input_tokens=(resp.usage.prompt_tokens or 0) if resp.usage else 0,
+            output_tokens=(resp.usage.completion_tokens or 0) if resp.usage else 0,
         )

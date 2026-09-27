@@ -107,9 +107,13 @@ class MeshSettings:
 
     @property
     def turn_token_budget(self) -> int:
-        """Soft cap; if a single specialist round produced this many words
-        of artifact body, the Chief downgrades the rest of the turn to
-        single-pass and logs a `mesh_downgrade` event. ~1.3 tokens/word."""
+        """Soft cap on provider-reported *output* tokens across every
+        specialist and critic run in one operator turn (tool calls,
+        intermediate turns and revisions included). Once reached, the Chief
+        downgrades the rest of the turn to single-pass and logs a
+        `mesh_downgrade` event carrying output and input token totals.
+        Falls back to a words × 1.3 estimate for providers that report no
+        usage. The Chief's own calls aren't counted until the turn ends."""
         try:
             return int(os.getenv("MESH_TURN_TOKEN_BUDGET", "12000"))
         except ValueError:
