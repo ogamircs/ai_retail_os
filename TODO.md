@@ -51,6 +51,65 @@ Audit evidence:
 
 ---
 
+# Codebase review - 2026-07-03
+
+Full-repo review pass (backend + frontend + docs). Items that duplicate an open
+entry in the 2026-05-03 audit are NOT re-listed as checkboxes — new evidence for
+those is folded into the "Reinforces existing open items" block at the end so
+the backlog keeps one canonical checkbox per task.
+
+## Reliability under concurrency
+
+- [ ] **P0 - Enable WAL + busy_timeout on the SQLite spine.** `conn()` in `backend/app/spine/db.py:297-305` opens a fresh connection per call with no `journal_mode=WAL` and no `busy_timeout` — Python's sqlite3 default fails almost immediately on lock contention. Concurrent writers already exist: the chat producer runs in an executor thread (`routes/chat.py:50`), the improvement auditor spawns an uncapped daemon thread per `/run` (`routes/improvements.py:40`), brain-ingest spawns daemon threads (`agents/chief_of_staff.py:768`), and every sync route runs in FastAPI's threadpool. Two PRAGMAs in `conn()` buy most of the fix; add a regression test that hammers concurrent writers.
+- [x] **P0 - Wire `make check` into CI.** Done — `.github/workflows/check.yml` (landed via PR #43) runs `make check` on PRs and pushes to `main`.
+- [x] **P0 - Make CLAUDE.md true (or trim it).** Done — resolved by merging PR #43 (which shipped `spine/migrations.py`, `spine/jobs.py`, and vitest in `make frontend-check`); agent guidance now lives in `AGENTS.md` (`CLAUDE.md` imports it). Original finding: The current CLAUDE.md edit documents `spine/migrations.py` and `spine/jobs.py` in detail — neither exists (`spine/` has only db.py, events.py, artifacts.py, kg.py, wiki.py, telemetry.py; DSPy jobs still live in the in-memory dict per `routes/dspy.py:19-20`). It also says `make frontend-check` runs vitest — the target is tsc + vite build only, and the frontend has zero test files. Either ship those modules (they're the right design — see the two P1 items in the 2026-05-03 audit) or cut the doc back to reality before committing; a CLAUDE.md describing fictional modules misleads every future session.
+
+## LLM layer resilience
+
+- [ ] **P1 - Add retry/backoff to all three LLM providers.** Each provider makes a single blocking call (`llm/anthropic_p.py:49`, `llm/openai_p.py:91`, `llm/google_p.py:110`); one transient 429/500/overloaded aborts an entire multi-specialist Chief turn. Add a shared retry-with-backoff wrapper (per the "change all three impls or none" rule). No `tenacity`/`backoff`/hand-rolled retry exists anywhere in `app/`.
+- [ ] **P1 - Fix Google provider drift.** `google_p.py` sets no `max_output_tokens` (anthropic/openai cap at 4096) and indexes `resp.candidates[0]` (`google_p.py:119,136`) — a safety-blocked/empty-candidate response yields silent empty text or IndexError. Bring it to parity with the other two impls.
+- [ ] **P1 - Thread real token usage through `AssistantTurn`.** The mesh budget guard relies on `_approx_tokens` (`chief_of_staff.py:203-210`) = words × 1.3 of the specialist's *final text only* — no tool traffic, no intermediate turns, no critic rounds. It massively undercounts, making `turn_token_budget` nearly decorative. All three SDKs return usage; surface `input_tokens`/`output_tokens` on `AssistantTurn` and feed `_MeshState` real numbers.
+- [ ] **P1 - Cancel the agent turn on SSE client disconnect.** `routes/chat.py` producer thread runs `run_chief` to completion even after the client drops — tokens keep burning for nobody. Add a cancellation flag (e.g. `threading.Event`) checked per iteration in `Agent.run`, set from the `finally` in `event_gen`.
+
+## Streaming and cockpit responsiveness
+
+- [ ] **P1 - Stream specialist events live instead of in a post-hoc burst.** Delegation runs synchronously inside the Chief's tool impl, so `_EventBuffer` only drains after the specialist *finishes* (`chief_of_staff.py:84-94`, drained in `run_chief` between CoS events) — during a 60s Pricing + Critic + revision loop the operator sees nothing, then everything. Restructure so the sink drains while the impl runs (queue + generator handoff, or generator-based tool impls).
+- [ ] **P1 - Debounce the frontend refetch storm.** Every streamed agent event triggers a full 9-endpoint `Promise.all` refetch (`frontend/src/lib/data.tsx:74-88` via `bump()` at 119-121, called per event from `Chat.tsx:75`), stacked on `setInterval(refresh, 5000)` (data.tsx:115) plus six independent panel timers (EventTape 2s, StatusStrip 1s/5s, WikiTab/MlflowTab/BrainTab 5s, ImproveTab ~1.5s). Debounce/coalesce `bump`, and gate polling on document visibility / active streaming.
+- [ ] **P2 - Cap chat memory + split the monolithic dashboard context.** `Chat.tsx` never caps `turns` and copies the whole array per event (`Chat.tsx:66,77,80` — O(n) per event, unbounded growth in long sessions); `traceEvents` flatMaps all turns every render (47-57). Separately, `DashboardProvider` holds all 10 data slices in one context object (`data.tsx:123-128`), so any poll re-renders every consumer. Cap/virtualize turns; split the context or add selectors.
+- [ ] **P2 - Handle dropped SSE streams in the chat client.** `chatStream` (`api.ts:621-672`) treats a half-completed stream the same as a clean finish — `done` just flips `streaming` off with no retry/resume or user-visible "stream interrupted" state.
+
+## Mesh design
+
+- [ ] **P2 - Structured Critic verdicts instead of regex-over-markdown.** `_critique_is_clean` (`chief_of_staff.py:100-125`) parses `## Gaps`/`## Risks` headings and matches `*No material findings.*` to gate both the revision loop and wiki auto-publish — load-bearing safety logic hanging off prompt-formatting compliance. Have the Critic emit a machine-readable verdict (e.g. `findings: {gaps: N, risks: N}` in artifact frontmatter), keep the markdown for humans.
+- [ ] **P2 - Split `chief_of_staff.py` (856 lines, three concerns).** Orchestrator build, the ~150-line wiki auto-publish policy (`_wiki_auto_publish_clean_drafts`), and brain ingest (`_fire_brain_ingest`) live in one module. Move the latter two into their own modules (e.g. `agents/_turn_postprocess.py` or under `spine/`); the auto-publish gate logic deserves its own focused tests.
+- [ ] **P2 - Add a real `turn_id` column to events.** `events_for_turn` (`spine/events.py:74-117`) and `events_since_ts` (141-159) do full-table scans and JSON-parse every payload to match `turn_id` in Python — grows unbounded with the event log. Unblocked now that `spine/migrations.py` exists — land it as a new migration (`ALTER TABLE events ADD COLUMN turn_id` + index + backfill).
+- [ ] **P2 - Make provider switching request-scoped.** `POST /api/config` mutates process-global `os.environ["LLM_PROVIDER"]` (`config.py:61`) — races with in-flight turns and permanently overrides the auto-pick logic for the life of the process. Move to app-state or per-request scoping. Related: `Settings` re-reads `os.getenv` on every property access (config.py:20-55).
+
+## Integrations layer
+
+- [ ] **P2 - Shared HTTP retry/timeout for adapters.** `JsonHttpClient.request` (`integrations/http.py:67-77`) is `urlopen(req, timeout=12)` — hardcoded timeout, no retry for transient 5xx (Medusa/OpenBoxes hand-roll a 401 re-login but nothing covers timeouts/5xx). `akeneo.py:78` bypasses the shared client entirely with its own `urlopen`. Add configurable timeout + bounded retry in one place; route Akeneo through it.
+
+## Test gaps
+
+- [ ] **P2 - Add error-path coverage.** The ~7k-line suite is 100% happy-path: zero 4xx/5xx status assertions, zero exception-path tests. Start with the routes that remap `{"error"}` dicts to HTTPException.
+- [ ] **P2 - Cover the untested modules.** Zero tests reference: all three LLM providers, `config.py` (`Settings`/`set_provider`), `integrations/http.py` (JsonHttpClient), and the chat SSE route (`routes/chat.py` has no TestClient exercise). The stop-reason classifier and stuck-loop guard in `agents/base.py` have tests; the providers feeding them don't.
+- [ ] **P2 - Bootstrap frontend component tests.** Partially done — vitest + `src/__tests__/apiFetch.test.ts` landed via PR #43. Still missing: Testing Library + component tests. Original finding: zero test files; no vitest/testing-library in package.json — yet components already carry `data-testid` hooks (`Chat.tsx:130,138,175,211`). Add vitest + Testing Library starting with Chat's SSE handling. (Overlaps the 2026-05-03 "focused UI tests" item — this is the missing tooling prerequisite.)
+
+## Housekeeping
+
+- [ ] **P2 - Decide where `startup-pack/` lives.** Business docs (pitch deck, financial model, incorporation, legal) sitting untracked in the code repo — commit deliberately, move to another repo, or `.gitignore` before it lands in a commit by accident.
+
+## Reinforces existing 2026-05-03 audit items (no new checkboxes)
+
+> Status after merging PR #43: migrations, durable jobs, apply-semantics normalization and response models are **done**; the evidence below is kept for the parts that are still open (uncapped improvement-auditor thread, legacy unguarded `fetch` calls, raw `dict` request bodies).
+
+- **Schema migrations (P1, open):** new evidence — CLAUDE.md already documents the intended `migrations.py` design (append-only `(version, description, sql)` tuples + `schema_version`); the `turn_id` column item above is blocked on it.
+- **Durable job tracking (P1, open):** new evidence — `routes/improvements.py:40` starts an uncapped daemon `Thread` per `/run` call; combined with no SQLite busy_timeout this is a live lock-contention source. CLAUDE.md already documents the intended `spine/jobs.py` contract.
+- **Normalize integration apply semantics (P1, open):** new evidence — `apply_outbound` is ~50 near-identical lines in six adapters (`erpnext.py:291-355`, `medusa.py:306-362`, `shopify.py:417-471`, plus akeneo/mautic/openboxes); `_cache`/`_payload_marker`/the `sync_inbound` try-except guard repeat in all seven (`_payload_marker` byte-identical in shopify.py:485-491 vs medusa.py:374-385). Template method in `base.py`; adapters keep only `_dispatch_outbound` + action types. Note these live paths only run under `RUN_LIVE_TESTS=1`, so the duplication is effectively unexercised in CI.
+- **Centralize frontend fetch/error handling (P1, open):** new evidence — 38 `fetch` calls, only 17 `r.ok` guards; the older core endpoints (`getConfig` api.ts:208, `listEvents` 222, `getKpis` 241, …) call `r.json()` unguarded while newer blocks (468-617) check — split-brained error handling. Consider generating types from FastAPI's OpenAPI schema (openapi-typescript) instead of the ~50 hand-redeclared mirrors.
+- **API response models (P1, open):** extend scope to *request* bodies too — `wiki.py:50,59,70` and `integrations.py:70` take raw `dict` bodies read via `.get()`; the Mautic webhook ingests an unvalidated external dict straight into `cache_record`.
+
+---
 
 Shipped track history (tracks 1-7) moved to [`docs/roadmap/HISTORY.md`](docs/roadmap/HISTORY.md). This file keeps the active queue + active rollouts.
 

@@ -192,6 +192,13 @@ export default function Chat({ onEvent }: Props) {
                       {(e.data as { result: { artifact_id: string } }).result.artifact_id}
                     </span>
                   )}
+                {e.kind === "agent_end" && (e.data as { note?: string })?.note && (
+                  <span
+                    className={(e.data as { incomplete?: boolean }).incomplete ? "detail warn" : "detail"}
+                  >
+                    ⚠ {(e.data as { note: string }).note}
+                  </span>
+                )}
               </div>
             ))}
           </aside>

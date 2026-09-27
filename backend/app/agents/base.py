@@ -2,6 +2,7 @@
 loop call_llm → execute tool calls → feed results back until stop."""
 
 import json
+from collections import Counter
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
@@ -17,6 +18,35 @@ class AgentEvent:
     data: dict
 
 
+def _classify_stop_reason(raw: str) -> str:
+    """Collapse a provider-native `stop_reason` into a canonical category.
+
+    Each provider speaks a different dialect — Anthropic ("max_tokens",
+    "refusal", "model_context_window_exceeded"), OpenAI ("length",
+    "content_filter"), Google ("FinishReason.MAX_TOKENS", "SAFETY"). We only
+    care about three buckets when the model finishes WITHOUT tool calls:
+
+      "end_turn"   — a clean, complete answer
+      "max_tokens" — the answer was truncated / the context was exhausted
+      "refusal"    — the model declined (refusal / safety / content filter)
+      "other"      — a recognised but non-terminal value (e.g. "tool_use")
+      ""           — provider reported nothing
+
+    Anything in the truncation/refusal buckets means the final text is NOT a
+    trustworthy complete answer and the loop flags it as incomplete.
+    """
+    s = (raw or "").strip().lower()
+    if not s:
+        return ""
+    if "max_token" in s or s == "length" or "model_context_window" in s:
+        return "max_tokens"
+    if "refus" in s or "safety" in s or "content_filter" in s or "recitation" in s:
+        return "refusal"
+    if "end_turn" in s or "stop_sequence" in s or s == "stop" or s.endswith(".stop"):
+        return "end_turn"
+    return "other"
+
+
 class Agent:
     def __init__(
         self,
@@ -25,17 +55,23 @@ class Agent:
         tools: list[Tool],
         tool_impls: dict[str, Callable[[dict], dict]],
         max_iters: int = 10,
+        repeat_limit: int = 3,
     ):
         self.name = name
         self.system_prompt = system_prompt
         self.tools = tools
         self.tool_impls = tool_impls
         self.max_iters = max_iters
+        # Stuck-loop guard: a single (tool name + identical input) signature is
+        # allowed to run at most `repeat_limit` times before the loop bails out
+        # instead of burning every remaining iteration on a no-progress cycle.
+        self.repeat_limit = repeat_limit
 
     def run(self, user_input: str, llm: LLMProvider) -> Iterator[AgentEvent]:
         yield AgentEvent("agent_start", self.name, {"input": user_input})
         messages: list[Message] = [Message(role="user", content=user_input)]
         final_text = ""
+        call_counts: Counter[str] = Counter()
         for _ in range(self.max_iters):
             try:
                 turn = llm.chat(self.system_prompt, messages, self.tools)
@@ -48,15 +84,39 @@ class Agent:
                 final_text = turn.text
 
             if not turn.tool_calls:
-                yield AgentEvent("agent_end", self.name, {"text": final_text})
+                # The model is done calling tools. Whether this is a *complete*
+                # answer depends on why it stopped — a truncated or refused turn
+                # must not be presented as a clean final answer.
+                data: dict = {"text": final_text}
+                reason = _classify_stop_reason(turn.stop_reason)
+                if reason == "max_tokens":
+                    data["note"] = "stopped: response truncated (max tokens / context limit reached)"
+                    data["incomplete"] = True
+                elif reason == "refusal":
+                    data["note"] = "stopped: model declined to respond (refusal / safety filter)"
+                    data["incomplete"] = True
+                yield AgentEvent("agent_end", self.name, data)
                 return
 
             messages.append(Message(role="assistant", content=turn.raw_blocks))
             tool_result_blocks: list[dict] = []
+            stuck_tool: str | None = None
             for tc in turn.tool_calls:
-                impl = self.tool_impls.get(tc.name)
+                sig = f"{tc.name}:{json.dumps(tc.input, sort_keys=True, default=str)}"
+                call_counts[sig] += 1
                 yield AgentEvent("tool_call", self.name, {"tool": tc.name, "input": tc.input, "id": tc.id})
-                if impl is None:
+                impl = self.tool_impls.get(tc.name)
+                if call_counts[sig] > self.repeat_limit:
+                    # Don't re-execute — feed back an error block so the model
+                    # sees the suppression, then end the run after this turn.
+                    stuck_tool = tc.name
+                    result = {
+                        "error": (
+                            f"stuck-loop guard: '{tc.name}' already called "
+                            f"{self.repeat_limit} times with identical input; not re-executed"
+                        )
+                    }
+                elif impl is None:
                     result = {"error": f"unknown tool: {tc.name}"}
                 else:
                     try:
@@ -73,5 +133,16 @@ class Agent:
                     }
                 )
             messages.append(Message(role="tool", content=tool_result_blocks))
+
+            if stuck_tool is not None:
+                yield AgentEvent(
+                    "agent_end",
+                    self.name,
+                    {
+                        "text": final_text,
+                        "note": f"stopped: stuck loop (repeated identical call to '{stuck_tool}')",
+                    },
+                )
+                return
 
         yield AgentEvent("agent_end", self.name, {"text": final_text, "note": "max iterations reached"})
