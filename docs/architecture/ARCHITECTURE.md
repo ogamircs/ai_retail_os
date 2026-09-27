@@ -6,7 +6,7 @@
 
 This document is the load-bearing reference for how the cockpit fits
 together. Read it before non-trivial changes. The high-level
-[`CLAUDE.md`](../../CLAUDE.md) is the elevator pitch; this is the
+[`AGENTS.md`](../../AGENTS.md) is the elevator pitch; this is the
 floor plan.
 
 ---
