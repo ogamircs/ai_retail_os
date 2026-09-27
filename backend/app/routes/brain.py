@@ -7,11 +7,12 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 
 from app.llm.mcp import get_client
+from app.schemas import BrainStatus
 
 router = APIRouter()
 
 
-@router.get("/api/brain/status")
+@router.get("/api/brain/status", response_model=BrainStatus)
 def brain_status():
     """Track 6 G5 — cockpit-side surface for the GBrain integration.
 

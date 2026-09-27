@@ -31,7 +31,8 @@ MLFLOW_COMPOSE := docker compose -p ai-retail-mlflow -f $(MLFLOW_DIR)/docker-com
         mlflow-up mlflow-down mlflow-logs mlflow-status mlflow-nuke \
         shopify-seed \
         test test-live test-live-erpnext test-live-mautic test-live-medusa test-live-openboxes test-live-akeneo test-live-superset test-live-shopify \
-        check lint typecheck frontend-check
+        check lint typecheck frontend-check \
+        reset-demo artifacts-prune
 
 help:
 	@echo "ERPNext:"
@@ -311,11 +312,38 @@ typecheck:
 	cd backend && ./.venv/bin/pyright
 
 frontend-check:
-	cd frontend && npm run typecheck && npm run build
+	cd frontend && npm run typecheck && npm run test && npm run build
 
 check: lint typecheck test frontend-check
 	@echo ""
 	@echo "✓ check passed — lint clean, types green, tests pass, frontend builds"
+
+# ---- Demo-world reset -----------------------------------------------------
+# `make reset-demo` is the single documented "blow it away" path:
+#   1. Drop spine.db so migrations re-bootstrap from scratch.
+#   2. Re-seed substrate.
+#   3. Prune accumulated markdown artifacts (kept under retention).
+#
+# Live-system stacks (ERPNext / Mautic / etc.) are NOT touched — their
+# own *-nuke targets handle that, and we don't want a single command to
+# wipe customer data.
+
+reset-demo:
+	rm -f backend/data/spine.db
+	cd backend && ./.venv/bin/python -m app.substrate.seed
+	$(MAKE) artifacts-prune
+	@echo ""
+	@echo "✓ demo world reset — spine.db reseeded, artifacts pruned"
+
+# `artifacts/` accumulates one markdown file per agent emission. Demos
+# that run for weeks easily build up 1000+ files. `ARTIFACTS_RETAIN`
+# controls how many of the most recent files survive the prune.
+ARTIFACTS_RETAIN ?= 200
+
+artifacts-prune:
+	@cd backend/artifacts 2>/dev/null && ls -t *.md 2>/dev/null | tail -n +$$(($(ARTIFACTS_RETAIN) + 1)) | xargs -I {} rm -f {} && \
+		echo "  pruned artifacts/ to most recent $(ARTIFACTS_RETAIN) files" || \
+		echo "  artifacts/ empty or missing — nothing to prune"
 
 # Track 6 — GBrain. Not a docker-compose stack — GBrain is a Bun-native
 # CLI installed via `git clone + bun install + bun link`. These targets

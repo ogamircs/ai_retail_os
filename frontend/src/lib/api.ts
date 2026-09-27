@@ -1,7 +1,67 @@
+/** Free-form payload bag. Use `unknown` instead of `any` so callers
+ *  must narrow before reading — catches typos at the cockpit boundary
+ *  where the server's response model has already validated shape. */
+export type JsonObject = { [key: string]: unknown };
+
+/** Raised by `apiFetch` when the response isn't 2xx or JSON parsing
+ *  fails. Carries the HTTP status + URL so the cockpit can render a
+ *  consistent red chip. */
+export class ApiError extends Error {
+  status: number;
+  url: string;
+  constructor(message: string, status: number, url: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.url = url;
+  }
+}
+
+/** Typed JSON fetch with consistent error handling.
+ *
+ *  - Non-2xx → throws ApiError carrying status + url.
+ *  - JSON parse failure → throws ApiError(0, url).
+ *  - Otherwise → returns parsed body cast to T.
+ *
+ *  Callers should `try/catch (ApiError)` and surface `.message` to the
+ *  user. `.status === 0` means "request never landed" (network or
+ *  malformed body); `.status === 422` is the cockpit's "external apply
+ *  rejected" path. */
+export async function apiFetch<T>(
+  url: string,
+  init?: RequestInit,
+): Promise<T> {
+  let resp: Response;
+  try {
+    resp = await fetch(url, init);
+  } catch (err) {
+    throw new ApiError(`network error: ${(err as Error).message}`, 0, url);
+  }
+  if (!resp.ok) {
+    let detail = resp.statusText;
+    try {
+      const body = await resp.text();
+      if (body) detail = body;
+    } catch {
+      // ignore — fall back to statusText
+    }
+    throw new ApiError(`HTTP ${resp.status}: ${detail}`, resp.status, url);
+  }
+  try {
+    return (await resp.json()) as T;
+  } catch (err) {
+    throw new ApiError(
+      `failed to parse JSON: ${(err as Error).message}`,
+      0,
+      url,
+    );
+  }
+}
+
 export type AgentEvent = {
   kind: string;
   agent: string;
-  data: Record<string, any>;
+  data: JsonObject;
 };
 
 export type SpineEvent = {
@@ -10,7 +70,7 @@ export type SpineEvent = {
   agent: string;
   kind: string;
   sku: string | null;
-  payload: Record<string, any>;
+  payload: JsonObject;
   artifact_id: string | null;
 };
 
@@ -123,7 +183,7 @@ export type ActionItem = {
   action_type: string;
   title: string;
   status: string;
-  payload: Record<string, any>;
+  payload: JsonObject;
   artifact_id: string | null;
   external_actions?: ExternalAction[];
 };
@@ -139,8 +199,8 @@ export type ExternalAction = {
   status: string;
   external_domain: string;
   external_id: string | null;
-  payload: Record<string, any>;
-  result: Record<string, any>;
+  payload: JsonObject;
+  result: JsonObject;
   requires_approval: boolean;
 };
 
@@ -155,7 +215,7 @@ export type IntegrationSystem = {
   last_sync_ts: string | null;
   last_error: string | null;
   docs_url: string;
-  metadata: Record<string, any>;
+  metadata: JsonObject;
   pending_actions: number;
   applied_actions: number;
 };
@@ -169,7 +229,7 @@ export type SyncRun = {
   records_read: number;
   records_written: number;
   error: string | null;
-  summary: Record<string, any>;
+  summary: JsonObject;
 };
 
 export type InventorySku = {
@@ -417,7 +477,7 @@ export async function listPinnedWikiPages(): Promise<WikiPage[]> {
 
 export async function syncIntegration(systemId: string): Promise<{
   sync_run: SyncRun;
-  result: Record<string, any>;
+  result: JsonObject;
 }> {
   const r = await fetch(`/api/integrations/${systemId}/sync`, {
     method: "POST",
@@ -461,7 +521,7 @@ export type ImprovementRun = {
   started_ts: string;
   ended_ts: string | null;
   status: "running" | "ok" | "error";
-  summary: Record<string, any>;
+  summary: JsonObject;
   error: string | null;
 };
 
@@ -581,7 +641,7 @@ export type DspyJob = {
   status: "running" | "ok" | "error";
   started_at?: string;
   ended_at?: string;
-  summary?: Record<string, any>;
+  summary?: JsonObject;
   error?: string;
 };
 

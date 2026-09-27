@@ -79,10 +79,11 @@ export default function Chat({ onEvent }: Props) {
           if (last.role !== "assistant") return copy;
           const events = [...(last.events || []), ev];
           let text = last.text;
+          const data = ev.data as { text?: string } | undefined;
           if (ev.kind === "agent_end" && ev.agent === "Chief of Staff") {
-            text = ev.data?.text || text;
+            text = data?.text || text;
           } else if (ev.kind === "text" && ev.agent === "Chief of Staff" && !text) {
-            text = ev.data?.text || "";
+            text = data?.text || "";
           }
           copy[copy.length - 1] = { ...last, text, events };
           return copy;
@@ -181,13 +182,21 @@ export default function Chat({ onEvent }: Props) {
                   {e.agent}
                 </span>
                 <span className="kind">{e.kind}</span>
-                {e.kind === "tool_call" && <span className="detail">→ {e.data?.tool}</span>}
-                {e.kind === "tool_result" && e.data?.result?.artifact_id && (
-                  <span className="detail">→ artifact {e.data.result.artifact_id}</span>
+                {e.kind === "tool_call" && (
+                  <span className="detail">→ {String((e.data as { tool?: string })?.tool ?? "")}</span>
                 )}
-                {e.kind === "agent_end" && e.data?.note && (
-                  <span className={e.data?.incomplete ? "detail warn" : "detail"}>
-                    ⚠ {e.data.note}
+                {e.kind === "tool_result" &&
+                  (e.data as { result?: { artifact_id?: string } })?.result?.artifact_id && (
+                    <span className="detail">
+                      → artifact{" "}
+                      {(e.data as { result: { artifact_id: string } }).result.artifact_id}
+                    </span>
+                  )}
+                {e.kind === "agent_end" && (e.data as { note?: string })?.note && (
+                  <span
+                    className={(e.data as { incomplete?: boolean }).incomplete ? "detail warn" : "detail"}
+                  >
+                    ⚠ {(e.data as { note: string }).note}
                   </span>
                 )}
               </div>

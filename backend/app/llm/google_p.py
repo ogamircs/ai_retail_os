@@ -118,9 +118,10 @@ class GoogleProvider:
         # Track tool name → id mapping so subsequent tool_result events can be paired
         if resp.candidates and resp.candidates[0].content and resp.candidates[0].content.parts:
             for part in resp.candidates[0].content.parts:
-                if getattr(part, "text", None):
-                    text += part.text
-                    raw_blocks.append({"type": "text", "text": part.text})
+                part_text = getattr(part, "text", None)
+                if isinstance(part_text, str) and part_text:
+                    text += part_text
+                    raw_blocks.append({"type": "text", "text": part_text})
                 fc = getattr(part, "function_call", None)
                 if fc and fc.name:
                     call_id = f"call_{uuid.uuid4().hex[:12]}"
