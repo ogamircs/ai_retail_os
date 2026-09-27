@@ -7,6 +7,7 @@ def get_provider() -> LLMProvider:
     p = settings.provider
     key = settings.api_key
     model = settings.model
+    retries = settings.llm_max_retries
     if not key:
         raise RuntimeError(
             f"missing API key for provider '{p}' — set the corresponding env var in .env"
@@ -14,15 +15,15 @@ def get_provider() -> LLMProvider:
     if p == "anthropic":
         from app.llm.anthropic_p import AnthropicProvider
 
-        inner = AnthropicProvider(api_key=key, model=model)
+        inner = AnthropicProvider(api_key=key, model=model, max_retries=retries)
     elif p == "openai":
         from app.llm.openai_p import OpenAIProvider
 
-        inner = OpenAIProvider(api_key=key, model=model)
+        inner = OpenAIProvider(api_key=key, model=model, max_retries=retries)
     elif p == "google":
         from app.llm.google_p import GoogleProvider
 
-        inner = GoogleProvider(api_key=key, model=model)
+        inner = GoogleProvider(api_key=key, model=model, max_retries=retries)
     else:
         raise ValueError(f"unknown provider: {p}")
     # Track 4 M2: wrap with the MLflow tracing decorator if enabled.

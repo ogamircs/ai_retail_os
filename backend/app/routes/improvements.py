@@ -6,6 +6,7 @@ operator review."""
 
 from __future__ import annotations
 
+import os
 import threading
 import uuid
 
@@ -17,11 +18,27 @@ from app.schemas import ImprovementRunsResponse, ImprovementSuggestionsResponse
 
 router = APIRouter()
 
+# Each audit is a full LLM loop on its own daemon thread. Without a cap,
+# repeated clicks on the cockpit's [IMPROVE] button stack up threads that
+# all hit the LLM and the spine at once. Counted in-process (not from
+# `improvement_runs.status`) so a run orphaned by a restart can't block
+# new audits forever.
+_active_lock = threading.Lock()
+_active_audits = 0
+
+
+def _max_concurrent_audits() -> int:
+    try:
+        return max(1, int(os.getenv("IMPROVEMENT_AUDIT_MAX_CONCURRENT", "1")))
+    except ValueError:
+        return 1
+
 
 @router.post("/api/improvements/run")
 def improvements_run():
-    """Kick off an audit. Background thread; returns `{run_id}`. The
-    cockpit polls `/api/improvements/runs/{run_id}` for terminal
+    """Kick off an audit. Background thread; returns `{run_id}`, or 429
+    when `IMPROVEMENT_AUDIT_MAX_CONCURRENT` (default 1) audits are already
+    running. The cockpit polls `/api/improvements/runs/{run_id}` for terminal
     status and pulls suggestions from `/api/improvements/suggestions`.
     """
     try:
@@ -29,14 +46,34 @@ def improvements_run():
     except RuntimeError as e:
         raise HTTPException(500, str(e)) from e
 
+    global _active_audits
+    limit = _max_concurrent_audits()
+    with _active_lock:
+        if _active_audits >= limit:
+            raise HTTPException(
+                429, f"{_active_audits} improvement audit(s) already running (limit {limit}); wait for it to finish"
+            )
+        _active_audits += 1
+
+    def _release() -> None:
+        global _active_audits
+        with _active_lock:
+            _active_audits -= 1
+
     run_id = uuid.uuid4().hex[:12]
-    ia.create_run(run_id)
+    try:
+        ia.create_run(run_id)
+    except Exception:
+        _release()
+        raise
 
     def _worker():
         try:
             ia.run_audit(run_id, llm)
         except Exception as exc:  # noqa: BLE001
             ia.complete_run(run_id, {"phase": "worker"}, error=str(exc))
+        finally:
+            _release()
 
     threading.Thread(
         target=_worker, daemon=True, name=f"improvement-audit-{run_id}"

@@ -3,7 +3,7 @@ __pycache__/
 .venv/
 .env
 node_modules/
-backend/data/spine.db
+backend/data/spine.db*
 artifacts/*.md
 !artifacts/.gitkeep
 .DS_Store

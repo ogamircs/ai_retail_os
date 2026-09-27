@@ -54,6 +54,17 @@ class Settings:
             return os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
         return None
 
+    @property
+    def llm_max_retries(self) -> int:
+        """Retries per LLM call on transient failures (429 / 5xx / timeouts /
+        connection errors), handled by each SDK's built-in exponential
+        backoff, which honors `retry-after`. One failed call otherwise aborts
+        a whole multi-specialist Chief turn."""
+        try:
+            return max(0, int(os.getenv("LLM_MAX_RETRIES", "4")))
+        except ValueError:
+            return 4
+
     def set_provider(self, provider: str) -> None:
         provider = provider.lower()
         if provider not in ("anthropic", "openai", "google"):
